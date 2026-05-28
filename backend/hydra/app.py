@@ -16,6 +16,7 @@ from hydra.schemas import (
     ClaimCreateRequest,
     ClaimDetectRequest,
     NoteCreateRequest,
+    NoteUpdateRequest,
     ProviderSettingsRequest,
     ResearchRequest,
     SourceSearchRequest,
@@ -242,6 +243,38 @@ def create_app() -> FastAPI:
     @app.get("/api/notes")
     def list_notes(http_request: Request, query: str | None = None) -> dict[str, object]:
         return {"notes": _store(http_request).search_notes(query)}
+
+    @app.get("/api/notes/graph")
+    def get_notes_graph(http_request: Request) -> dict[str, object]:
+        return _store(http_request).get_graph()
+
+    @app.get("/api/notes/{note_id}")
+    def get_note(note_id: str, http_request: Request) -> dict[str, object]:
+        note = _store(http_request).get_note(note_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        return note
+
+    @app.put("/api/notes/{note_id}")
+    def update_note(note_id: str, request: NoteUpdateRequest, http_request: Request) -> dict[str, object]:
+        note = _store(http_request).update_note(note_id, request.title, request.body, request.source_id)
+        if not note:
+            raise HTTPException(status_code=404, detail="Note not found")
+        _store(http_request).add_event("note.updated", f"Updated note {request.title}")
+        return note
+
+    @app.delete("/api/notes/{note_id}")
+    def delete_note(note_id: str, http_request: Request) -> dict[str, object]:
+        success = _store(http_request).delete_note(note_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Note not found")
+        _store(http_request).add_event("note.deleted", f"Deleted note {note_id}")
+        return {"status": "success"}
+
+    @app.get("/api/notes/{note_id}/links")
+    def get_note_links(note_id: str, http_request: Request) -> dict[str, object]:
+        return _store(http_request).get_note_links(note_id)
+
 
     @app.post("/api/tasks")
     def create_task(request: TaskCreateRequest, http_request: Request) -> dict[str, object]:

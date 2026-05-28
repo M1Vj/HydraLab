@@ -270,20 +270,179 @@ class Store:
         self.conn.commit()
         return row
 
+    def get_note(self, note_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+        return dict(row) if row else None
+
     def search_notes(self, query: str | None = None) -> list[dict[str, Any]]:
         if query:
-            rows = self.conn.execute(
-                """
-                SELECT notes.* FROM notes_fts
-                JOIN notes ON notes.id = notes_fts.id
-                WHERE notes_fts MATCH ?
-                ORDER BY notes.updated_at DESC
-                """,
-                (query,),
-            ).fetchall()
+            try:
+                rows = self.conn.execute(
+                    """
+                    SELECT notes.* FROM notes_fts
+                    JOIN notes ON notes.id = notes_fts.id
+                    WHERE notes_fts MATCH ?
+                    ORDER BY notes.updated_at DESC
+                    """,
+                    (query,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                q = f"%{query}%"
+                rows = self.conn.execute(
+                    """
+                    SELECT * FROM notes
+                    WHERE title LIKE ? OR body LIKE ?
+                    ORDER BY updated_at DESC
+                    """,
+                    (q, q),
+                ).fetchall()
         else:
             rows = self.conn.execute("SELECT * FROM notes ORDER BY updated_at DESC").fetchall()
         return [dict(row) for row in rows]
+
+    def update_note(self, note_id: str, title: str, body: str, source_id: str | None = None) -> dict[str, Any] | None:
+        current = self.get_note(note_id)
+        if current is None:
+            return None
+        now = time.time()
+        self.conn.execute(
+            "UPDATE notes SET title = ?, body = ?, source_id = ?, updated_at = ? WHERE id = ?",
+            (title, body, source_id, now, note_id)
+        )
+        self.conn.execute(
+            "UPDATE notes_fts SET title = ?, body = ? WHERE id = ?",
+            (title, body, note_id)
+        )
+        self.conn.commit()
+        return self.get_note(note_id)
+
+    def delete_note(self, note_id: str) -> bool:
+        current = self.get_note(note_id)
+        if current is None:
+            return False
+        self.conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        self.conn.execute("DELETE FROM notes_fts WHERE id = ?", (note_id,))
+        self.conn.commit()
+        return True
+
+    def get_graph(self) -> dict[str, Any]:
+        notes = self.search_notes()
+        sources = self.list_sources()
+        tasks = self.list_tasks()
+        claims = self.list_claims()
+        conversations = self.list_conversations()
+
+        nodes = []
+        id_map = {}
+
+        for n in notes:
+            nodes.append({"id": n["id"], "title": n["title"], "type": "note"})
+            id_map[n["id"]] = ("note", n["title"])
+            id_map[n["title"].lower()] = ("note", n["id"])
+
+        for s in sources:
+            nodes.append({"id": s["id"], "title": s["title"], "type": "source"})
+            id_map[s["id"]] = ("source", s["title"])
+            id_map[s["title"].lower()] = ("source", s["id"])
+
+        for t in tasks:
+            nodes.append({"id": t["id"], "title": t["title"], "type": "task"})
+            id_map[t["id"]] = ("task", t["title"])
+            id_map[t["title"].lower()] = ("task", t["id"])
+
+        for c in claims:
+            nodes.append({"id": c["id"], "title": c["text"][:50], "type": "claim"})
+            id_map[c["id"]] = ("claim", c["text"])
+            id_map[c["text"].lower()] = ("claim", c["id"])
+
+        for conv in conversations:
+            nodes.append({"id": conv["id"], "title": conv["title"], "type": "conversation"})
+            id_map[conv["id"]] = ("conversation", conv["title"])
+
+        links = []
+        seen_links = set()
+
+        def add_link(source_id: str, target_id: str, rel_type: str):
+            if not source_id or not target_id:
+                return
+            if source_id == target_id:
+                return
+            link_key = (source_id, target_id, rel_type)
+            if link_key not in seen_links:
+                seen_links.add(link_key)
+                links.append({"source": source_id, "target": target_id, "type": rel_type})
+
+        for n in notes:
+            if n.get("source_id"):
+                add_link(n["id"], n["source_id"], "references")
+
+        evidence = self.list_evidence()
+        for e in evidence:
+            add_link(e["claim_id"], e["source_id"], "evidence")
+            if e.get("citation_id"):
+                add_link(e["claim_id"], e["citation_id"], "citation")
+
+        import re
+        wiki_pattern = r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]"
+
+        for n in notes:
+            body = n.get("body") or ""
+            matches = re.findall(wiki_pattern, body)
+            for match in matches:
+                match_val = match.strip()
+                match_lower = match_val.lower()
+                if match_val in id_map:
+                    add_link(n["id"], match_val, "wiki")
+                elif match_lower in id_map:
+                    _, target_id = id_map[match_lower]
+                    add_link(n["id"], target_id, "wiki")
+
+        for t in tasks:
+            detail = t.get("detail") or ""
+            matches = re.findall(wiki_pattern, detail)
+            for match in matches:
+                match_val = match.strip()
+                match_lower = match_val.lower()
+                if match_val in id_map:
+                    add_link(t["id"], match_val, "wiki")
+                elif match_lower in id_map:
+                    _, target_id = id_map[match_lower]
+                    add_link(t["id"], target_id, "wiki")
+
+        return {"nodes": nodes, "links": links}
+
+    def get_note_links(self, note_id: str) -> dict[str, Any]:
+        graph = self.get_graph()
+        forward = []
+        backlinks = []
+
+        nodes_map = {n["id"]: n for n in graph["nodes"]}
+
+        for link in graph["links"]:
+            if link["source"] == note_id:
+                target_node = nodes_map.get(link["target"])
+                if target_node:
+                    forward.append({
+                        "id": target_node["id"],
+                        "title": target_node["title"],
+                        "type": target_node["type"],
+                        "relation": link["type"]
+                    })
+            elif link["target"] == note_id:
+                source_node = nodes_map.get(link["source"])
+                if source_node:
+                    backlinks.append({
+                        "id": source_node["id"],
+                        "title": source_node["title"],
+                        "type": source_node["type"],
+                        "relation": link["type"]
+                    })
+
+        return {
+            "forward": forward,
+            "backlinks": backlinks
+        }
+
 
     def add_task(self, title: str, column: str, detail: str = "") -> dict[str, Any]:
         now = time.time()
