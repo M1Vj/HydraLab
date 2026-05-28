@@ -18,6 +18,7 @@ from hydra.schemas import (
     NoteCreateRequest,
     NoteUpdateRequest,
     ProviderSettingsRequest,
+    SettingsUpdateRequest,
     ResearchRequest,
     SourceSearchRequest,
     TaskCreateRequest,
@@ -344,8 +345,121 @@ def create_app() -> FastAPI:
         return settings
 
     @app.get("/api/settings")
-    def settings(http_request: Request) -> dict[str, object]:
-        return {"provider_settings": _store(http_request).list_provider_settings()}
+    def get_settings(http_request: Request) -> dict[str, object]:
+        store = _store(http_request)
+        return {
+            "provider_settings": store.list_provider_settings(),
+            "workspace_preferences": store.list_settings(),
+        }
+
+    @app.post("/api/settings")
+    def post_settings(request: SettingsUpdateRequest, http_request: Request) -> dict[str, object]:
+        store = _store(http_request)
+        if request.provider_settings is not None:
+            for p in request.provider_settings:
+                store.save_provider_settings(p.provider, p.model, p.api_key_ref)
+        if request.workspace_preferences is not None:
+            for k, v in request.workspace_preferences.items():
+                store.save_setting(k, v)
+        store.add_event("settings.updated", "Saved settings and workspace preferences")
+        return {
+            "provider_settings": store.list_provider_settings(),
+            "workspace_preferences": store.list_settings(),
+        }
+
+    @app.get("/api/export/preview")
+    def export_preview(http_request: Request) -> dict[str, object]:
+        store = _store(http_request)
+        notes = store.search_notes()
+        citations = store.list_citations()
+        tasks = store.list_tasks()
+        sources = store.list_sources()
+        
+        # Build file list
+        files = []
+        for n in notes:
+            safe_title = "".join(c for c in n["title"] if c.isalnum() or c in (" ", "_", "-")).rstrip() or f"note_{n['id']}"
+            files.append(f"notes/{safe_title}.md")
+        files.append("citations.md")
+        files.append("tasks.md")
+        files.append("metadata.json")
+        
+        return {
+            "files": files,
+            "counts": {
+                "notes": len(notes),
+                "citations": len(citations),
+                "tasks": len(tasks),
+                "sources": len(sources)
+            },
+            "notes_preview": [{"id": n["id"], "title": n["title"]} for n in notes[:5]],
+            "tasks_preview": [{"id": t["id"], "title": t["title"]} for t in tasks[:5]]
+        }
+
+    @app.post("/api/export")
+    def export_workspace_zip(http_request: Request) -> StreamingResponse:
+        import zipfile
+        import io
+        import json
+        
+        store = _store(http_request)
+        buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            # Notes
+            notes = store.search_notes()
+            for note in notes:
+                safe_title = "".join(c for c in note["title"] if c.isalnum() or c in (" ", "_", "-")).rstrip()
+                if not safe_title:
+                    safe_title = f"note_{note['id']}"
+                filename = f"notes/{safe_title}.md"
+                content = f"# {note['title']}\n\n{note['body']}"
+                zip_file.writestr(filename, content)
+
+            # Citations
+            citations = store.list_citations()
+            sources = store.list_sources()
+            sources_map = {s["id"]: s for s in sources}
+            citations_md = ["# Citations\n"]
+            for cit in citations:
+                src = sources_map.get(cit["source_id"])
+                src_title = src["title"] if src else "Unknown Source"
+                citations_md.append(f"### Source: {src_title}\n> {cit['text']}\n")
+            zip_file.writestr("citations.md", "\n".join(citations_md))
+
+            # Tasks
+            tasks = store.list_tasks()
+            tasks_md = ["# Kanban Tasks\n", "| Column | Position | Progress | Title | Detail | Phase |", "| --- | --- | --- | --- | --- | --- |"]
+            for t in tasks:
+                col = t.get("column") or "to_do"
+                pos = t.get("position") or 0
+                prog = t.get("progress") or 0
+                title = t.get("title") or ""
+                detail = t.get("detail") or ""
+                phase = t.get("phase_indicator") or ""
+                tasks_md.append(f"| {col} | {pos} | {prog}% | {title} | {detail} | {phase} |")
+            zip_file.writestr("tasks.md", "\n".join(tasks_md))
+
+            # Raw scrubbed JSON
+            raw_data = {
+                "sources": sources,
+                "notes": notes,
+                "tasks": tasks,
+                "citations": citations,
+                "evidence": store.list_evidence(),
+                "events": store.list_events(),
+                "settings": store.list_settings(),
+                "provider_settings": store.list_provider_settings(),
+            }
+            zip_file.writestr("metadata.json", json.dumps(raw_data, indent=2))
+            
+        buffer.seek(0)
+        store.add_event("workspace.exported", "Exported workspace as ZIP archive")
+        return StreamingResponse(
+            buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=hydra_export.zip"}
+        )
 
     @app.get("/api/export/workspace")
     def export_workspace(http_request: Request) -> dict[str, object]:
