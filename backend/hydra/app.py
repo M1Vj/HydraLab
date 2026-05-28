@@ -11,7 +11,9 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from hydra.research import citation_for, compose_research_answer, search_academic_sources
 from hydra.schemas import (
+    EvidenceCreateRequest,
     NoteCreateRequest,
+    ProviderSettingsRequest,
     ResearchRequest,
     SourceSearchRequest,
     TaskCreateRequest,
@@ -81,6 +83,16 @@ def create_app() -> FastAPI:
         _store(http_request).add_event("writing.review.completed", "Reviewed draft text")
         return result
 
+    @app.post("/api/evidence")
+    def create_evidence(request: EvidenceCreateRequest, http_request: Request) -> dict[str, object]:
+        evidence = _store(http_request).add_evidence(**request.model_dump())
+        _store(http_request).add_event("evidence.linked", f"Linked evidence for claim: {request.claim[:80]}")
+        return evidence
+
+    @app.get("/api/evidence")
+    def list_evidence(http_request: Request) -> dict[str, object]:
+        return {"evidence": _store(http_request).list_evidence()}
+
     @app.post("/api/notes")
     def create_note(request: NoteCreateRequest, http_request: Request) -> dict[str, object]:
         note = _store(http_request).add_note(request.title, request.body, request.source_id)
@@ -124,6 +136,24 @@ def create_app() -> FastAPI:
         sources = _store(http_request).list_sources()
         text = format_bibliography(sources, style)
         return PlainTextResponse(text)
+
+    @app.put("/api/settings/provider")
+    def save_provider_settings(request: ProviderSettingsRequest, http_request: Request) -> dict[str, object]:
+        settings = _store(http_request).save_provider_settings(
+            request.provider,
+            request.model,
+            request.api_key_ref,
+        )
+        _store(http_request).add_event("settings.provider.saved", f"Saved settings for {request.provider}")
+        return settings
+
+    @app.get("/api/settings")
+    def settings(http_request: Request) -> dict[str, object]:
+        return {"provider_settings": _store(http_request).list_provider_settings()}
+
+    @app.get("/api/export/workspace")
+    def export_workspace(http_request: Request) -> dict[str, object]:
+        return _store(http_request).export_workspace()
 
     return app
 
