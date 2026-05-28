@@ -28,8 +28,11 @@ class NoteUpdateRequest(BaseModel):
 
 class TaskCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    column: str = "To Do"
+    column: str = "to_do"
     detail: str = ""
+    progress: int = Field(default=0, ge=0, le=100)
+    phase_indicator: str = ""
+    position: int = 0
 
 
 class TaskUpdateRequest(BaseModel):
@@ -37,6 +40,8 @@ class TaskUpdateRequest(BaseModel):
     column: str | None = None
     detail: str | None = None
     progress: int | None = Field(default=None, ge=0, le=100)
+    phase_indicator: str | None = None
+    position: int | None = None
 
 
 class CitationCreateRequest(BaseModel):
