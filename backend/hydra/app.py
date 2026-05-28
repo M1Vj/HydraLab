@@ -295,6 +295,11 @@ def create_app() -> FastAPI:
     def export_workspace(http_request: Request) -> dict[str, object]:
         return _store(http_request).export_workspace()
 
+    @app.post("/api/reviews/analyze")
+    def analyze_review(request: WritingReviewRequest) -> dict[str, object]:
+        from hydra.writing import review_text
+        return review_text(request.text)
+
     return app
 
 

@@ -65,3 +65,10 @@ def test_sources_notes_tasks_paper_and_bibliography_flow(tmp_path, monkeypatch):
 
     bib = client.get("/api/export/bibliography", params={"style": "bibtex"}).text
     assert "@article" in bib or "@misc" in bib
+
+def test_reviews_analyze(client):
+    res = client.post("/api/reviews/analyze", json={"text": "This always proves the point!"})
+    assert res.status_code == 200
+    data = res.json()
+    assert "categories" in data
+    assert "unsupported_claims" in data
