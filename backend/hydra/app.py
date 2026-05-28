@@ -19,6 +19,9 @@ from hydra.schemas import (
     TaskCreateRequest,
     TaskUpdateRequest,
     WritingReviewRequest,
+    ChatCompletionRequest,
+    ConversationResponse,
+    ChatMessageResponse,
 )
 from hydra.storage import Store
 from hydra.writing import review_text
@@ -42,6 +45,45 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "phase": "1"}
+
+    @app.get("/api/chat/conversations")
+    def list_conversations(http_request: Request) -> dict[str, object]:
+        return {"conversations": _store(http_request).list_conversations()}
+
+    @app.get("/api/chat/conversations/{conversation_id}/messages")
+    def list_messages(conversation_id: str, http_request: Request) -> dict[str, object]:
+        return {"messages": _store(http_request).list_messages(conversation_id)}
+
+    @app.post("/api/chat/completions")
+    async def chat_completions(request: ChatCompletionRequest, http_request: Request) -> StreamingResponse:
+        store = _store(http_request)
+        conv_id = request.conversation_id
+        if not conv_id:
+            conv = store.create_conversation(request.message[:40] or "New Chat")
+            conv_id = conv["id"]
+        
+        store.add_message(conv_id, "user", request.message)
+        
+        async def stream() -> AsyncIterator[str]:
+            yield f"data: {json.dumps({'type': 'status', 'content': 'reading request...'})}\n\n"
+            
+            # Simulated dummy response for this branch since no real LLM call is required yet 
+            # (as per branch directions, we model status as events and stream them)
+            # We'll just stream a simulated status, then stream a response.
+            store.add_event("chat.status", "Thinking about the user query...")
+            yield f"data: {json.dumps({'type': 'status', 'content': 'searching memory...'})}\n\n"
+            
+            answer = f"I received your message: '{request.message}'. This is a mock response."
+            
+            store.add_message(conv_id, "assistant", answer)
+            
+            # Stream the answer in chunks
+            for word in answer.split(" "):
+                yield f"data: {json.dumps({'type': 'message', 'content': word + ' '})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conv_id})}\n\n"
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.post("/api/chat/research")
     async def research_chat(request: ResearchRequest, http_request: Request) -> dict[str, object]:

@@ -122,6 +122,41 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def create_conversation(self, title: str) -> dict[str, Any]:
+        row = {"id": new_id("conv"), "title": title, "created_at": time.time()}
+        self.conn.execute(
+            "INSERT INTO conversations (id, title, created_at) VALUES (:id, :title, :created_at)",
+            row,
+        )
+        self.conn.commit()
+        return row
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute("SELECT * FROM conversations ORDER BY created_at DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def add_message(self, conversation_id: str, role: str, content: str) -> dict[str, Any]:
+        row = {
+            "id": new_id("msg"),
+            "conversation_id": conversation_id,
+            "role": role,
+            "content": content,
+            "created_at": time.time()
+        }
+        self.conn.execute(
+            "INSERT INTO messages (id, conversation_id, role, content, created_at) VALUES (:id, :conversation_id, :role, :content, :created_at)",
+            row,
+        )
+        self.conn.commit()
+        return row
+
+    def list_messages(self, conversation_id: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+            (conversation_id,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def upsert_source(self, source: dict[str, Any]) -> dict[str, Any]:
         source = {
             "id": source.get("id") or new_id("src"),

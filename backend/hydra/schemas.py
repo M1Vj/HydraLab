@@ -45,4 +45,22 @@ class ProviderSettingsRequest(BaseModel):
     provider: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=160)
     api_key_ref: str = Field(default="", max_length=300)
-    api_key: str | None = Field(default=None, max_length=400)
+class ChatMessage(BaseModel):
+    role: str = Field(pattern="^(user|assistant|system)$")
+    content: str = Field(min_length=1)
+
+class ChatCompletionRequest(BaseModel):
+    conversation_id: str | None = None
+    message: str = Field(min_length=1)
+
+class ChatMessageResponse(BaseModel):
+    id: str
+    conversation_id: str
+    role: str
+    content: str
+    created_at: float
+
+class ConversationResponse(BaseModel):
+    id: str
+    title: str
+    created_at: float

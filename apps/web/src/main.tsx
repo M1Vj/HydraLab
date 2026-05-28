@@ -20,11 +20,80 @@ import "./styles.css";
 
 type ActivityType = "chat" | "sources" | "notes" | "tasks" | "settings";
 
+interface Message {
+  id: string;
+  role: string;
+  content: string;
+}
+
 function App() {
   const [activeActivity, setActiveActivity] = useState<ActivityType>("chat");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
   const [activeEditorTab, setActiveEditorTab] = useState("research-1");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inputValue, setInputValue] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [conversationId, setConversationId] = useState<string | null>(null);
+
+  const sendMessage = async () => {
+    if (!inputValue.trim() || isLoading) return;
+    const userMessage = { id: Date.now().toString(), role: "user", content: inputValue };
+    setMessages(prev => [...prev, userMessage]);
+    setInputValue("");
+    setIsLoading(true);
+    setStatusMessage("Starting request...");
+    
+    try {
+      const res = await fetch("http://localhost:8000/api/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: inputValue, conversation_id: conversationId })
+      });
+      
+      if (!res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      
+      let assistantMessage = { id: (Date.now() + 1).toString(), role: "assistant", content: "" };
+      setMessages(prev => [...prev, assistantMessage]);
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        const lines = chunk.split("\n\n");
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const dataStr = line.substring(6);
+          if (!dataStr) continue;
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.type === "status") {
+              setStatusMessage(data.content);
+            } else if (data.type === "message") {
+              assistantMessage.content += data.content;
+              setMessages(prev => {
+                const newMsgs = [...prev];
+                newMsgs[newMsgs.length - 1] = { ...assistantMessage };
+                return newMsgs;
+              });
+            } else if (data.type === "done") {
+              setConversationId(data.conversation_id);
+            }
+          } catch (e) {
+             console.error("Error parsing chunk", e, dataStr);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+      setStatusMessage("");
+    }
+  };
 
   const toggleSidebar = (activity: ActivityType) => {
     if (activeActivity === activity) {
@@ -136,11 +205,55 @@ function App() {
           <div className="editor-pane-container">
             <div className="editor-pane">
               {activeEditorTab === "research-1" && (
-                <div className="empty-state">
-                  <Sparkles />
-                  <h2>Hydra Research</h2>
-                  <p>Ask a question, upload a paper, or synthesize your notes. I will generate citations and trace claims back to their source.</p>
-                  <button>New Research Chat</button>
+                <div className="chat-interface" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+                  <div className="chat-messages" style={{ flex: 1, overflowY: "auto", padding: "20px" }}>
+                    {messages.length === 0 ? (
+                      <div className="empty-state">
+                        <Sparkles />
+                        <h2>Hydra Research</h2>
+                        <p>Ask a question, upload a paper, or synthesize your notes. I will generate citations and trace claims back to their source.</p>
+                      </div>
+                    ) : (
+                      messages.map(msg => (
+                        <div key={msg.id} style={{ marginBottom: "20px", textAlign: msg.role === "user" ? "right" : "left" }}>
+                          <div style={{
+                            display: "inline-block",
+                            padding: "10px 14px",
+                            borderRadius: "8px",
+                            backgroundColor: msg.role === "user" ? "var(--accent)" : "var(--bg-lighter)",
+                            color: msg.role === "user" ? "white" : "inherit",
+                            maxWidth: "80%"
+                          }}>
+                            {msg.content}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    {isLoading && statusMessage && (
+                      <div style={{ marginBottom: "20px", textAlign: "left", fontSize: "0.9em", color: "var(--fg-dim)", display: "flex", alignItems: "center", gap: "8px" }}>
+                        <div className="spinner" style={{ width: "12px", height: "12px", border: "2px solid var(--fg-dim)", borderTopColor: "transparent", borderRadius: "50%", animation: "spin 1s linear infinite" }}></div>
+                        {statusMessage}
+                      </div>
+                    )}
+                  </div>
+                  <div className="chat-input-area" style={{ padding: "20px", borderTop: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", gap: "10px" }}>
+                      <input 
+                        type="text" 
+                        value={inputValue}
+                        onChange={(e) => setInputValue(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+                        placeholder="Message Hydra..." 
+                        style={{ flex: 1, padding: "10px", borderRadius: "4px", border: "1px solid var(--border)", backgroundColor: "var(--bg-dark)", color: "var(--fg)" }}
+                      />
+                      <button onClick={sendMessage} disabled={isLoading} style={{ padding: "10px 20px", borderRadius: "4px", backgroundColor: "var(--accent)", color: "white", border: "none", cursor: isLoading ? "not-allowed" : "pointer" }}>
+                        Send
+                      </button>
+                    </div>
+                  </div>
+                  <style>{`
+                    @keyframes spin { 100% { transform: rotate(360deg); } }
+                  `}</style>
                 </div>
               )}
               {activeEditorTab === "notes-1" && (
