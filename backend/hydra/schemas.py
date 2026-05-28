@@ -30,3 +30,19 @@ class TaskUpdateRequest(BaseModel):
     column: str | None = None
     detail: str | None = None
     progress: int | None = Field(default=None, ge=0, le=100)
+
+
+class EvidenceCreateRequest(BaseModel):
+    claim: str = Field(min_length=1, max_length=1200)
+    source_id: str = Field(min_length=1, max_length=200)
+    passage: str = Field(min_length=1, max_length=4000)
+    support: str = Field(pattern="^(supported|weak|unsupported)$")
+    confidence: float = Field(ge=0, le=1)
+    review_status: str = Field(default="needs_review", pattern="^(needs_review|accepted|rejected)$")
+
+
+class ProviderSettingsRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=160)
+    api_key_ref: str = Field(default="", max_length=300)
+    api_key: str | None = Field(default=None, max_length=400)

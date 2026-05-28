@@ -55,6 +55,17 @@ class Store:
               quote TEXT NOT NULL DEFAULT '',
               created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS evidence_links (
+              id TEXT PRIMARY KEY,
+              claim TEXT NOT NULL,
+              source_id TEXT NOT NULL REFERENCES sources(id),
+              passage TEXT NOT NULL,
+              support TEXT NOT NULL,
+              confidence REAL NOT NULL,
+              review_status TEXT NOT NULL,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS notes (
               id TEXT PRIMARY KEY,
               title TEXT NOT NULL,
@@ -144,6 +155,50 @@ class Store:
         self.conn.commit()
         return row
 
+    def add_evidence(
+        self,
+        claim: str,
+        source_id: str,
+        passage: str,
+        support: str,
+        confidence: float,
+        review_status: str = "needs_review",
+    ) -> dict[str, Any]:
+        now = time.time()
+        row = {
+            "id": new_id("evd"),
+            "claim": claim,
+            "source_id": source_id,
+            "passage": passage,
+            "support": support,
+            "confidence": confidence,
+            "review_status": review_status,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO evidence_links
+              (id, claim, source_id, passage, support, confidence, review_status, created_at, updated_at)
+            VALUES
+              (:id, :claim, :source_id, :passage, :support, :confidence, :review_status, :created_at, :updated_at)
+            """,
+            row,
+        )
+        self.conn.commit()
+        return row
+
+    def list_evidence(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT evidence_links.*, sources.title AS source_title, sources.url AS source_url
+            FROM evidence_links
+            JOIN sources ON sources.id = evidence_links.source_id
+            ORDER BY evidence_links.created_at DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def add_note(self, title: str, body: str, source_id: str | None = None) -> dict[str, Any]:
         now = time.time()
         row = {"id": new_id("note"), "title": title, "body": body, "source_id": source_id, "created_at": now, "updated_at": now}
@@ -199,6 +254,50 @@ class Store:
     def list_tasks(self) -> list[dict[str, Any]]:
         rows = self.conn.execute("SELECT id, title, detail, column_name AS column, progress, created_at, updated_at FROM tasks ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]
+
+    def save_provider_settings(self, provider: str, model: str, api_key_ref: str = "") -> dict[str, Any]:
+        now = time.time()
+        existing = self.conn.execute(
+            "SELECT id, created_at FROM provider_settings WHERE provider = ?",
+            (provider,),
+        ).fetchone()
+        row = {
+            "id": existing["id"] if existing else new_id("set"),
+            "provider": provider,
+            "model": model,
+            "api_key_ref": api_key_ref,
+            "created_at": existing["created_at"] if existing else now,
+            "updated_at": now,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO provider_settings (id, provider, model, api_key_ref, created_at, updated_at)
+            VALUES (:id, :provider, :model, :api_key_ref, :created_at, :updated_at)
+            ON CONFLICT(id) DO UPDATE SET
+              model = excluded.model,
+              api_key_ref = excluded.api_key_ref,
+              updated_at = excluded.updated_at
+            """,
+            row,
+        )
+        self.conn.commit()
+        return row
+
+    def list_provider_settings(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT id, provider, model, api_key_ref, created_at, updated_at FROM provider_settings ORDER BY provider"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def export_workspace(self) -> dict[str, Any]:
+        return {
+            "sources": self.list_sources(),
+            "notes": self.search_notes(),
+            "tasks": self.list_tasks(),
+            "events": self.list_events(),
+            "evidence": self.list_evidence(),
+            "provider_settings": self.list_provider_settings(),
+        }
 
 
 def new_id(prefix: str) -> str:
