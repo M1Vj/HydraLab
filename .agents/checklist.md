@@ -8,7 +8,7 @@ Track completion only after implementation, verification and merge back into `de
 - [x] `feature/ur01-02-local-sqlite-foundation`
 - [x] `feature/ur01-03-web-shell-research-workspace`
 - [x] `feature/ur01-04-chat-status-orchestration`
-- [ ] `feature/ur01-05-paper-ingestion-rag`
+- [x] `feature/ur01-05-paper-ingestion-rag`
 - [ ] `feature/ur01-06-citation-evidence-manager`
 - [ ] `feature/ur01-07-writing-review-tools`
 - [ ] `feature/ur01-08-notes-knowledge-search`
