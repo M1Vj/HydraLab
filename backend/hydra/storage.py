@@ -87,6 +87,8 @@ class Store:
               detail TEXT NOT NULL DEFAULT '',
               column_name TEXT NOT NULL,
               progress INTEGER NOT NULL DEFAULT 0,
+              phase_indicator TEXT NOT NULL DEFAULT '',
+              position INTEGER NOT NULL DEFAULT 0,
               created_at REAL NOT NULL,
               updated_at REAL NOT NULL
             );
@@ -107,6 +109,17 @@ class Store:
             );
             """
         )
+        self.conn.commit()
+
+        # Dynamic upgrades for existing tables
+        try:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN phase_indicator TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         self.conn.commit()
 
     def close(self) -> None:
@@ -444,34 +457,67 @@ class Store:
         }
 
 
-    def add_task(self, title: str, column: str, detail: str = "") -> dict[str, Any]:
+    def add_task(self, title: str, column: str, detail: str = "", progress: int = 0, phase_indicator: str = "", position: int = 0) -> dict[str, Any]:
         now = time.time()
-        row = {"id": new_id("task"), "title": title, "detail": detail, "column": column, "progress": 0, "created_at": now, "updated_at": now}
+        row = {
+            "id": new_id("task"),
+            "title": title,
+            "detail": detail,
+            "column": column,
+            "progress": progress,
+            "phase_indicator": phase_indicator,
+            "position": position,
+            "created_at": now,
+            "updated_at": now
+        }
         self.conn.execute(
-            "INSERT INTO tasks (id, title, detail, column_name, progress, created_at, updated_at) VALUES (:id, :title, :detail, :column, :progress, :created_at, :updated_at)",
+            """
+            INSERT INTO tasks (id, title, detail, column_name, progress, phase_indicator, position, created_at, updated_at)
+            VALUES (:id, :title, :detail, :column, :progress, :phase_indicator, :position, :created_at, :updated_at)
+            """,
             row,
         )
         self.conn.commit()
         return row
 
     def update_task(self, task_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
-        current = self.conn.execute("SELECT id, title, detail, column_name AS column, progress, created_at, updated_at FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        current = self.conn.execute("SELECT id, title, detail, column_name AS column, progress, phase_indicator, position, created_at, updated_at FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if current is None:
             return None
         row = dict(current)
-        for key in ("title", "detail", "column", "progress"):
+        for key in ("title", "detail", "column", "progress", "phase_indicator", "position"):
             if updates.get(key) is not None:
                 row[key] = updates[key]
         row["updated_at"] = time.time()
         self.conn.execute(
-            "UPDATE tasks SET title = :title, detail = :detail, column_name = :column, progress = :progress, updated_at = :updated_at WHERE id = :id",
+            """
+            UPDATE tasks SET
+              title = :title,
+              detail = :detail,
+              column_name = :column,
+              progress = :progress,
+              phase_indicator = :phase_indicator,
+              position = :position,
+              updated_at = :updated_at
+            WHERE id = :id
+            """,
             row,
         )
         self.conn.commit()
         return row
 
+    def delete_task(self, task_id: str) -> bool:
+        current = self.conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if current is None:
+            return False
+        self.conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        self.conn.commit()
+        return True
+
     def list_tasks(self) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT id, title, detail, column_name AS column, progress, created_at, updated_at FROM tasks ORDER BY created_at").fetchall()
+        rows = self.conn.execute(
+            "SELECT id, title, detail, column_name AS column, progress, phase_indicator, position, created_at, updated_at FROM tasks ORDER BY position ASC, created_at ASC"
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def save_provider_settings(self, provider: str, model: str, api_key_ref: str = "") -> dict[str, Any]:

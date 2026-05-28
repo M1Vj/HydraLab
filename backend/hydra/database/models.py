@@ -92,9 +92,11 @@ class Task(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     workspace_id: str = Field(foreign_key="workspaces.id")
     title: str
-    column_name: str # e.g. To Do, In Progress, Done
+    column_name: str # e.g. to_do, in_progress, review, done
     detail: str
     progress: int = Field(default=0)
+    phase_indicator: str = Field(default="")
+    position: int = Field(default=0)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
