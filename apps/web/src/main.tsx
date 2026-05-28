@@ -1,4 +1,4 @@
-import React, { FormEvent, useEffect, useMemo, useState } from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   BookOpenCheck,
@@ -8,362 +8,193 @@ import {
   ListTodo,
   MessageSquareText,
   Search,
-  Send,
   Settings,
   Sparkles,
+  Terminal,
+  Activity,
+  X,
+  SplitSquareHorizontal
 } from "lucide-react";
 
-import { apiJson, groupTasksByColumn, sourceLabel, statusCopy, Source, Task } from "./lib/hydra";
 import "./styles.css";
 
-type ResearchResponse = {
-  answer: string;
-  status: string;
-  citations: Array<{ id: string; source_id: string; claim: string; quote: string }>;
-  sources: Source[];
-};
-
-type Note = {
-  id: string;
-  title: string;
-  body: string;
-  source_id?: string;
-};
-
-type EventItem = {
-  id: string;
-  kind: string;
-  message: string;
-  created_at: number;
-};
-
-type Evidence = {
-  id: string;
-  claim: string;
-  source_id: string;
-  source_title?: string;
-  passage: string;
-  support: "supported" | "weak" | "unsupported";
-  confidence: number;
-  review_status: string;
-};
-
-type ProviderSettings = {
-  id: string;
-  provider: string;
-  model: string;
-  api_key_ref: string;
-};
+type ActivityType = "chat" | "sources" | "notes" | "tasks" | "settings";
 
 function App() {
-  const [query, setQuery] = useState("retrieval augmented generation for scientific papers");
-  const [answer, setAnswer] = useState<ResearchResponse | null>(null);
-  const [draft, setDraft] = useState("This proves the method is always best. It is very good.");
-  const [review, setReview] = useState<{ rewrite: string; critique: string[]; unsupported_claims: string[] } | null>(null);
-  const [notes, setNotes] = useState<Note[]>([]);
-  const [sources, setSources] = useState<Source[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [events, setEvents] = useState<EventItem[]>([]);
-  const [evidence, setEvidence] = useState<Evidence[]>([]);
-  const [providerSettings, setProviderSettings] = useState<ProviderSettings[]>([]);
-  const [providerDraft, setProviderDraft] = useState({ provider: "openai", model: "gpt-5.1", api_key_ref: "env:OPENAI_API_KEY" });
-  const [bibliography, setBibliography] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [activeActivity, setActiveActivity] = useState<ActivityType>("chat");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+  const [activeEditorTab, setActiveEditorTab] = useState("research-1");
 
-  const groupedTasks = useMemo(() => groupTasksByColumn(tasks), [tasks]);
-
-  useEffect(() => {
-    void refreshWorkspace();
-  }, []);
-
-  async function refreshWorkspace() {
-    const [noteData, taskData, eventData, evidenceData, settingsData] = await Promise.all([
-      apiJson<{ notes: Note[] }>("/api/notes").catch(() => ({ notes: [] })),
-      apiJson<{ tasks: Task[] }>("/api/tasks").catch(() => ({ tasks: [] })),
-      apiJson<{ events: EventItem[] }>("/api/events").catch(() => ({ events: [] })),
-      apiJson<{ evidence: Evidence[] }>("/api/evidence").catch(() => ({ evidence: [] })),
-      apiJson<{ provider_settings: ProviderSettings[] }>("/api/settings").catch(() => ({ provider_settings: [] })),
-    ]);
-    setNotes(noteData.notes);
-    setTasks(taskData.tasks);
-    setEvents(eventData.events);
-    setEvidence(evidenceData.evidence);
-    setProviderSettings(settingsData.provider_settings);
-  }
-
-  async function submitResearch(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    try {
-      const payload = await apiJson<ResearchResponse>("/api/chat/research", {
-        method: "POST",
-        body: JSON.stringify({ query }),
-      });
-      setAnswer(payload);
-      setSources(payload.sources);
-      await refreshWorkspace();
-    } finally {
-      setBusy(false);
+  const toggleSidebar = (activity: ActivityType) => {
+    if (activeActivity === activity) {
+      setSidebarOpen(!sidebarOpen);
+    } else {
+      setActiveActivity(activity);
+      setSidebarOpen(true);
     }
-  }
-
-  async function uploadPaper(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
-    const body = new FormData();
-    body.append("file", file);
-    const response = await fetch("/api/papers/ingest", { method: "POST", body });
-    if (!response.ok) {
-      throw new Error(`Hydra API error ${response.status}`);
-    }
-    const payload = (await response.json()) as { source: Source };
-    setSources((current) => [payload.source, ...current]);
-    await refreshWorkspace();
-  }
-
-  async function loadBibliography(style: "apa" | "bibtex") {
-    const response = await fetch(`/api/export/bibliography?style=${style}`);
-    if (!response.ok) {
-      throw new Error(`Hydra API error ${response.status}`);
-    }
-    setBibliography(await response.text());
-  }
-
-  async function addEvidenceReview(source: Source, support: Evidence["support"]) {
-    await apiJson<Evidence>("/api/evidence", {
-      method: "POST",
-      body: JSON.stringify({
-        claim: answer?.answer.slice(0, 220) || `Evidence from ${source.title}`,
-        source_id: source.id,
-        passage: source.abstract || source.title,
-        support,
-        confidence: support === "supported" ? 0.82 : 0.45,
-      }),
-    });
-    await refreshWorkspace();
-  }
-
-  async function saveProviderSettings(event: FormEvent) {
-    event.preventDefault();
-    await apiJson<ProviderSettings>("/api/settings/provider", {
-      method: "PUT",
-      body: JSON.stringify(providerDraft),
-    });
-    await refreshWorkspace();
-  }
-
-  async function submitReview() {
-    const payload = await apiJson<{ rewrite: string; critique: string[]; unsupported_claims: string[] }>(
-      "/api/writing/review",
-      { method: "POST", body: JSON.stringify({ text: draft }) },
-    );
-    setReview(payload);
-    await refreshWorkspace();
-  }
-
-  async function createTask() {
-    const task = await apiJson<Task>("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({ title: `Review sources ${tasks.length + 1}`, column: "To Do" }),
-    });
-    setTasks((current) => [...current, task]);
-    await refreshWorkspace();
-  }
-
-  async function moveTask(task: Task, column: string) {
-    const moved = await apiJson<Task>(`/api/tasks/${task.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ column, progress: column === "Done" ? 100 : task.progress }),
-    });
-    setTasks((current) => current.map((item) => (item.id === moved.id ? moved : item)));
-    await refreshWorkspace();
-  }
+  };
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar" aria-label="Hydra navigation">
-        <div className="brand-mark">
-          <Sparkles aria-hidden="true" />
-          <div>
-            <strong>Hydra</strong>
-            <span>Research companion</span>
-          </div>
+    <div className={`workbench ${!sidebarOpen ? "sidebar-closed" : "sidebar-open"}`}>
+      
+      {/* Activity Bar */}
+      <nav className="activity-bar" aria-label="Activity Bar">
+        <div 
+          className={`activity-icon ${activeActivity === "chat" ? "active" : ""}`} 
+          onClick={() => toggleSidebar("chat")}
+          title="Research Chat"
+        >
+          <MessageSquareText size={24} strokeWidth={1.5} />
         </div>
-        <nav>
-          <a href="#research"><MessageSquareText aria-hidden="true" /> Research</a>
-          <a href="#sources"><Library aria-hidden="true" /> Sources</a>
-          <a href="#notes"><FileText aria-hidden="true" /> Notes</a>
-          <a href="#tasks"><ListTodo aria-hidden="true" /> Tasks</a>
-          <a href="#settings"><Settings aria-hidden="true" /> Settings</a>
-        </nav>
+        <div 
+          className={`activity-icon ${activeActivity === "sources" ? "active" : ""}`} 
+          onClick={() => toggleSidebar("sources")}
+          title="Sources"
+        >
+          <Library size={24} strokeWidth={1.5} />
+        </div>
+        <div 
+          className={`activity-icon ${activeActivity === "notes" ? "active" : ""}`} 
+          onClick={() => toggleSidebar("notes")}
+          title="Notes"
+        >
+          <FileText size={24} strokeWidth={1.5} />
+        </div>
+        <div 
+          className={`activity-icon ${activeActivity === "tasks" ? "active" : ""}`} 
+          onClick={() => toggleSidebar("tasks")}
+          title="Tasks"
+        >
+          <ListTodo size={24} strokeWidth={1.5} />
+        </div>
+        <div style={{ flex: 1 }} />
+        <div 
+          className={`activity-icon ${activeActivity === "settings" ? "active" : ""}`} 
+          onClick={() => toggleSidebar("settings")}
+          title="Settings"
+        >
+          <Settings size={24} strokeWidth={1.5} />
+        </div>
+      </nav>
+
+      {/* Sidebar */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <span>{activeActivity.toUpperCase()}</span>
+        </div>
+        <div className="sidebar-content">
+          {activeActivity === "chat" && (
+            <div className="empty-state" style={{ height: "auto", marginTop: "40px" }}>
+              <p>No recent research chats.</p>
+            </div>
+          )}
+          {activeActivity === "sources" && (
+            <div className="empty-state" style={{ height: "auto", marginTop: "40px" }}>
+              <p>No sources uploaded.</p>
+            </div>
+          )}
+          {activeActivity === "notes" && (
+            <div className="empty-state" style={{ height: "auto", marginTop: "40px" }}>
+              <p>No notes available.</p>
+            </div>
+          )}
+          {activeActivity === "tasks" && (
+            <div className="empty-state" style={{ height: "auto", marginTop: "40px" }}>
+              <p>No active tasks.</p>
+            </div>
+          )}
+        </div>
       </aside>
 
-      <section className="workspace">
-        <header className="topbar">
-          <div>
-            <p>Phase 1</p>
-            <h1>Research desk</h1>
+      {/* Main Area */}
+      <main className="main-area">
+        <div className="editor-group">
+          <div className="editor-tabs">
+            <div 
+              className={`editor-tab ${activeEditorTab === "research-1" ? "active" : ""}`}
+              onClick={() => setActiveEditorTab("research-1")}
+            >
+              <Sparkles size={14} />
+              Research Agent
+              <X size={14} style={{ marginLeft: 8, opacity: 0.5 }} />
+            </div>
+            <div 
+              className={`editor-tab ${activeEditorTab === "notes-1" ? "active" : ""}`}
+              onClick={() => setActiveEditorTab("notes-1")}
+            >
+              <FileText size={14} />
+              Draft Notes.md
+              <X size={14} style={{ marginLeft: 8, opacity: 0.5 }} />
+            </div>
+            <div style={{ flex: 1 }} />
+            <div className="editor-tab" style={{ border: "none", cursor: "default" }}>
+              <SplitSquareHorizontal size={14} style={{ cursor: "pointer", opacity: 0.7 }} />
+            </div>
           </div>
-          <div className="status-pill">
-            <CheckCircle2 aria-hidden="true" />
-            Read-only tools
-          </div>
-        </header>
 
-        <section className="research-grid" id="research">
-          <article className="chat-panel">
-            <form onSubmit={submitResearch} className="search-box">
-              <Search aria-hidden="true" />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Research question" />
-              <button type="submit" disabled={busy} title="Send research question">
-                <Send aria-hidden="true" />
-              </button>
-            </form>
-
-            <div className="answer-surface">
-              {answer ? (
-                <>
-                  <div className="answer-status">{statusCopy(answer.status)}</div>
-                  <p>{answer.answer}</p>
-                  <div className="citation-list">
-                    {answer.sources.map((source) => (
-                      <div className="citation-row" key={source.id}>
-                        <a href={source.url || "#"}>{sourceLabel(source)}</a>
-                        <button type="button" onClick={() => void addEvidenceReview(source, "supported")}>Support</button>
-                        <button type="button" onClick={() => void addEvidenceReview(source, "weak")}>Weak</button>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <p className="empty-state">Ask Hydra to search literature, summarize evidence, and return citations.</p>
+          <div className="editor-pane-container">
+            <div className="editor-pane">
+              {activeEditorTab === "research-1" && (
+                <div className="empty-state">
+                  <Sparkles />
+                  <h2>Hydra Research</h2>
+                  <p>Ask a question, upload a paper, or synthesize your notes. I will generate citations and trace claims back to their source.</p>
+                  <button>New Research Chat</button>
+                </div>
+              )}
+              {activeEditorTab === "notes-1" && (
+                <div className="empty-state">
+                  <FileText />
+                  <h2>Notes</h2>
+                  <p>Write your synthesis here. Your sources and evidence review will guide your drafting.</p>
+                </div>
               )}
             </div>
-          </article>
+          </div>
+        </div>
 
-          <article className="writing-panel">
-            <h2>Writing review</h2>
-            <textarea value={draft} onChange={(event) => setDraft(event.target.value)} aria-label="Draft text" />
-            <button onClick={submitReview}>Review draft</button>
-            {review ? (
-              <div className="review-output">
-                <strong>Rewrite</strong>
-                <p>{review.rewrite}</p>
-                <strong>Critique</strong>
-                <ul>{review.critique.map((item) => <li key={item}>{item}</li>)}</ul>
+        {/* Bottom Panel */}
+        {bottomPanelOpen && (
+          <div className="bottom-panel">
+            <div className="panel-tabs">
+              <div className="panel-tab active">Terminal</div>
+              <div className="panel-tab">Output</div>
+              <div className="panel-tab">Problems</div>
+              <div style={{ flex: 1 }} />
+              <div className="panel-tab" style={{ border: "none" }} onClick={() => setBottomPanelOpen(false)}>
+                <X size={14} style={{ marginTop: 2 }} />
               </div>
-            ) : null}
-          </article>
-        </section>
-
-        <section className="lower-grid">
-          <article id="sources">
-            <h2><Library aria-hidden="true" /> Sources</h2>
-            <label className="upload-control">
-              Upload paper
-              <input type="file" accept=".pdf,.txt,.md,text/plain,application/pdf" onChange={(event) => void uploadPaper(event)} />
-            </label>
-            {(sources.length ? sources : answer?.sources ?? []).map((source) => (
-              <div className="note-row" key={source.id ?? source.title}>
-                <strong>{sourceLabel(source)}</strong>
-                <p>{source.abstract || source.url || "Local source"}</p>
-              </div>
-            ))}
-            {!sources.length && !answer?.sources.length ? <p className="empty-state">Search or upload papers to build source trace.</p> : null}
-          </article>
-
-          <article>
-            <h2><CheckCircle2 aria-hidden="true" /> Evidence review</h2>
-            {evidence.length === 0 ? <p className="empty-state">Mark citations as supported or weak to preserve claim traceability.</p> : null}
-            {evidence.map((item) => (
-              <div className={`evidence-row evidence-${item.support}`} key={item.id}>
-                <strong>{item.support} · {Math.round(item.confidence * 100)}%</strong>
-                <p>{item.claim}</p>
-                <small>{item.source_title || item.source_id} · {item.review_status}</small>
-              </div>
-            ))}
-          </article>
-
-          <article id="notes">
-            <h2><BookOpenCheck aria-hidden="true" /> Notes</h2>
-            {notes.length === 0 ? <p className="empty-state">Notes from papers and drafts appear here.</p> : null}
-            {notes.map((note) => (
-              <div className="note-row" key={note.id}>
-                <strong>{note.title}</strong>
-                <p>{note.body}</p>
-              </div>
-            ))}
-          </article>
-
-          <article id="tasks">
-            <div className="panel-title">
-              <h2><ListTodo aria-hidden="true" /> Kanban</h2>
-              <button onClick={createTask}>Add task</button>
             </div>
-            <div className="kanban-board">
-              {groupedTasks.map((column) => (
-                <div className="kanban-column" key={column.name}>
-                  <h3>{column.name}</h3>
-                  {column.tasks.map((task) => (
-                    <div className="task-card" key={task.id}>
-                      <strong>{task.title}</strong>
-                      <progress value={task.progress} max={100} />
-                      <select value={task.column} onChange={(event) => void moveTask(task, event.target.value)} aria-label={`Move ${task.title}`}>
-                        {groupedTasks.map((target) => <option key={target.name}>{target.name}</option>)}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-              ))}
+            <div className="panel-content">
+              <div>hydra-web@0.1.0 dev</div>
+              <div style={{ color: "var(--accent)", marginTop: 4 }}>➜  Local:   http://127.0.0.1:5173/</div>
+              <div style={{ marginTop: 4 }}>➜  Network: use --host to expose</div>
+              <div style={{ marginTop: 4 }}>ready in 245ms.</div>
             </div>
-          </article>
+          </div>
+        )}
+      </main>
 
-          <article className="activity-panel">
-            <h2>Status trace</h2>
-            {events.slice(0, 8).map((event) => (
-              <div className="event-row" key={event.id}>
-                <span>{event.kind}</span>
-                <p>{event.message}</p>
-              </div>
-            ))}
-          </article>
-
-          <article id="settings" className="settings-panel">
-            <h2><Settings aria-hidden="true" /> Settings & export</h2>
-            <p>Provider-neutral Phase 1 setup. Add local keys through environment or future secure settings storage; no external mutations run from this UI.</p>
-            <form className="settings-form" onSubmit={saveProviderSettings}>
-              <label>
-                Provider
-                <input value={providerDraft.provider} onChange={(event) => setProviderDraft((current) => ({ ...current, provider: event.target.value }))} />
-              </label>
-              <label>
-                Model
-                <input value={providerDraft.model} onChange={(event) => setProviderDraft((current) => ({ ...current, model: event.target.value }))} />
-              </label>
-              <label>
-                Secret ref
-                <input value={providerDraft.api_key_ref} onChange={(event) => setProviderDraft((current) => ({ ...current, api_key_ref: event.target.value }))} />
-              </label>
-              <button type="submit">Save settings</button>
-            </form>
-            {providerSettings.map((setting) => (
-              <div className="setting-row" key={setting.id}>
-                <strong>{setting.provider}</strong>
-                <span>{setting.model}</span>
-                <code>{setting.api_key_ref || "no secret ref"}</code>
-              </div>
-            ))}
-            <div className="export-actions">
-              <button onClick={() => void loadBibliography("apa")}>APA export</button>
-              <button onClick={() => void loadBibliography("bibtex")}>BibTeX export</button>
-            </div>
-            {bibliography ? <pre>{bibliography}</pre> : null}
-          </article>
-        </section>
-      </section>
-    </main>
+      {/* Status Bar */}
+      <footer className="status-bar">
+        <div className="status-group">
+          <div className="status-item" onClick={() => setBottomPanelOpen(!bottomPanelOpen)}>
+            <Terminal size={12} />
+          </div>
+          <div className="status-item">
+            <CheckCircle2 size={12} />
+            0 Errors
+          </div>
+        </div>
+        <div className="status-group">
+          <div className="status-item">
+            <Activity size={12} />
+            Phase 1
+          </div>
+        </div>
+      </footer>
+    </div>
   );
 }
 
