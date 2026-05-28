@@ -128,3 +128,97 @@ def test_notes_crud_and_links(tmp_path, monkeypatch):
     res = client.get(f"/api/notes/{note2['id']}")
     assert res.status_code == 404
 
+def test_settings_get_post_and_export_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    # Get settings (should be empty initially or contain defaults)
+    settings = client.get("/api/settings").json()
+    assert "provider_settings" in settings
+    assert "workspace_preferences" in settings
+
+    # Post settings updates
+    post_payload = {
+        "provider_settings": [
+            {"provider": "openai", "model": "gpt-4o", "api_key_ref": "sk-12345"},
+            {"provider": "gemini", "model": "gemini-1.5-pro", "api_key_ref": "ai-67890"}
+        ],
+        "workspace_preferences": {
+            "theme": "dark",
+            "default_provider": "openai",
+            "system_instruction": "Be extremely precise."
+        }
+    }
+    update_res = client.post("/api/settings", json=post_payload)
+    assert update_res.status_code == 200
+    updated_settings = update_res.json()
+    
+    # Check that settings are persisted and returned
+    assert len(updated_settings["provider_settings"]) == 2
+    assert updated_settings["workspace_preferences"]["theme"] == "dark"
+    assert updated_settings["workspace_preferences"]["default_provider"] == "openai"
+    assert updated_settings["workspace_preferences"]["system_instruction"] == "Be extremely precise."
+
+    # Verify that the GET endpoint returns the updated settings
+    got_settings = client.get("/api/settings").json()
+    assert len(got_settings["provider_settings"]) == 2
+    assert got_settings["workspace_preferences"]["theme"] == "dark"
+
+    # Add a mock note and task to check export
+    note = client.post(
+        "/api/notes",
+        json={"title": "Exportable Note", "body": "This body should be inside notes/Exportable Note.md in ZIP."},
+    ).json()
+    assert note["id"]
+
+    task = client.post(
+        "/api/tasks",
+        json={"title": "Exportable Task", "column": "to_do", "detail": "Test detail of task."}
+    ).json()
+    assert task["id"]
+
+    # Check export preview
+    preview = client.get("/api/export/preview").json()
+    assert preview["counts"]["notes"] == 1
+    assert preview["counts"]["tasks"] == 1
+    assert "notes/Exportable Note.md" in preview["files"]
+    assert "citations.md" in preview["files"]
+    assert "tasks.md" in preview["files"]
+    assert "metadata.json" in preview["files"]
+
+    # Check actual ZIP export
+    export_res = client.post("/api/export")
+    assert export_res.status_code == 200
+    assert export_res.headers["content-type"] == "application/zip"
+    
+    # Parse the ZIP file to ensure contents are correct
+    import zipfile
+    import io
+    import json
+    
+    zip_bytes = export_res.content
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+        # Check files
+        file_list = z.namelist()
+        assert "notes/Exportable Note.md" in file_list
+        assert "citations.md" in file_list
+        assert "tasks.md" in file_list
+        assert "metadata.json" in file_list
+        
+        # Verify note content
+        note_content = z.read("notes/Exportable Note.md").decode("utf-8")
+        assert "# Exportable Note" in note_content
+        assert "This body should be inside notes/Exportable Note.md" in note_content
+        
+        # Verify metadata scrubbed provider_settings
+        meta = json.loads(z.read("metadata.json").decode("utf-8"))
+        assert len(meta["notes"]) == 1
+        assert len(meta["tasks"]) == 1
+        assert len(meta["provider_settings"]) == 2
+        # Verify API keys refs are preserved!
+        p_map = {p["provider"]: p for p in meta["provider_settings"]}
+        assert p_map["openai"]["api_key_ref"] == "sk-12345"
+        assert p_map["gemini"]["api_key_ref"] == "ai-67890"
+
+
+

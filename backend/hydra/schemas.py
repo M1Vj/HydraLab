@@ -68,6 +68,10 @@ class ProviderSettingsRequest(BaseModel):
     provider: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=160)
     api_key_ref: str = Field(default="", max_length=300)
+
+class SettingsUpdateRequest(BaseModel):
+    provider_settings: list[ProviderSettingsRequest] | None = None
+    workspace_preferences: dict[str, str] | None = None
 class ChatMessage(BaseModel):
     role: str = Field(pattern="^(user|assistant|system)$")
     content: str = Field(min_length=1)
