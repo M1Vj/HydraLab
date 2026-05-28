@@ -6,7 +6,7 @@ Track completion only after implementation, verification and merge back into `de
 - [x] `feature/ur01-phase1-mvp`
 - [x] `feature/ur01-evidence-settings-hardening`
 - [x] `feature/ur01-02-local-sqlite-foundation`
-- [ ] `feature/ur01-03-web-shell-research-workspace`
+- [x] `feature/ur01-03-web-shell-research-workspace`
 - [ ] `feature/ur01-04-chat-status-orchestration`
 - [ ] `feature/ur01-05-paper-ingestion-rag`
 - [ ] `feature/ur01-06-citation-evidence-manager`
