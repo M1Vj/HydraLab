@@ -203,6 +203,10 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.settings-panel {
+  grid-column: 1 / -1;
+}
+
 .note-row,
 .event-row,
 .task-card {
@@ -254,6 +258,37 @@ progress {
 
 .empty-state {
   color: #65726b;
+}
+
+.upload-control {
+  align-items: center;
+  background: #0e5f55;
+  border-radius: 8px;
+  color: white;
+  cursor: pointer;
+  display: inline-flex;
+  min-height: 38px;
+  padding: 0 14px;
+}
+
+.upload-control input {
+  display: none;
+}
+
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+pre {
+  background: #f7f4ea;
+  border: 1px solid #d8d1c0;
+  border-radius: 8px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
 }
 
 @media (max-width: 900px) {
