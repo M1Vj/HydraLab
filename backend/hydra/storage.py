@@ -107,6 +107,11 @@ class Store:
               created_at REAL NOT NULL,
               updated_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at REAL NOT NULL
+            );
             """
         )
         self.conn.commit()
@@ -118,6 +123,18 @@ class Store:
             pass
         try:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL,
+                  updated_at REAL NOT NULL
+                )
+                """
+            )
         except sqlite3.OperationalError:
             pass
         self.conn.commit()
@@ -554,6 +571,29 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def save_setting(self, key: str, value: str) -> dict[str, Any]:
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (key, value, now)
+        )
+        self.conn.commit()
+        return {"key": key, "value": value, "updated_at": now}
+
+    def get_setting(self, key: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM settings WHERE key = ?",
+            (key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_settings(self) -> dict[str, str]:
+        rows = self.conn.execute("SELECT key, value FROM settings").fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
     def export_workspace(self) -> dict[str, Any]:
         return {
             "sources": self.list_sources(),
@@ -561,6 +601,7 @@ class Store:
             "tasks": self.list_tasks(),
             "events": self.list_events(),
             "evidence": self.list_evidence(),
+            "settings": self.list_settings(),
             "provider_settings": self.list_provider_settings(),
         }
 

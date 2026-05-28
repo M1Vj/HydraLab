@@ -13,4 +13,4 @@ Track completion only after implementation, verification and merge back into `de
 - [x] `feature/ur01-07-writing-review-tools`
 - [x] `feature/ur01-08-notes-knowledge-search`
 - [x] `feature/ur01-09-kanban-progress-tracking`
-- [ ] `feature/ur01-10-local-settings-export`
+- [x] `feature/ur01-10-local-settings-export`
