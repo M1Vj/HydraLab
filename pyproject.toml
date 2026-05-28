@@ -4,11 +4,16 @@ version = "0.1.0"
 description = "Hydra Phase 1 local research companion"
 requires-python = ">=3.11"
 dependencies = [
+  "aiosqlite>=0.22.1",
+  "alembic>=1.18.4",
   "fastapi>=0.115.0,<1",
+  "greenlet>=3.5.1",
   "httpx>=0.27.0,<1",
   "pydantic>=2.8.0,<3",
   "pypdf>=5.0.0,<7",
+  "pytest-asyncio>=1.4.0",
   "python-multipart>=0.0.9,<1",
+  "sqlmodel>=0.0.38",
   "uvicorn[standard]>=0.30.0,<1",
 ]
 
