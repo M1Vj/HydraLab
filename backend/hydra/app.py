@@ -278,7 +278,14 @@ def create_app() -> FastAPI:
 
     @app.post("/api/tasks")
     def create_task(request: TaskCreateRequest, http_request: Request) -> dict[str, object]:
-        task = _store(http_request).add_task(request.title, request.column, request.detail)
+        task = _store(http_request).add_task(
+            title=request.title,
+            column=request.column,
+            detail=request.detail,
+            progress=request.progress,
+            phase_indicator=request.phase_indicator,
+            position=request.position
+        )
         _store(http_request).add_event("task.created", f"Created task {request.title}")
         return task
 
@@ -286,13 +293,29 @@ def create_app() -> FastAPI:
     def list_tasks(http_request: Request) -> dict[str, object]:
         return {"tasks": _store(http_request).list_tasks()}
 
-    @app.patch("/api/tasks/{task_id}")
-    def update_task(task_id: str, request: TaskUpdateRequest, http_request: Request) -> dict[str, object]:
+    @app.put("/api/tasks/{task_id}")
+    def update_task_put(task_id: str, request: TaskUpdateRequest, http_request: Request) -> dict[str, object]:
         task = _store(http_request).update_task(task_id, request.model_dump(exclude_unset=True))
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         _store(http_request).add_event("task.updated", f"Updated task {task['title']}")
         return task
+
+    @app.patch("/api/tasks/{task_id}")
+    def update_task_patch(task_id: str, request: TaskUpdateRequest, http_request: Request) -> dict[str, object]:
+        task = _store(http_request).update_task(task_id, request.model_dump(exclude_unset=True))
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        _store(http_request).add_event("task.updated", f"Updated task {task['title']}")
+        return task
+
+    @app.delete("/api/tasks/{task_id}")
+    def delete_task(task_id: str, http_request: Request) -> dict[str, object]:
+        success = _store(http_request).delete_task(task_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Task not found")
+        _store(http_request).add_event("task.deleted", f"Deleted task {task_id}")
+        return {"status": "success"}
 
     @app.get("/api/events")
     def events(http_request: Request) -> object:
