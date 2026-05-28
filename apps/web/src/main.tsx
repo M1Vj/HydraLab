@@ -43,8 +43,10 @@ function App() {
   const [draft, setDraft] = useState("This proves the method is always best. It is very good.");
   const [review, setReview] = useState<{ rewrite: string; critique: string[]; unsupported_claims: string[] } | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [sources, setSources] = useState<Source[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [bibliography, setBibliography] = useState("");
   const [busy, setBusy] = useState(false);
 
   const groupedTasks = useMemo(() => groupTasksByColumn(tasks), [tasks]);
@@ -73,10 +75,35 @@ function App() {
         body: JSON.stringify({ query }),
       });
       setAnswer(payload);
+      setSources(payload.sources);
       await refreshWorkspace();
     } finally {
       setBusy(false);
     }
+  }
+
+  async function uploadPaper(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    const body = new FormData();
+    body.append("file", file);
+    const response = await fetch("/api/papers/ingest", { method: "POST", body });
+    if (!response.ok) {
+      throw new Error(`Hydra API error ${response.status}`);
+    }
+    const payload = (await response.json()) as { source: Source };
+    setSources((current) => [payload.source, ...current]);
+    await refreshWorkspace();
+  }
+
+  async function loadBibliography(style: "apa" | "bibtex") {
+    const response = await fetch(`/api/export/bibliography?style=${style}`);
+    if (!response.ok) {
+      throw new Error(`Hydra API error ${response.status}`);
+    }
+    setBibliography(await response.text());
   }
 
   async function submitReview() {
@@ -180,6 +207,21 @@ function App() {
         </section>
 
         <section className="lower-grid">
+          <article id="sources">
+            <h2><Library aria-hidden="true" /> Sources</h2>
+            <label className="upload-control">
+              Upload paper
+              <input type="file" accept=".pdf,.txt,.md,text/plain,application/pdf" onChange={(event) => void uploadPaper(event)} />
+            </label>
+            {(sources.length ? sources : answer?.sources ?? []).map((source) => (
+              <div className="note-row" key={source.id ?? source.title}>
+                <strong>{sourceLabel(source)}</strong>
+                <p>{source.abstract || source.url || "Local source"}</p>
+              </div>
+            ))}
+            {!sources.length && !answer?.sources.length ? <p className="empty-state">Search or upload papers to build source trace.</p> : null}
+          </article>
+
           <article id="notes">
             <h2><BookOpenCheck aria-hidden="true" /> Notes</h2>
             {notes.length === 0 ? <p className="empty-state">Notes from papers and drafts appear here.</p> : null}
@@ -222,6 +264,16 @@ function App() {
                 <p>{event.message}</p>
               </div>
             ))}
+          </article>
+
+          <article id="settings" className="settings-panel">
+            <h2><Settings aria-hidden="true" /> Settings & export</h2>
+            <p>Provider-neutral Phase 1 setup. Add local keys through environment or future secure settings storage; no external mutations run from this UI.</p>
+            <div className="export-actions">
+              <button onClick={() => void loadBibliography("apa")}>APA export</button>
+              <button onClick={() => void loadBibliography("bibtex")}>BibTeX export</button>
+            </div>
+            {bibliography ? <pre>{bibliography}</pre> : null}
           </article>
         </section>
       </section>
