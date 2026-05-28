@@ -9,6 +9,7 @@ import {
   MessageSquareText,
   Search,
   Settings,
+  ShieldCheck,
   Sparkles,
   Terminal,
   Activity,
@@ -18,7 +19,7 @@ import {
 
 import "./styles.css";
 
-type ActivityType = "chat" | "sources" | "notes" | "tasks" | "settings";
+type ActivityType = "chat" | "sources" | "notes" | "tasks" | "settings" | "evidence";
 
 interface Message {
   id: string;
@@ -36,6 +37,16 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [evidenceList, setEvidenceList] = useState<any[]>([]);
+
+  React.useEffect(() => {
+    if (activeActivity === "evidence") {
+      fetch("http://localhost:8000/api/evidence")
+        .then(r => r.json())
+        .then(data => setEvidenceList(data.evidence || []))
+        .catch(console.error);
+    }
+  }, [activeActivity]);
 
   const sendMessage = async () => {
     if (!inputValue.trim() || isLoading) return;
@@ -137,6 +148,13 @@ function App() {
         >
           <ListTodo size={24} strokeWidth={1.5} />
         </div>
+        <div 
+          className={`activity-icon ${activeActivity === "evidence" ? "active" : ""}`} 
+          onClick={() => toggleSidebar("evidence")}
+          title="Evidence"
+        >
+          <ShieldCheck size={24} strokeWidth={1.5} />
+        </div>
         <div style={{ flex: 1 }} />
         <div 
           className={`activity-icon ${activeActivity === "settings" ? "active" : ""}`} 
@@ -171,6 +189,35 @@ function App() {
           {activeActivity === "tasks" && (
             <div className="empty-state" style={{ height: "auto", marginTop: "40px" }}>
               <p>No active tasks.</p>
+            </div>
+          )}
+          {activeActivity === "evidence" && (
+            <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "12px" }}>
+              {evidenceList.length === 0 ? (
+                <div className="empty-state" style={{ height: "auto", marginTop: "40px" }}>
+                  <p>No evidence links found.</p>
+                </div>
+              ) : (
+                evidenceList.map(ev => (
+                  <div key={ev.id} style={{ 
+                    padding: "12px", 
+                    backgroundColor: "var(--bg-dark)", 
+                    borderRadius: "6px",
+                    borderLeft: ev.support === "unsupported" ? "4px solid #ef4444" : ev.support === "weak" ? "4px solid #f59e0b" : "4px solid #10b981"
+                  }}>
+                    <div style={{ fontSize: "13px", fontWeight: "bold", marginBottom: "4px", color: "var(--fg)" }}>{ev.claim_text}</div>
+                    <div style={{ fontSize: "12px", color: "var(--fg-dim)", marginBottom: "8px", fontStyle: "italic" }}>"{ev.passage}"</div>
+                    <div style={{ fontSize: "11px", display: "flex", justifyContent: "space-between", color: "var(--fg-dim)" }}>
+                      <span>Source: {ev.source_title}</span>
+                      <span style={{ 
+                        color: ev.support === "unsupported" ? "#ef4444" : ev.support === "weak" ? "#f59e0b" : "#10b981"
+                      }}>
+                        {ev.support.toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           )}
         </div>

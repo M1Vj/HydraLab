@@ -1,9 +1,10 @@
 from fastapi.testclient import TestClient
 from hydra.app import app
 
-client = TestClient(app)
-
-def test_chat_persistence():
+def test_chat_persistence(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    from hydra.app import create_app
+    client = TestClient(create_app())
     # List conversations (should be empty initially)
     resp = client.get("/api/chat/conversations")
     assert resp.status_code == 200

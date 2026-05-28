@@ -12,6 +12,9 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from hydra.research import citation_for, compose_research_answer, search_academic_sources
 from hydra.schemas import (
     EvidenceCreateRequest,
+    CitationCreateRequest,
+    ClaimCreateRequest,
+    ClaimDetectRequest,
     NoteCreateRequest,
     ProviderSettingsRequest,
     ResearchRequest,
@@ -170,12 +173,65 @@ def create_app() -> FastAPI:
     @app.post("/api/evidence")
     def create_evidence(request: EvidenceCreateRequest, http_request: Request) -> dict[str, object]:
         evidence = _store(http_request).add_evidence(**request.model_dump())
-        _store(http_request).add_event("evidence.linked", f"Linked evidence for claim: {request.claim[:80]}")
+        _store(http_request).add_event("evidence.linked", f"Linked evidence for claim: {request.claim_id}")
         return evidence
 
     @app.get("/api/evidence")
     def list_evidence(http_request: Request) -> dict[str, object]:
         return {"evidence": _store(http_request).list_evidence()}
+
+    @app.post("/api/claims")
+    def create_claim(request: ClaimCreateRequest, http_request: Request) -> dict[str, object]:
+        claim = _store(http_request).add_claim(**request.model_dump())
+        _store(http_request).add_event("claim.created", "Created new claim")
+        return claim
+
+    @app.get("/api/claims")
+    def list_claims(http_request: Request) -> dict[str, object]:
+        return {"claims": _store(http_request).list_claims()}
+
+    @app.post("/api/claims/detect")
+    def detect_claims(request: ClaimDetectRequest, http_request: Request) -> dict[str, object]:
+        # Mock endpoint
+        store = _store(http_request)
+        claim1 = store.add_claim("Hydra reduces hallucinated citations.")
+        claim2 = store.add_claim("LLMs always tell the truth.")
+        
+        # Link some evidence mock
+        sources = store.list_sources()
+        source_id = sources[0]["id"] if sources else store.upsert_source({"title": "Mock Source"})["id"]
+        
+        store.add_evidence(
+            claim_id=claim1["id"],
+            source_id=source_id,
+            passage="Hydra architecture aims to reduce hallucinations.",
+            support="supported",
+            confidence=0.9
+        )
+        store.add_evidence(
+            claim_id=claim2["id"],
+            source_id=source_id,
+            passage="Some LLMs have hallucination problems.",
+            support="unsupported",
+            confidence=0.2
+        )
+        
+        store.add_event("claims.detected", "Detected mock claims from draft text")
+        
+        return {
+            "claims": [claim1, claim2],
+            "evidence": store.list_evidence()
+        }
+
+    @app.post("/api/citations")
+    def create_citation(request: CitationCreateRequest, http_request: Request) -> dict[str, object]:
+        citation = _store(http_request).add_citation(**request.model_dump())
+        _store(http_request).add_event("citation.created", "Created new citation")
+        return citation
+
+    @app.get("/api/citations")
+    def list_citations(http_request: Request) -> dict[str, object]:
+        return {"citations": _store(http_request).list_citations()}
 
     @app.post("/api/notes")
     def create_note(request: NoteCreateRequest, http_request: Request) -> dict[str, object]:

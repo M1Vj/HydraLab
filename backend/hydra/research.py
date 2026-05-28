@@ -30,10 +30,10 @@ def compose_research_answer(query: str, sources: list[dict[str, Any]]) -> str:
 
 
 def citation_for(query: str, source: dict[str, Any]) -> dict[str, str]:
+    text = (source.get("abstract") or source.get("title") or "")[:240]
     return {
         "source_id": source["id"],
-        "claim": f"Evidence related to {query}",
-        "quote": (source.get("abstract") or source.get("title") or "")[:240],
+        "text": f"Evidence related to {query}. Quote: {text}",
     }
 
 
