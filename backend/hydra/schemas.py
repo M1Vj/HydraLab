@@ -32,8 +32,19 @@ class TaskUpdateRequest(BaseModel):
     progress: int | None = Field(default=None, ge=0, le=100)
 
 
+class CitationCreateRequest(BaseModel):
+    source_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=4000)
+
+class ClaimCreateRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=1200)
+
+class ClaimDetectRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+
 class EvidenceCreateRequest(BaseModel):
-    claim: str = Field(min_length=1, max_length=1200)
+    claim_id: str = Field(min_length=1, max_length=200)
+    citation_id: str | None = None
     source_id: str = Field(min_length=1, max_length=200)
     passage: str = Field(min_length=1, max_length=4000)
     support: str = Field(pattern="^(supported|weak|unsupported)$")

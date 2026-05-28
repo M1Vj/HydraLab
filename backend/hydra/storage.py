@@ -51,13 +51,19 @@ class Store:
             CREATE TABLE IF NOT EXISTS citations (
               id TEXT PRIMARY KEY,
               source_id TEXT NOT NULL REFERENCES sources(id),
-              claim TEXT NOT NULL,
-              quote TEXT NOT NULL DEFAULT '',
+              text TEXT NOT NULL,
               created_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS claims (
+              id TEXT PRIMARY KEY,
+              text TEXT NOT NULL,
+              created_at REAL NOT NULL,
+              updated_at REAL NOT NULL
             );
             CREATE TABLE IF NOT EXISTS evidence_links (
               id TEXT PRIMARY KEY,
-              claim TEXT NOT NULL,
+              claim_id TEXT NOT NULL REFERENCES claims(id),
+              citation_id TEXT REFERENCES citations(id),
               source_id TEXT NOT NULL REFERENCES sources(id),
               passage TEXT NOT NULL,
               support TEXT NOT NULL,
@@ -181,28 +187,46 @@ class Store:
     def list_sources(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.conn.execute("SELECT * FROM sources ORDER BY created_at DESC").fetchall()]
 
-    def add_citation(self, source_id: str, claim: str, quote: str = "") -> dict[str, Any]:
-        row = {"id": new_id("cit"), "source_id": source_id, "claim": claim, "quote": quote, "created_at": time.time()}
+    def add_citation(self, source_id: str, text: str) -> dict[str, Any]:
+        row = {"id": new_id("cit"), "source_id": source_id, "text": text, "created_at": time.time()}
         self.conn.execute(
-            "INSERT INTO citations (id, source_id, claim, quote, created_at) VALUES (:id, :source_id, :claim, :quote, :created_at)",
+            "INSERT INTO citations (id, source_id, text, created_at) VALUES (:id, :source_id, :text, :created_at)",
             row,
         )
         self.conn.commit()
         return row
 
+    def list_citations(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.conn.execute("SELECT * FROM citations ORDER BY created_at DESC").fetchall()]
+
+    def add_claim(self, text: str) -> dict[str, Any]:
+        now = time.time()
+        row = {"id": new_id("clm"), "text": text, "created_at": now, "updated_at": now}
+        self.conn.execute(
+            "INSERT INTO claims (id, text, created_at, updated_at) VALUES (:id, :text, :created_at, :updated_at)",
+            row,
+        )
+        self.conn.commit()
+        return row
+
+    def list_claims(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.conn.execute("SELECT * FROM claims ORDER BY created_at DESC").fetchall()]
+
     def add_evidence(
         self,
-        claim: str,
+        claim_id: str,
         source_id: str,
         passage: str,
         support: str,
         confidence: float,
         review_status: str = "needs_review",
+        citation_id: str | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         row = {
             "id": new_id("evd"),
-            "claim": claim,
+            "claim_id": claim_id,
+            "citation_id": citation_id,
             "source_id": source_id,
             "passage": passage,
             "support": support,
@@ -214,9 +238,9 @@ class Store:
         self.conn.execute(
             """
             INSERT INTO evidence_links
-              (id, claim, source_id, passage, support, confidence, review_status, created_at, updated_at)
+              (id, claim_id, citation_id, source_id, passage, support, confidence, review_status, created_at, updated_at)
             VALUES
-              (:id, :claim, :source_id, :passage, :support, :confidence, :review_status, :created_at, :updated_at)
+              (:id, :claim_id, :citation_id, :source_id, :passage, :support, :confidence, :review_status, :created_at, :updated_at)
             """,
             row,
         )
@@ -226,9 +250,10 @@ class Store:
     def list_evidence(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT evidence_links.*, sources.title AS source_title, sources.url AS source_url
+            SELECT evidence_links.*, sources.title AS source_title, sources.url AS source_url, claims.text AS claim_text
             FROM evidence_links
             JOIN sources ON sources.id = evidence_links.source_id
+            JOIN claims ON claims.id = evidence_links.claim_id
             ORDER BY evidence_links.created_at DESC
             """
         ).fetchall()

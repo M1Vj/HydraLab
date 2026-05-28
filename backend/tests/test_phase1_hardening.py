@@ -51,10 +51,11 @@ def test_evidence_records_claim_support_and_review_state(tmp_path, monkeypatch):
     client = TestClient(create_app())
 
     source = client.post("/api/sources/search", json={"query": "paperqa"}).json()["sources"][0]
+    claim = client.post("/api/claims", json={"text": "PaperQA supports cited scientific answers."}).json()
     response = client.post(
         "/api/evidence",
         json={
-            "claim": "PaperQA supports cited scientific answers.",
+            "claim_id": claim["id"],
             "source_id": source["id"],
             "passage": "PaperQA is a retrieval-augmented agent for scientific research.",
             "support": "supported",
@@ -68,7 +69,7 @@ def test_evidence_records_claim_support_and_review_state(tmp_path, monkeypatch):
     assert evidence["review_status"] == "needs_review"
 
     listed = client.get("/api/evidence").json()["evidence"]
-    assert listed[0]["claim"] == "PaperQA supports cited scientific answers."
+    assert listed[0]["claim_id"] == claim["id"]
     assert listed[0]["source_title"]
 
 
