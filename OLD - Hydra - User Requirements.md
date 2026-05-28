@@ -14,7 +14,7 @@ The first phase transforms Hydra into a **web-first research and writing compani
 
 ### User Experience
 
-**Hydra-native workbench interface inspired by OpenPrism, VS Code and Obsidian.** To provide a research-native interface quickly, Hydra may temporarily download and study OpenPrism as the primary UI reference for academic writing workflows, especially its LaTeX editor, PDF preview, AI assistant, paper search, peer-review panel, missing-citation checks, compile diagnostics and template workflow[12]. Hydra should not adopt OpenPrism as a runtime platform; the relevant interaction patterns are rewritten as built-in Hydra components. The interface should feel like a modular research workbench: an activity bar, side panels, editor tabs, split panes, a bottom event/log panel and a status bar. Like VS Code, users should be able to open many components side by side; like Obsidian, sources, notes, claims and tasks should remain linked through backlinks and graph-like navigation. T3 Code remains only a secondary reference for lightweight agent-chat interaction patterns[2].
+**Hydra-native interface inspired by T3 Code.** To provide a responsive interface quickly, Hydra may temporarily download and study T3 Code as a reference for interaction patterns and layout ideas[2]. Hydra must not fork it or depend on it at runtime. Relevant UI concepts are rewritten as built-in Hydra components: the editor pane becomes a chat and note workspace, the side panel hosts a Kanban board, and status areas show search and writing progress.
 
 **Hydra-native agent and memory layer.** Phase 1 ships with Hydra's own local orchestration and persistence rather than requiring an existing Hermes installation. Hermes Agent may be used as a temporary reference for skill-system and memory ideas[1], but Hydra must not run as a Hermes sub-component in Phase 1. Local SQLite stores chats, notes, tasks, citations and source metadata so the assistant remembers what you’ve discussed and can revisit it later.
 
@@ -28,20 +28,17 @@ The first phase transforms Hydra into a **web-first research and writing compani
 
 **Summarisation and note‑taking.** Hydra can ingest papers and produce structured notes: abstracts, key takeaways, methods, results and critiques. Notes live in your knowledge base and are searchable. You can create your own notes or edit Hydra’s notes directly in the UI. Hydra also supports summarising your own drafts or meeting transcripts.
 
-**Task management and progress tracking.** A Kanban board helps you organise work, but it is not a separate fixed page; it is a workbench component that can open as a tab or side panel. Each research question, writing task or experiment idea becomes a card. Columns such as “To Do”, “In Progress”, “Review” and “Done” let you visualise progress. Hydra moves cards automatically as it completes sub‑tasks; you can reorder and comment on cards. Each card displays a progress bar and a phase indicator (“retrieving sources”, “summarising papers”, “drafting report”), along with time spent and number of sources consulted. You should also be able to open a task beside a source, note, citation inspector or chat thread, so the task remains connected to the evidence and discussion that produced it.
+**Task management and progress tracking.** A Kanban board helps you organise work. Each research question, writing task or experiment idea becomes a card. Columns such as “To Do”, “In Progress”, “Review” and “Done” let you visualise progress. Hydra moves cards automatically as it completes sub‑tasks; you can reorder and comment on cards. Each card displays a progress bar and a phase indicator (“retrieving sources”, “summarising papers”, “drafting report”), along with time spent and number of sources consulted.
 
-**Live chat and status updates.** The chat feed shows all conversation with Hydra, but chat is only one workbench component rather than the whole app. You can keep chat beside a PDF, Markdown note, LaTeX draft, citation inspector, source library, Kanban board or review report. Hydra is not a black box: it posts status updates—like “searching literature”, “finding citations”, “rewriting paragraph”—so you can follow its reasoning. You can intervene at any point, ask clarifying questions, or add instructions. Even if you choose to let Hydra work autonomously, you’ll see a running commentary of its actions.
+**Live chat and status updates.** The chat feed shows all conversation with Hydra. It is not a black box: Hydra posts status updates—like “searching literature”, “finding citations”, “rewriting paragraph”—so you can follow its reasoning. You can intervene at any point, ask clarifying questions, or add instructions. Even if you choose to let Hydra work autonomously, you’ll see a running commentary of its actions.
 
-**Notes & traceability.** Every research activity is logged. Hydra stores your queries, its answers, the sources it cited, and the notes it created. You can search and filter this history to see where information came from. Notes should behave like an Obsidian-style knowledge layer: sources, claims, decisions, tasks and drafts can link to each other, and backlinks make it clear where each idea came from. Persistent memory means you can close the app and return later without losing context[4].
+**Notes & traceability.** Every research activity is logged. Hydra stores your queries, its answers, the sources it cited, and the notes it created. You can search and filter this history to see where information came from. Persistent memory means you can close the app and return later without losing context[4].
 
 ### Under the Hood
 
 Phase 1 uses only read-only research tools: it does not execute code or modify external systems. When Hydra needs to access a restricted API (e.g. OpenAI or Claude) it prompts you for credentials and stores local configuration according to the app's settings policy. Hydra uses the following open-source elements as references or rewritten integrations:
 
-- **OpenPrism interface** — primary temporary reference for academic writing workspace interaction ideas, including LaTeX editing, PDF preview, AI review, paper search, citation checks and template workflows; no fork or runtime dependency[12].
-- **VS Code interface model** — reference for dynamic workbench layout: activity bar, sidebars, editor tabs, split panes, bottom panel, command palette and status bar.
-- **Obsidian knowledge model** — reference for note linking, backlinks, graph-like navigation and multiple views over the same research objects.
-- **T3 Code interface** — secondary temporary reference for lightweight agent-chat interaction ideas; no fork or runtime dependency[2].
+- **T3 Code interface** — temporary reference for layout and interaction ideas; no fork or runtime dependency[2].
 - **Hermes Agent** — temporary reference for skill and memory concepts; no Phase 1 runtime dependency[1].
 - **PaperQA/PaperQA2 retrieval agents** — used to fetch and summarise scientific papers through Hydra-owned integration boundaries.
 - **Humaniser guidelines and grammar tools** — adopted from the thesis‑assistant system prompt for rewriting and editing.
@@ -52,7 +49,7 @@ Phase 1 uses only read-only research tools: it does not execute code or modify e
 1. **Run Hydra locally.** Start the web app from the Hydra repository once Phase 1 implementation exists.
 2. **Create a local workspace.** Hydra initializes a local SQLite database for chats, notes, tasks, citations and source metadata.
 3. **Authenticate providers.** On first run, Hydra prompts you to supply API keys for model providers (OpenRouter, OpenAI, Claude, Gemini) and academic databases according to the local settings policy.
-4. **Start researching.** Use the workbench to open chat, sources, notes, drafts, citation inspectors and Kanban boards as movable tabs or side panels. Ask questions, paste drafts for feedback, create tasks on the Kanban board and review the notes Hydra produces.
+4. **Start researching.** Use the chat to ask questions, paste drafts for feedback, create tasks on the Kanban board and review the notes Hydra produces.
 
 ## Phase 2 – Experimentation Platform
 
@@ -175,10 +172,7 @@ Future phases of Hydra may integrate domain-specific simulators (e.g. chemical r
 ## References & Inspirations
 
 - **Hermes Agent** – reference inspiration for skill-system and persistent-memory concepts[1]; Phase 1 does not require Hermes at runtime.
-- **OpenPrism** – primary UI reference for a local-first academic writing workspace with LaTeX editing, PDF preview, AI assistant modes, paper search, peer review, missing-citation checks and template workflows[12]; Hydra must rewrite relevant patterns into its own workbench rather than depend on OpenPrism at runtime.
-- **VS Code** – reference inspiration for the dynamic workbench layout: activity bar, sidebars, editor tabs, split panes, bottom panel, command palette and status bar.
-- **Obsidian** – reference inspiration for linked notes, backlinks, graph-like navigation and multiple views over research objects.
-- **T3 Code** – secondary reference inspiration for a minimal AI workspace and agent-chat interface; Hydra must not fork it or depend on it at runtime[2].
+- **T3 Code** – reference inspiration for a minimal AI workspace interface; Hydra must not fork it or depend on it at runtime[2].
 - **MLEvolve** – an autonomous algorithm‑search system using progressive Monte‑Carlo Graph Search and experience‑driven memory[7]; Hydra reuses and adapts its search logic for experiments.
 - **AutoResearchClaw** – describes a 23‑stage pipeline with human‑in‑the‑loop modes and claim verification[5]; Hydra borrows its anti‑hallucination checks, staging and co‑pilot modes.
 - **Co‑Scientist** – a multi‑agent hypothesis exploration system with Generation, Proximity, Reflection, Ranking and Evolution agents[9]; Hydra reimplements these roles and the idea tournament concept[11].
@@ -192,10 +186,6 @@ https://hermes-agent.nousresearch.com/docs/
 [2] GitHub - pingdotgg/t3code · GitHub
 
 https://github.com/pingdotgg/t3code
-
-[12] GitHub - OpenDCAI/OpenPrism: Open-source implementation of AI-powered academic writing workspace inspired by OpenAI Prism, featuring LaTeX editing, PDF preview, and intelligent AI assistance · GitHub
-
-https://github.com/OpenDCAI/OpenPrism
 
 [5] GitHub - aiming-lab/AutoResearchClaw: Fully autonomous & self-evolving research from idea to paper. Chat an Idea. Get a Paper. · GitHub
 

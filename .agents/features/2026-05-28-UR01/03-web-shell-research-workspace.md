@@ -6,7 +6,7 @@
 
 ## Requirement mapping
 
-Web-first research UI shell.
+Web-first modular research UI shell.
 
 ## Priority
 
@@ -18,40 +18,41 @@ Senior Lead Developer
 
 ## Mission
 
-Build Hydra-native workspace layout for chat, notes, tasks and status without copying T3 Code.
+Build Hydra-native modular workbench interface inspired by OpenPrism, VS Code, and Obsidian.
 
 ## Full Context
 
-T3 Code may inspire broad layout patterns only. Hydra must own all components and styling.
+OpenPrism and VS Code inspire the core workbench layout: activity bar, sidebars, editor tabs, split panes, and bottom panel. T3 Code provides secondary inspiration for lightweight agent-chat. Hydra must own all components and styling.
 
 ## Research Findings / Implementation Direction
 
-Use dense research-workspace layout: navigation, chat/note main area, task side panel and status strip.
+Use a dynamic, modular workbench layout. Users should be able to open many components side by side (chat, notes, PDFs, LaTeX editor, Kanban).
 
 ## Requirements
 
-- Add app shell and route structure.
+- Add app shell and route structure supporting a modular workbench.
+- Add VS Code-style layout: activity bar, sidebar, splittable editor tabs, bottom panel, status bar.
 - Add responsive desktop-first layout with usable mobile fallback.
-- Add empty states for chat, notes and tasks.
+- Add empty states for chat, notes, sources, and tasks.
 - Keep accessibility basics: landmarks, keyboard focus, semantic controls.
 
 ## Atomic Steps
 
 1. Inspect frontend stack.
-2. Build shell with existing design system.
-3. Connect shell to placeholder local state.
+2. Build shell with existing design system (workbench layout).
+3. Connect shell to placeholder local state for pane management.
 4. Add visual states and responsive checks.
 5. Run lint and UI smoke test.
 
 ## Key Files
 
-- Future web app layout and component files
+- Future web app layout and pane management files
 
 ## Verification
 
 - Lint.
 - App starts with `npm run dev` or repo equivalent.
-- Browser visual check for desktop and mobile widths.
+- Browser visual check for split panes and desktop/mobile widths.
 
 ## Git Branching
 
@@ -59,4 +60,4 @@ Branch from `develop` after branch 02 merges.
 
 ## Definition of Done
 
-Workspace renders, navigation works, layout is responsive and no upstream UI code is copied.
+Workbench renders, pane splitting works, layout is responsive and no upstream UI code is copied.
