@@ -44,10 +44,10 @@ def test_sources_notes_tasks_paper_and_bibliography_flow(tmp_path, monkeypatch):
     assert sources[0]["title"]
 
     paper = client.post(
-        "/api/papers/ingest",
+        "/api/sources/ingest",
         files={"file": ("paper.txt", b"Graph search improves exploration.", "text/plain")},
     ).json()
-    assert paper["source"]["kind"] == "paper"
+    assert paper["source"]["kind"] == "pdf"
 
     note = client.post(
         "/api/notes",

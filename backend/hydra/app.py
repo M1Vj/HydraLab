@@ -102,22 +102,64 @@ def create_app() -> FastAPI:
         store.add_event("sources.search.completed", f"Found {len(sources)} source candidates")
         return {"sources": sources}
 
-    @app.post("/api/papers/ingest")
-    async def ingest_paper(http_request: Request, file: UploadFile = File(...)) -> dict[str, object]:
+    from fastapi import Form
+
+    @app.post("/api/sources/ingest")
+    async def ingest_source(
+        http_request: Request,
+        file: UploadFile | None = File(None),
+        url: str | None = Form(None),
+        doi: str | None = Form(None),
+        title: str | None = Form(None),
+    ) -> dict[str, object]:
         store = _store(http_request)
-        raw = await file.read()
-        text = extract_upload_text(raw, file.content_type or "", file.filename or "paper")
+        if file:
+            raw = await file.read()
+            text = extract_upload_text(raw, file.content_type or "", file.filename or "paper")
+            final_title = title or file.filename or "Uploaded paper"
+            kind = "pdf"
+            url_ref = url or doi or ""
+        elif url or doi:
+            final_title = title or f"Ingested {url or doi}"
+            url_ref = url or doi or ""
+            text = f"This is mocked extracted text from {url_ref}."
+            kind = "url"
+        else:
+            raise HTTPException(status_code=400, detail="Must provide file, url, or doi")
+        
+        summary = f"Mocked summary for {final_title}. Text length: {len(text)} characters."
+        
         source = store.upsert_source(
             {
-                "title": file.filename or "Uploaded paper",
-                "authors": "Local upload",
-                "abstract": text[:1200],
-                "kind": "paper",
+                "title": final_title,
+                "authors": "Local ingestion",
+                "abstract": summary,
+                "url": url_ref,
+                "kind": kind,
             }
         )
-        note = store.add_note(f"Notes for {source['title']}", text[:4000] or "No extractable text found.", source["id"])
-        store.add_event("paper.ingested", f"Ingested {source['title']}")
+        note = store.add_note(f"Notes & Summary for {source['title']}", f"Summary: {summary}\n\nFull text: {text[:3800]}", source["id"])
+        store.add_event("source.ingested", f"Ingested {source['title']}")
         return {"source": source, "note": note}
+
+    @app.get("/api/sources/retrieve")
+    async def retrieve_rag(query: str, source_id: str | None = None, http_request: Request = None) -> dict[str, object]:
+        store = _store(http_request)
+        store.add_event("rag.retrieval", f"Retrieving answers for query '{query}'")
+        
+        # Mock simple RAG chunking and summarization
+        chunks = [f"Mocked relevant passage for '{query}'"]
+        if source_id:
+            chunks.append(f"Passage specifically from source_id={source_id}")
+            
+        answer = f"Based on the ingested sources, here is a synthesized answer for '{query}'. This is a mock RAG generation."
+        
+        return {
+            "query": query,
+            "answer": answer,
+            "chunks": chunks,
+            "source_id": source_id
+        }
 
     @app.post("/api/writing/review")
     def writing_review(request: WritingReviewRequest, http_request: Request) -> dict[str, object]:
