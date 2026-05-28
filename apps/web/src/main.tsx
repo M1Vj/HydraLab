@@ -37,6 +37,24 @@ type EventItem = {
   created_at: number;
 };
 
+type Evidence = {
+  id: string;
+  claim: string;
+  source_id: string;
+  source_title?: string;
+  passage: string;
+  support: "supported" | "weak" | "unsupported";
+  confidence: number;
+  review_status: string;
+};
+
+type ProviderSettings = {
+  id: string;
+  provider: string;
+  model: string;
+  api_key_ref: string;
+};
+
 function App() {
   const [query, setQuery] = useState("retrieval augmented generation for scientific papers");
   const [answer, setAnswer] = useState<ResearchResponse | null>(null);
@@ -46,6 +64,9 @@ function App() {
   const [sources, setSources] = useState<Source[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [evidence, setEvidence] = useState<Evidence[]>([]);
+  const [providerSettings, setProviderSettings] = useState<ProviderSettings[]>([]);
+  const [providerDraft, setProviderDraft] = useState({ provider: "openai", model: "gpt-5.1", api_key_ref: "env:OPENAI_API_KEY" });
   const [bibliography, setBibliography] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -56,14 +77,18 @@ function App() {
   }, []);
 
   async function refreshWorkspace() {
-    const [noteData, taskData, eventData] = await Promise.all([
+    const [noteData, taskData, eventData, evidenceData, settingsData] = await Promise.all([
       apiJson<{ notes: Note[] }>("/api/notes").catch(() => ({ notes: [] })),
       apiJson<{ tasks: Task[] }>("/api/tasks").catch(() => ({ tasks: [] })),
       apiJson<{ events: EventItem[] }>("/api/events").catch(() => ({ events: [] })),
+      apiJson<{ evidence: Evidence[] }>("/api/evidence").catch(() => ({ evidence: [] })),
+      apiJson<{ provider_settings: ProviderSettings[] }>("/api/settings").catch(() => ({ provider_settings: [] })),
     ]);
     setNotes(noteData.notes);
     setTasks(taskData.tasks);
     setEvents(eventData.events);
+    setEvidence(evidenceData.evidence);
+    setProviderSettings(settingsData.provider_settings);
   }
 
   async function submitResearch(event: FormEvent) {
@@ -104,6 +129,29 @@ function App() {
       throw new Error(`Hydra API error ${response.status}`);
     }
     setBibliography(await response.text());
+  }
+
+  async function addEvidenceReview(source: Source, support: Evidence["support"]) {
+    await apiJson<Evidence>("/api/evidence", {
+      method: "POST",
+      body: JSON.stringify({
+        claim: answer?.answer.slice(0, 220) || `Evidence from ${source.title}`,
+        source_id: source.id,
+        passage: source.abstract || source.title,
+        support,
+        confidence: support === "supported" ? 0.82 : 0.45,
+      }),
+    });
+    await refreshWorkspace();
+  }
+
+  async function saveProviderSettings(event: FormEvent) {
+    event.preventDefault();
+    await apiJson<ProviderSettings>("/api/settings/provider", {
+      method: "PUT",
+      body: JSON.stringify(providerDraft),
+    });
+    await refreshWorkspace();
   }
 
   async function submitReview() {
@@ -181,7 +229,11 @@ function App() {
                   <p>{answer.answer}</p>
                   <div className="citation-list">
                     {answer.sources.map((source) => (
-                      <a key={source.id} href={source.url || "#"}>{sourceLabel(source)}</a>
+                      <div className="citation-row" key={source.id}>
+                        <a href={source.url || "#"}>{sourceLabel(source)}</a>
+                        <button type="button" onClick={() => void addEvidenceReview(source, "supported")}>Support</button>
+                        <button type="button" onClick={() => void addEvidenceReview(source, "weak")}>Weak</button>
+                      </div>
                     ))}
                   </div>
                 </>
@@ -220,6 +272,18 @@ function App() {
               </div>
             ))}
             {!sources.length && !answer?.sources.length ? <p className="empty-state">Search or upload papers to build source trace.</p> : null}
+          </article>
+
+          <article>
+            <h2><CheckCircle2 aria-hidden="true" /> Evidence review</h2>
+            {evidence.length === 0 ? <p className="empty-state">Mark citations as supported or weak to preserve claim traceability.</p> : null}
+            {evidence.map((item) => (
+              <div className={`evidence-row evidence-${item.support}`} key={item.id}>
+                <strong>{item.support} · {Math.round(item.confidence * 100)}%</strong>
+                <p>{item.claim}</p>
+                <small>{item.source_title || item.source_id} · {item.review_status}</small>
+              </div>
+            ))}
           </article>
 
           <article id="notes">
@@ -269,6 +333,28 @@ function App() {
           <article id="settings" className="settings-panel">
             <h2><Settings aria-hidden="true" /> Settings & export</h2>
             <p>Provider-neutral Phase 1 setup. Add local keys through environment or future secure settings storage; no external mutations run from this UI.</p>
+            <form className="settings-form" onSubmit={saveProviderSettings}>
+              <label>
+                Provider
+                <input value={providerDraft.provider} onChange={(event) => setProviderDraft((current) => ({ ...current, provider: event.target.value }))} />
+              </label>
+              <label>
+                Model
+                <input value={providerDraft.model} onChange={(event) => setProviderDraft((current) => ({ ...current, model: event.target.value }))} />
+              </label>
+              <label>
+                Secret ref
+                <input value={providerDraft.api_key_ref} onChange={(event) => setProviderDraft((current) => ({ ...current, api_key_ref: event.target.value }))} />
+              </label>
+              <button type="submit">Save settings</button>
+            </form>
+            {providerSettings.map((setting) => (
+              <div className="setting-row" key={setting.id}>
+                <strong>{setting.provider}</strong>
+                <span>{setting.model}</span>
+                <code>{setting.api_key_ref || "no secret ref"}</code>
+              </div>
+            ))}
             <div className="export-actions">
               <button onClick={() => void loadBibliography("apa")}>APA export</button>
               <button onClick={() => void loadBibliography("bibtex")}>BibTeX export</button>

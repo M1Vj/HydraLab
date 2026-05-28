@@ -183,6 +183,18 @@ textarea {
   margin-top: 16px;
 }
 
+.citation-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.citation-row button {
+  min-height: 30px;
+  padding: 0 10px;
+}
+
 .citation-list a {
   color: #0e5f55;
 }
@@ -209,15 +221,31 @@ textarea {
 
 .note-row,
 .event-row,
+.evidence-row,
+.setting-row,
 .task-card {
   border-top: 1px solid #e5dece;
   padding: 12px 0;
 }
 
 .note-row p,
-.event-row p {
+.event-row p,
+.evidence-row p {
   color: #5f6d66;
   margin-bottom: 0;
+}
+
+.evidence-row {
+  border-left: 4px solid #d6b35a;
+  padding-left: 10px;
+}
+
+.evidence-supported {
+  border-left-color: #0e5f55;
+}
+
+.evidence-unsupported {
+  border-left-color: #9f3f38;
 }
 
 .event-row span {
@@ -281,6 +309,37 @@ progress {
   gap: 10px;
 }
 
+.settings-form {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
+.settings-form label {
+  color: #4d5c55;
+  display: grid;
+  font-size: 13px;
+  gap: 4px;
+}
+
+.settings-form input,
+.task-card select {
+  background: #fffdf7;
+  border: 1px solid #d8d1c0;
+  border-radius: 6px;
+  min-height: 34px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+
+.setting-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 pre {
   background: #f7f4ea;
   border: 1px solid #d8d1c0;
@@ -309,5 +368,10 @@ pre {
 
   .kanban-board {
     grid-template-columns: repeat(4, 220px);
+  }
+
+  .citation-row,
+  .settings-form {
+    grid-template-columns: 1fr;
   }
 }
