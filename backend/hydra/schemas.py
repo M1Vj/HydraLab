@@ -19,6 +19,13 @@ class NoteCreateRequest(BaseModel):
     source_id: str | None = None
 
 
+class NoteUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=20000)
+    source_id: str | None = None
+
+
+
 class TaskCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     column: str = "To Do"
