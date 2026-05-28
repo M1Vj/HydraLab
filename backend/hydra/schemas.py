@@ -64,3 +64,19 @@ class ConversationResponse(BaseModel):
     id: str
     title: str
     created_at: float
+
+class SourceIngestRequest(BaseModel):
+    url: str | None = None
+    title: str | None = None
+    doi: str | None = None
+
+class SourceRetrieveResponse(BaseModel):
+    id: str
+    title: str
+    url: str | None
+    metadata_json: str | None
+    summary: str | None
+
+class RAGRetrieveRequest(BaseModel):
+    query: str
+    source_id: str | None = None
