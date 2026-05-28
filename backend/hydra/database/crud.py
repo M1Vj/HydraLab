@@ -33,15 +33,19 @@ class CRUD:
         result = await self.session.exec(select(Conversation).where(Conversation.workspace_id == workspace_id))
         return result.all()
 
-    async def create_task(self, workspace_id: str, title: str, column_name: str, detail: str) -> Task:
-        task = Task(workspace_id=workspace_id, title=title, column_name=column_name, detail=detail)
+    async def create_task(self, workspace_id: str, title: str, column_name: str, detail: str, progress: int = 0, phase_indicator: str = "", position: int = 0) -> Task:
+        task = Task(workspace_id=workspace_id, title=title, column_name=column_name, detail=detail, progress=progress, phase_indicator=phase_indicator, position=position)
         self.session.add(task)
         await self.session.commit()
         await self.session.refresh(task)
         return task
 
     async def get_tasks(self, workspace_id: str) -> List[Task]:
-        result = await self.session.exec(select(Task).where(Task.workspace_id == workspace_id))
+        result = await self.session.exec(
+            select(Task)
+            .where(Task.workspace_id == workspace_id)
+            .order_by(Task.position.asc(), Task.created_at.asc())
+        )
         return result.all()
 
     async def update_task(self, task_id: str, **kwargs) -> Optional[Task]:
@@ -54,3 +58,12 @@ class CRUD:
         await self.session.commit()
         await self.session.refresh(task)
         return task
+
+    async def delete_task(self, task_id: str) -> bool:
+        result = await self.session.exec(select(Task).where(Task.id == task_id))
+        task = result.first()
+        if not task:
+            return False
+        await self.session.delete(task)
+        await self.session.commit()
+        return True

@@ -61,15 +61,49 @@ async def test_crud_conversation(session: AsyncSession):
 async def test_crud_task(session: AsyncSession):
     crud = CRUD(session)
     ws = await crud.create_workspace("WS for Task")
-    task = await crud.create_task(ws.id, "Test Task", "To Do", "Detail of task")
+    task = await crud.create_task(
+        workspace_id=ws.id,
+        title="Test Task",
+        column_name="to_do",
+        detail="Detail of task",
+        progress=10,
+        phase_indicator="retrieving sources",
+        position=2
+    )
     
     assert task.id is not None
-    assert task.column_name == "To Do"
+    assert task.column_name == "to_do"
+    assert task.progress == 10
+    assert task.phase_indicator == "retrieving sources"
+    assert task.position == 2
     
-    updated = await crud.update_task(task.id, progress=50, column_name="In Progress")
+    updated = await crud.update_task(task.id, progress=50, column_name="in_progress", phase_indicator="summarising papers", position=1)
     assert updated.progress == 50
-    assert updated.column_name == "In Progress"
+    assert updated.column_name == "in_progress"
+    assert updated.phase_indicator == "summarising papers"
+    assert updated.position == 1
+    
+    # Test Ordering
+    task2 = await crud.create_task(
+        workspace_id=ws.id,
+        title="Second Task",
+        column_name="to_do",
+        detail="Another one",
+        progress=0,
+        phase_indicator="",
+        position=0
+    )
     
     tasks = await crud.get_tasks(ws.id)
-    assert len(tasks) == 1
-    assert tasks[0].progress == 50
+    assert len(tasks) == 2
+    # Since position 0 < 1, task2 should come first
+    assert tasks[0].id == task2.id
+    assert tasks[1].id == task.id
+
+    # Test Deletion
+    deleted = await crud.delete_task(task2.id)
+    assert deleted is True
+    
+    tasks_after_delete = await crud.get_tasks(ws.id)
+    assert len(tasks_after_delete) == 1
+    assert tasks_after_delete[0].id == task.id
