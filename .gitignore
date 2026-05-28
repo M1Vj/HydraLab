@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.yarn/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.python-version
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Build output
+dist/
+build/
+.next/
+out/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Temporary upstream references
+tmp/
+temp/
+.tmp/
+.cache/
+upstream/
+references/tmp/
+t3code/
+hermes/
+Hermes/
