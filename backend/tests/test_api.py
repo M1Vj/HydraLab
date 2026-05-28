@@ -66,9 +66,65 @@ def test_sources_notes_tasks_paper_and_bibliography_flow(tmp_path, monkeypatch):
     bib = client.get("/api/export/bibliography", params={"style": "bibtex"}).text
     assert "@article" in bib or "@misc" in bib
 
-def test_reviews_analyze(client):
+def test_reviews_analyze(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
     res = client.post("/api/reviews/analyze", json={"text": "This always proves the point!"})
     assert res.status_code == 200
     data = res.json()
     assert "categories" in data
     assert "unsupported_claims" in data
+
+def test_notes_crud_and_links(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    # Create note 1
+    note1 = client.post(
+        "/api/notes",
+        json={"title": "Note A", "body": "This is Note A body."},
+    ).json()
+    assert note1["id"]
+    assert note1["title"] == "Note A"
+
+    # Create note 2 with a wiki link to note 1 by title or by id
+    note2 = client.post(
+        "/api/notes",
+        json={"title": "Note B", "body": f"This is Note B, linked to [[Note A]] and [[{note1['id']}]]."},
+    ).json()
+    assert note2["id"]
+
+    # Get single note
+    got = client.get(f"/api/notes/{note1['id']}").json()
+    assert got["title"] == "Note A"
+
+    # Search notes
+    searched = client.get("/api/notes", params={"query": "Note B"}).json()["notes"]
+    assert len(searched) == 1
+    assert searched[0]["id"] == note2["id"]
+
+    # Check backlinks for note 1
+    links = client.get(f"/api/notes/{note1['id']}/links").json()
+    assert len(links["backlinks"]) == 1
+    assert links["backlinks"][0]["id"] == note2["id"]
+
+    # Check graph
+    graph = client.get("/api/notes/graph").json()
+    assert len(graph["nodes"]) >= 2
+    assert len(graph["links"]) >= 1
+
+    # Update note 1
+    updated = client.put(
+        f"/api/notes/{note1['id']}",
+        json={"title": "Note A Updated", "body": "New body content.", "source_id": None},
+    ).json()
+    assert updated["title"] == "Note A Updated"
+
+    # Delete note 2
+    deleted = client.delete(f"/api/notes/{note2['id']}").json()
+    assert deleted["status"] == "success"
+
+    # Ensure 404
+    res = client.get(f"/api/notes/{note2['id']}")
+    assert res.status_code == 404
+
