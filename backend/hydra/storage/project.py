@@ -13,7 +13,7 @@ from typing import Iterable
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.database.models import Note, SchemaVersion
-from hydra.settings.project_config import default_project_config, folder_role, save_project_config
+from hydra.settings.project_config import default_project_config, load_project_config, save_project_config
 
 
 SCHEMA_VERSION = "2026.01.02"
@@ -37,7 +37,7 @@ class GitInitDecision:
 
 def create_project(root: Path, name: str, git_enabled: bool = True) -> ProjectInitResult:
     root = Path(root)
-    existed = root.exists() and any(root.iterdir()) if root.exists() else False
+    existed = root.exists()
     root.mkdir(parents=True, exist_ok=True)
 
     for dirname in CORE_DIRS:
@@ -47,13 +47,20 @@ def create_project(root: Path, name: str, git_enabled: bool = True) -> ProjectIn
     for dirname in APP_DIRS:
         (hydralab / dirname).mkdir(exist_ok=True)
 
-    project_id = _read_project_id(root / "project.yaml") or str(uuid.uuid4())
+    config_path = root / "project.yaml"
+    if config_path.exists():
+        config = load_project_config(config_path).data
+        project_id = str(config.get("project_id") or uuid.uuid4())
+        config["project_id"] = project_id
+    else:
+        project_id = str(uuid.uuid4())
+        config = default_project_config(project_id, name)
+        config["git"]["enabled"] = git_enabled
+
     _write_if_missing(root / "README.md", f"# {name}\n")
     _write_if_missing(root / "HYDRA.md", f"# {name} HydraLab Context\n\nProject-local assistant context. Do not store secrets here.\n")
 
-    config = default_project_config(project_id, name)
-    config["git"]["enabled"] = git_enabled
-    save_project_config(root / "project.yaml", config)
+    save_project_config(config_path, config)
     _init_project_db(hydralab / "hydralab.db")
 
     decision = evaluate_git_init(root, created_by_hydralab=not existed, git_enabled=git_enabled)

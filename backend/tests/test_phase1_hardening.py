@@ -133,15 +133,22 @@ def test_hl_core_05_settings_round_trip_preserves_unknown_keys_and_requires_sect
 
 def test_hl_core_08_single_instance_runtime_lock_reclaims_stale_and_never_binds_non_loopback(tmp_path):
     runtime = BackendRuntime(app_data_root=tmp_path, pid=123456789, port=8765)
-    stale = runtime.acquire()
-    assert stale.acquired is True
-    assert stale.reclaimed_stale is True
+    first = runtime.acquire()
+    assert first.acquired is True
+    assert first.reclaimed_stale is False
     assert json.loads((tmp_path / "runtime" / "hydralab-backend.lock").read_text())["pid"] == 123456789
 
     second = BackendRuntime(app_data_root=tmp_path, pid=123456789, port=8766)
     blocked = second.acquire()
     assert blocked.acquired is False
     assert blocked.running_pid == 123456789
+
+    runtime.release()
+    stale_lock = tmp_path / "runtime" / "hydralab-backend.lock"
+    stale_lock.write_text(json.dumps({"pid": 123456789, "host": "127.0.0.1", "port": 8765}))
+    reclaimed = BackendRuntime(app_data_root=tmp_path, pid=234567890, port=8765).acquire()
+    assert reclaimed.acquired is True
+    assert reclaimed.reclaimed_stale is True
     assert choose_bind_host() == "127.0.0.1"
 
 

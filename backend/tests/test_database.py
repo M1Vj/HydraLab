@@ -80,6 +80,25 @@ def test_hl_core_01_project_init_writes_only_core_tree_and_on_demand_paper_folde
     ensure_feature_folders(project.root, "paper")
 
 
+def test_hl_core_01_project_init_rerun_preserves_project_yaml_unknown_keys(tmp_path):
+    from hydra.settings.project_config import load_project_config, save_project_config
+
+    project = create_project(tmp_path / "Transformer Survey", "Transformer Survey", git_enabled=False)
+    config_path = project.root / "project.yaml"
+    config = load_project_config(config_path).data
+    config["future_hydralab_key"] = {"keep": True}
+    config["custom_metadata"]["local_note"] = "preserve me"
+    save_project_config(config_path, config)
+
+    rerun = create_project(project.root, "Transformer Survey", git_enabled=False)
+    reloaded = load_project_config(config_path).data
+
+    assert rerun.created is False
+    assert reloaded["project_id"] == project.project_id
+    assert reloaded["future_hydralab_key"] == {"keep": True}
+    assert reloaded["custom_metadata"]["local_note"] == "preserve me"
+
+
 def test_hl_core_02_git_init_detection_and_hydra_tracked(tmp_path):
     existing = tmp_path / "Existing"
     existing.mkdir()
@@ -96,6 +115,11 @@ def test_hl_core_02_git_init_detection_and_hydra_tracked(tmp_path):
 
     reused = evaluate_git_init(project.root, created_by_hydralab=False, git_enabled=True)
     assert reused.action == "reuse"
+
+    empty_existing = tmp_path / "Empty Existing"
+    empty_existing.mkdir()
+    create_project(empty_existing, "Empty Existing", git_enabled=True)
+    assert not (empty_existing / ".git").exists()
 
 
 def test_hl_core_03_app_data_profile_is_global_and_project_free(tmp_path, monkeypatch):

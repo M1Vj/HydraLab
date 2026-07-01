@@ -40,13 +40,12 @@ class BackendRuntime:
     def acquire(self) -> LockAcquireResult:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         existing = self._read_lock()
+        reclaimed_stale = False
         if existing:
             running_pid = int(existing.get("pid", 0))
             if self.lock_path in _HELD_LOCKS or _pid_is_alive(running_pid):
                 return LockAcquireResult(False, self.lock_path, running_pid=running_pid)
-            reclaimed = True
-        else:
-            reclaimed = False
+            reclaimed_stale = True
 
         payload = {
             "pid": self.pid,
@@ -57,7 +56,7 @@ class BackendRuntime:
         }
         self.lock_path.write_text(json.dumps(payload, sort_keys=True))
         _HELD_LOCKS.add(self.lock_path)
-        return LockAcquireResult(True, self.lock_path, reclaimed_stale=reclaimed or existing is None)
+        return LockAcquireResult(True, self.lock_path, reclaimed_stale=reclaimed_stale)
 
     def write_port_file(self, project_root: Path | None = None) -> dict:
         payload = {
