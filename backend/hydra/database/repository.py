@@ -1,3 +1,4 @@
+import json
 import uuid
 import time
 import re
@@ -21,6 +22,16 @@ from hydra.database.models import (
     ProviderSettings,
     ActivityEvent,
     NoteLink,
+    AgentRun,
+    Annotation,
+    BrowserEvent,
+    Chat,
+    KgEdge,
+    LexicalIndexEntry,
+    ReviewItem,
+    SourceMergeRecord,
+    SourceTombstone,
+    TaskLink,
 )
 
 
@@ -608,3 +619,265 @@ class Repository:
             "settings": await self.list_settings(),
             "provider_settings": await self.list_provider_settings(),
         }
+
+    _section31_models = {
+        "note": Note,
+        "kg_edge": KgEdge,
+        "task": Task,
+        "task_link": TaskLink,
+        "chat": Chat,
+        "message": Message,
+        "browser_event": BrowserEvent,
+        "agent_run": AgentRun,
+        "annotation": Annotation,
+        "source": Source,
+        "citation": Citation,
+        "claim": Claim,
+        "evidence": EvidenceLink,
+    }
+
+    async def create_section31_entity(self, entity: str, **data: Any) -> dict[str, Any]:
+        model = self._section31_models[entity]
+        normalized = self._normalize_section31_data(entity, data)
+        obj = model(**normalized)
+        self.session.add(obj)
+        await self.session.commit()
+        await self.session.refresh(obj)
+        return self._to_dict(obj)
+
+    async def get_section31_entity(self, entity: str, entity_id: str) -> Optional[dict[str, Any]]:
+        model = self._section31_models[entity]
+        obj = await self.session.get(model, entity_id)
+        return self._to_dict(obj)
+
+    async def list_section31_entities(self, entity: str) -> list[dict[str, Any]]:
+        model = self._section31_models[entity]
+        res = await self.session.exec(select(model))
+        return self._to_dict_list(res.all())
+
+    async def soft_delete_section31_entity(self, entity: str, entity_id: str) -> bool:
+        model = self._section31_models[entity]
+        obj = await self.session.get(model, entity_id)
+        if obj is None:
+            return False
+        if hasattr(obj, "soft_deleted"):
+            obj.soft_deleted = True
+        elif hasattr(obj, "trashed"):
+            obj.trashed = True
+        elif hasattr(obj, "link_state"):
+            obj.link_state = "target_trashed"
+        else:
+            return False
+        if hasattr(obj, "updated_at"):
+            obj.updated_at = datetime.now(timezone.utc)
+        self.session.add(obj)
+        await self.session.commit()
+        return True
+
+    def _normalize_section31_data(self, entity: str, data: dict[str, Any]) -> dict[str, Any]:
+        if entity == "note":
+            return {
+                "id": data.get("id") or data.get("note_id") or str(uuid.uuid4()),
+                "project_id": data.get("project_id"),
+                "workspace_id": data.get("workspace_id") or data.get("project_id"),
+                "relative_path": data.get("path") or data.get("relative_path") or "",
+                "title": data.get("title") or "Untitled note",
+                "body": data.get("body") or "",
+                "frontmatter": json.dumps(data.get("frontmatter") or {}),
+                "content_hash": data.get("content_hash") or "",
+                "tags": json.dumps(data.get("tags") or []),
+                "trust_origin": data.get("trust_origin") or "user",
+            }
+        if entity == "kg_edge":
+            data.setdefault("id", str(uuid.uuid4()))
+            data.setdefault("locator", "{}")
+            return data
+        if entity == "task":
+            data.setdefault("column_name", data.pop("status", "To Do"))
+            data.setdefault("title", "Untitled task")
+            return data
+        if entity == "chat":
+            data.setdefault("id", str(uuid.uuid4()))
+            data.setdefault("name", "Default")
+            return data
+        if entity == "message":
+            data.setdefault("id", str(uuid.uuid4()))
+            data.setdefault("role", "user")
+            data.setdefault("content", "")
+            return data
+        if entity == "browser_event":
+            data.setdefault("id", str(uuid.uuid4()))
+            data.setdefault("trust_origin", "untrusted")
+            return data
+        if entity == "agent_run":
+            data.setdefault("id", str(uuid.uuid4()))
+            data.setdefault("mode", "passive")
+            return data
+        if entity == "annotation":
+            data.setdefault("sidecar_record_id", str(uuid.uuid4()))
+            data.setdefault("source_id", "")
+            return data
+        return data
+
+    async def merge_sources(self, source_ids: list[str], reason: str, merge_confidence: float = 1.0) -> dict[str, Any]:
+        sources = [await self.session.get(Source, sid) for sid in source_ids]
+        live_sources = [s for s in sources if s is not None]
+        if len(live_sources) < 2:
+            raise ValueError("merge requires at least two existing sources")
+
+        survivor = sorted(
+            live_sources,
+            key=lambda s: (
+                s.added_at or s.created_at,
+                -sum(bool(getattr(s, field, None)) for field in ("doi", "arxiv_id", "metadata_json", "abstract", "url")),
+                s.id,
+            ),
+        )[0]
+        merged = [s for s in live_sources if s.id != survivor.id]
+        record = SourceMergeRecord(
+            survivor_id=survivor.id,
+            merged_ids_json=json.dumps([s.id for s in merged]),
+            reason=reason,
+        )
+        self.session.add(record)
+        await self.session.flush()
+
+        for duplicate in merged:
+            old_id = duplicate.id
+            await self._repoint_source_references(old_id, survivor.id)
+            duplicate.merged_into_source_id = survivor.id
+            duplicate.trashed = True
+            self.session.add(
+                SourceTombstone(
+                    old_id=old_id,
+                    survivor_id=survivor.id,
+                    merge_record_id=record.id,
+                    reason=reason,
+                    merge_confidence=merge_confidence,
+                )
+            )
+            self.session.add(duplicate)
+
+        await self.session.flush()
+        for duplicate in merged:
+            if await self.count_references_to_source(duplicate.id) != 0:
+                await self.session.rollback()
+                raise RuntimeError(f"dangling references remain for {duplicate.id}")
+
+        await self.session.commit()
+        return {"survivor_id": survivor.id, "merged_ids": [s.id for s in merged], "merge_record_id": record.id}
+
+    async def _repoint_source_references(self, old_id: str, survivor_id: str) -> None:
+        evidence = await self.session.exec(select(EvidenceLink).where(EvidenceLink.source_id == old_id))
+        for row in evidence.all():
+            row.source_id = survivor_id
+            self.session.add(row)
+
+        claims = await self.session.exec(select(Claim).where(and_(Claim.location_type == "source", Claim.location_id == old_id)))
+        for row in claims.all():
+            row.location_id = survivor_id
+            self.session.add(row)
+
+        task_links = await self.session.exec(select(TaskLink).where(and_(TaskLink.target_type == "source", TaskLink.target_id_or_path == old_id)))
+        for row in task_links.all():
+            row.target_id_or_path = survivor_id
+            self.session.add(row)
+
+        annotations = await self.session.exec(select(Annotation).where(Annotation.source_id == old_id))
+        for row in annotations.all():
+            row.source_id = survivor_id
+            self.session.add(row)
+
+        citations = await self.session.exec(select(Citation).where(Citation.source_id == old_id))
+        for row in citations.all():
+            row.source_id = survivor_id
+            self.session.add(row)
+
+    async def count_references_to_source(self, source_id: str) -> int:
+        count = 0
+        queries = [
+            select(EvidenceLink).where(EvidenceLink.source_id == source_id),
+            select(Claim).where(and_(Claim.location_type == "source", Claim.location_id == source_id)),
+            select(TaskLink).where(and_(TaskLink.target_type == "source", TaskLink.target_id_or_path == source_id)),
+            select(Annotation).where(Annotation.source_id == source_id),
+            select(Citation).where(Citation.source_id == source_id),
+        ]
+        for query in queries:
+            rows = await self.session.exec(query)
+            count += len(rows.all())
+        return count
+
+    async def trash_source(self, source_id: str, confirmed: bool) -> dict[str, Any]:
+        source = await self.session.get(Source, source_id)
+        if source is None:
+            raise ValueError("source not found")
+
+        claims = (await self.session.exec(select(Claim).where(and_(Claim.location_type == "source", Claim.location_id == source_id)))).all()
+        annotations = (await self.session.exec(select(Annotation).where(Annotation.source_id == source_id))).all()
+        evidence = (await self.session.exec(select(EvidenceLink).where(EvidenceLink.source_id == source_id))).all()
+        counts = {"claims": len(claims), "annotations": len(annotations), "evidence": len(evidence)}
+        if any(counts.values()) and not confirmed:
+            return {"requires_confirmation": True, "dependent_counts": counts}
+
+        source.trashed = True
+        source.link_state = "target_trashed"
+        self.session.add(source)
+
+        for obj in [*claims, *annotations, *evidence]:
+            obj.link_state = "target_trashed"
+            self.session.add(obj)
+            self.session.add(
+                ReviewItem(
+                    item_type="broken-link",
+                    title="Source moved to Trash",
+                    origin_type=obj.__tablename__,
+                    origin_id=getattr(obj, "id", getattr(obj, "sidecar_record_id", None)),
+                    target_type="source",
+                    target_id=source_id,
+                    summary=f"{obj.__tablename__} still references a trashed source.",
+                )
+            )
+
+        await self.session.commit()
+        return {"trashed": True, "dependent_counts": counts}
+
+    async def restore_source(self, source_id: str) -> dict[str, Any]:
+        source = await self.session.get(Source, source_id)
+        if source is None:
+            raise ValueError("source not found")
+        source.trashed = False
+        source.link_state = "live"
+        self.session.add(source)
+
+        for query in [
+            select(Claim).where(and_(Claim.location_type == "source", Claim.location_id == source_id)),
+            select(Annotation).where(Annotation.source_id == source_id),
+            select(EvidenceLink).where(EvidenceLink.source_id == source_id),
+        ]:
+            rows = await self.session.exec(query)
+            for row in rows.all():
+                row.link_state = "live"
+                self.session.add(row)
+
+        await self.session.commit()
+        return {"restored": True}
+
+    async def list_review_items(self, item_type: Optional[str] = None) -> list[dict[str, Any]]:
+        query = select(ReviewItem)
+        if item_type:
+            query = query.where(ReviewItem.item_type == item_type)
+        res = await self.session.exec(query)
+        return self._to_dict_list(res.all())
+
+    async def evaluate_index_versions(self, current_index_version: int, current_extraction_version: int) -> list[dict[str, str]]:
+        entries = await self.session.exec(select(LexicalIndexEntry))
+        mismatches: list[dict[str, str]] = []
+        for entry in entries.all():
+            reason = None
+            if entry.index_version < current_index_version:
+                reason = "index_version"
+            elif entry.extraction_version < current_extraction_version:
+                reason = "extraction_version"
+            if reason:
+                mismatches.append({"source_id": entry.source_id, "reason": reason})
+        return mismatches
