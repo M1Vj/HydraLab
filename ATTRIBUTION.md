@@ -42,6 +42,13 @@ This register is the operational home of the spec Section 37 dependency licensin
 | pypdf | BSD-3-Clause | none | bundled-dependency | Permissive; ships freely. | cleared | Default permissive text-extraction lib (Section 37.6). |
 | pdfminer.six | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Default permissive text-extraction lib. |
 | pdfplumber | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Default permissive text/table/page-utility lib. |
+| keyring | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | OS credential storage abstraction for provider secrets; raw secrets stay out of TOML/YAML/SQLite/runtime files. License verified from installed dist-info and PyPI/docs. |
+| tomli-w | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | TOML writer for `settings.toml`; paired with stdlib `tomllib` for reads. License verified from package classifier/PyPI. |
+| ruamel.yaml | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Round-trip YAML loader/writer for `project.yaml` preserving unknown fields/comments. License verified from package metadata/PyPI. |
+| jaraco.classes | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Transitive dependency of `keyring`; MIT classifier in installed metadata. |
+| jaraco.context | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Transitive dependency of `keyring`; MIT license verified from installed dist-info license file. |
+| jaraco.functools | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Transitive dependency of `keyring`; MIT license verified from installed dist-info license file. |
+| more-itertools | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Transitive dependency of `jaraco.classes`/`jaraco.functools`; MIT license verified from installed dist-info license file. |
 | PaperQA2 | Apache-2.0 | none | bundled-dependency (Phase 2) | Permissive; ships freely. | verify-at-adoption | Phase 2 scientific RAG (Section 25.6). Re-scan transitive tree at adoption. |
 | LangGraph / PydanticAI / OpenAI Agents SDK / others | (verify at adoption) | (verify) | bundled-dependency (Phase 2) | TBD per chosen framework + its transitive tree. | verify-at-adoption | Phase 2 only. License + full transitive license tree scanned and rowed before adoption (Section 25.8). No adoption without a cleared scan. |
 

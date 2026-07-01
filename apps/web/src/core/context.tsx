@@ -413,7 +413,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const fetchSettings = async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/settings");
+      const res = await fetch("/api/settings");
       const data = await res.json();
       if (data.provider_settings) {
         data.provider_settings.forEach((p: any) => {
@@ -455,7 +455,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
           system_instruction: systemInstruction
         }
       };
-      const res = await fetch("http://localhost:8000/api/settings", {
+      const res = await fetch("/api/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
