@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
+    "test": "bun test",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
