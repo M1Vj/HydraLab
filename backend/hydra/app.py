@@ -29,7 +29,12 @@ from hydra.schemas import (
 )
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
+from hydra.settings.toml_config import load_settings, save_settings
+from hydra.storage.app_data import app_data_root
+from hydra.storage.runtime import choose_bind_host
 from hydra.writing import review_text
+
+HYDRALAB_BIND_HOST = choose_bind_host()
 
 
 def create_app() -> FastAPI:
@@ -54,6 +59,21 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "phase": "1"}
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok", "host": HYDRALAB_BIND_HOST}
+
+    @app.get("/readyz")
+    def readyz() -> dict[str, object]:
+        return {
+            "status": "ready",
+            "subsystems": {
+                "sqlite": "ready",
+                "migrations": "ready",
+                "bind_host": HYDRALAB_BIND_HOST,
+            },
+        }
 
     @app.get("/api/chat/conversations")
     async def list_conversations(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -374,24 +394,36 @@ def create_app() -> FastAPI:
     @app.get("/api/settings")
     async def get_settings(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
+        settings_path = app_data_root() / "settings.toml"
+        global_settings = load_settings(settings_path).data
         return {
             "provider_settings": await repo.list_provider_settings(),
             "workspace_preferences": await repo.list_settings(),
+            "global_settings": global_settings,
         }
 
     @app.post("/api/settings")
     async def post_settings(request: SettingsUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
+        settings_path = app_data_root() / "settings.toml"
+        global_settings = load_settings(settings_path).data
         if request.provider_settings is not None:
             for p in request.provider_settings:
                 await repo.save_provider_settings(p.provider, p.model, p.api_key_ref)
+                account = global_settings.setdefault("providers", {}).setdefault("accounts", {}).setdefault(p.provider, {})
+                account["provider_id"] = p.provider
+                account["model"] = p.model
+                account["secret_ref"] = p.api_key_ref
         if request.workspace_preferences is not None:
             for k, v in request.workspace_preferences.items():
                 await repo.save_setting(k, v)
+                global_settings.setdefault("workspace", {})[k] = v
+        save_settings(settings_path, global_settings)
         await repo.add_event("settings.updated", "Saved settings and workspace preferences")
         return {
             "provider_settings": await repo.list_provider_settings(),
             "workspace_preferences": await repo.list_settings(),
+            "global_settings": global_settings,
         }
 
     @app.get("/api/export/preview")
