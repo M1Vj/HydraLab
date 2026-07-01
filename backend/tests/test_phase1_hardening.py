@@ -1,10 +1,17 @@
 import json
+import sqlite3
 
 import pytest
 from fastapi.testclient import TestClient
 
 from hydra.app import create_app
 from hydra.research import normalize_arxiv_entry, normalize_openalex_work, normalize_unpaywall_work
+from hydra.settings.consent import ConsentGates
+from hydra.settings.indexing import resolve_indexing_policy
+from hydra.settings.secrets import InMemorySecretStore, ProviderSecretService
+from hydra.settings.toml_config import REQUIRED_SETTINGS_SECTIONS, SettingsValidationError, load_settings, save_settings
+from hydra.storage.project import create_project
+from hydra.storage.runtime import BackendRuntime, choose_bind_host
 
 
 def test_normalizes_openalex_arxiv_and_unpaywall_sources():
@@ -99,3 +106,109 @@ def test_settings_persist_without_storing_secret_values_and_export_workspace(tmp
     export = client.get("/api/export/workspace").json()
     assert export["provider_settings"][0]["api_key_ref"] == "env:OPENAI_API_KEY"
     assert export["tasks"][0]["title"] == "Trace task"
+
+
+def test_hl_core_05_settings_round_trip_preserves_unknown_keys_and_requires_sections(tmp_path):
+    settings_path = tmp_path / "settings.toml"
+    settings = {section: {} for section in REQUIRED_SETTINGS_SECTIONS}
+    settings["schema"] = {"version": 1, "hydralab_version": "0.1.0"}
+    settings["workspace"]["experimental_panels"] = ["graph", "timeline"]
+    save_settings(settings_path, settings)
+
+    loaded = load_settings(settings_path)
+    save_settings(settings_path, loaded.data)
+    reloaded = load_settings(settings_path)
+
+    assert set(REQUIRED_SETTINGS_SECTIONS).issubset(reloaded.data)
+    assert reloaded.data["workspace"]["experimental_panels"] == ["graph", "timeline"]
+
+    invalid = tmp_path / "invalid.toml"
+    missing_privacy = {section: {} for section in REQUIRED_SETTINGS_SECTIONS if section != "privacy"}
+    missing_privacy["schema"] = {"version": 1, "hydralab_version": "0.1.0"}
+    save_settings(invalid, missing_privacy, validate=False)
+
+    with pytest.raises(SettingsValidationError, match=r"\[privacy\]"):
+        load_settings(invalid)
+
+
+def test_hl_core_08_single_instance_runtime_lock_reclaims_stale_and_never_binds_non_loopback(tmp_path):
+    runtime = BackendRuntime(app_data_root=tmp_path, pid=123456789, port=8765)
+    stale = runtime.acquire()
+    assert stale.acquired is True
+    assert stale.reclaimed_stale is True
+    assert json.loads((tmp_path / "runtime" / "hydralab-backend.lock").read_text())["pid"] == 123456789
+
+    second = BackendRuntime(app_data_root=tmp_path, pid=123456789, port=8766)
+    blocked = second.acquire()
+    assert blocked.acquired is False
+    assert blocked.running_pid == 123456789
+    assert choose_bind_host() == "127.0.0.1"
+
+
+def test_hl_consent_01_gates_are_independent_and_offline_blocks_provider_send():
+    gates = ConsentGates.defaults()
+
+    assert gates.g1.local_research_indexing == "on"
+    assert gates.g1.high_risk_indexing == "ask"
+    assert gates.g2.local_browser_capture is False
+    assert gates.g3.provider_send is False
+    assert gates.can_send_to_provider(["active_file"]).allowed is False
+
+    gates.g1.local_research_indexing = "on"
+    gates.g2.local_browser_capture = True
+    assert gates.g3.provider_send is False
+
+    gates.g3.provider_send = True
+    assert gates.can_send_to_provider(["active_file"]).allowed is True
+    gates.offline_only = True
+    decision = gates.can_send_to_provider(["active_file"])
+    assert decision.allowed is False
+    assert "offline-only" in decision.reason
+    assert decision.status == "offline-locked"
+
+
+@pytest.mark.parametrize(
+    ("category", "status"),
+    [
+        ("sources", "indexed"),
+        ("knowledge", "indexed"),
+        ("code-folder", "needs-consent"),
+        ("browser-history", "needs-consent"),
+        (".git", "excluded"),
+        ("credential-files", "excluded"),
+    ],
+)
+def test_hl_consent_02_indexing_policy_classifies_by_consent(category, status):
+    assert resolve_indexing_policy(category).status == status
+
+
+def test_hl_lic_01_provider_secrets_store_only_references(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRALAB_APP_DATA_ROOT", str(tmp_path / "app-data"))
+    project = create_project(tmp_path / "project", "Secret Test", git_enabled=False)
+    secret_store = InMemorySecretStore()
+    service = ProviderSecretService(secret_store)
+    settings_path = tmp_path / "app-data" / "settings.toml"
+    raw_secret = "sk-raw-secret-value"
+
+    settings = service.save_provider_secret(
+        settings_path=settings_path,
+        provider_id="openai",
+        secret_name="api_key",
+        secret_value=raw_secret,
+    )
+
+    assert settings["providers"]["accounts"]["openai"]["secret_ref"] != raw_secret
+    assert service.get_provider_secret(settings_path, "openai", "api_key") == raw_secret
+    assert raw_secret not in settings_path.read_text()
+    assert raw_secret not in (project.root / "project.yaml").read_text()
+
+    conn = sqlite3.connect(project.root / ".hydralab" / "hydralab.db")
+    try:
+        dump = "\n".join(conn.iterdump())
+    finally:
+        conn.close()
+    assert raw_secret not in dump
+
+    runtime = BackendRuntime(app_data_root=tmp_path / "app-data", pid=123456789, port=8765)
+    runtime.acquire()
+    assert raw_secret not in (tmp_path / "app-data" / "runtime" / "hydralab-backend.lock").read_text()
