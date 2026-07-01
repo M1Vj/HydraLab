@@ -54,3 +54,6 @@ references/tmp/
 t3code/
 hermes/
 Hermes/
+
+# Orchestration state (oh-my-claudecode)
+.omc/
