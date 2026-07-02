@@ -3,19 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
+
+from hydra.services.export.bundle import text_contains_secret
 
 from .models import ManuscriptDocument, RedactionItem, RedactionReport
 
-_SECRET_PATTERNS = (
-    re.compile(r"\b(sk|ai|xoxb|xoxp)-[A-Za-z0-9_-]{8,}\b"),
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\b(AKIA|ASIA)[A-Z0-9]{12,}\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
-)
 _EXCLUDED_TOP_LEVEL = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache"}
 
 
@@ -49,7 +42,7 @@ class RedactionScanner:
         parts = path.parts
         if not parts:
             return None, None
-        if parts[0] in _EXCLUDED_TOP_LEVEL:
+        if any(part in _EXCLUDED_TOP_LEVEL for part in parts):
             return "excluded_folders", "path is in an excluded project folder"
         if parts[0] == ".hydralab" and len(parts) > 1 and parts[1] == "browser":
             return "hidden_browser_session_data", "hidden browser/session data is excluded from manuscript packages"
@@ -76,4 +69,4 @@ def _looks_like_secret(path: Path) -> bool:
         text = path.read_text(encoding="utf-8", errors="ignore")[:200_000]
     except OSError:
         return False
-    return any(pattern.search(text) for pattern in _SECRET_PATTERNS)
+    return text_contains_secret(text)

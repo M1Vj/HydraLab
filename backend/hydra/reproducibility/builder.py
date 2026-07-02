@@ -386,6 +386,11 @@ def _manifest_from_plan(
 def _iter_project_files(project_root: Path) -> list[str]:
     paths = []
     for path in sorted(project_root.rglob("*")):
+        # Skip symlinks: a file symlink is is_file()-true and would sweep an
+        # out-of-tree target (e.g. ``notes/key -> ~/.ssh/id_rsa``) into the
+        # bundle plan and get copied verbatim (HL privacy audit M1).
+        if path.is_symlink():
+            continue
         if not path.is_file():
             continue
         relpath = path.relative_to(project_root).as_posix()

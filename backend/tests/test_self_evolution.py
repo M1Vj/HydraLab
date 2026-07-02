@@ -126,6 +126,49 @@ def test_risk_classifier_flags_privacy_setting_regardless_of_category():
     assert reason == "privacy_setting"
 
 
+def test_risk_classifier_flags_block_list_capability_grant():
+    # HL-TRUST-20 list-topology evasion: the capability is granted as a YAML
+    # block-list item while the `allowed_capabilities:` header stays as unchanged
+    # context, so the changed line carries no `field:` token. Must still route to
+    # review by its enclosing key.
+    diff = (
+        "@@ -8,6 +8,7 @@\n"
+        " allowed_capabilities:\n"
+        "   - read_source\n"
+        "+  - run_shell\n"
+        "   - summarize\n"
+    )
+    risk, reason = classify_diff("prompt", ".hydralab/skills/browser-save.md", diff)
+    assert risk == REVIEW_REQUIRED
+    assert "skill_capability_field" in reason
+
+
+def test_risk_classifier_flags_in_place_block_list_capability_swap():
+    # Editing a grant in place (remove suggest, add run_shell) evades the same way.
+    diff = (
+        "@@ -8,7 +8,7 @@\n"
+        " allowed_capabilities:\n"
+        "   - read_source\n"
+        "-  - suggest\n"
+        "+  - run_shell\n"
+    )
+    risk, reason = classify_diff("skill", ".hydralab/skills/browser-save.md", diff)
+    assert risk == REVIEW_REQUIRED
+    assert "skill_capability_field" in reason
+
+
+def test_risk_classifier_allows_benign_block_list_edit():
+    # A value added under a NON-protected block-list key stays auto-eligible.
+    diff = (
+        "@@ -1,4 +1,5 @@\n"
+        " keywords:\n"
+        "   - citations\n"
+        "+  - evidence\n"
+    )
+    risk, _ = classify_diff("skill", ".hydralab/skills/citation-check.md", diff)
+    assert risk == AUTO_ELIGIBLE
+
+
 def test_risk_classifier_allows_benign_prompt_wording():
     diff = "@@\n-Check the citation carefully.\n+Check each citation carefully and note gaps.\n"
     risk, _ = classify_diff("prompt", ".hydralab/skills/citation-check.md", diff)

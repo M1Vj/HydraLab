@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hydra.services.export.bundle import ExportOptions, SECRET_TOKEN_PREFIXES, scrub_secret_text, should_exclude
+from hydra.services.export.bundle import ExportOptions, scrub_secret_text, should_exclude, text_contains_secret
 
 KEYCHAIN_REF_RE = re.compile(r"\b(keychain|security|credential-store)://[^\s]+", re.IGNORECASE)
 
@@ -65,9 +65,8 @@ class ReproducibilityRedactionFilter:
     def decision_for_text(self, text: str, *, path_or_ref: str) -> RedactionDecision | None:
         if KEYCHAIN_REF_RE.search(text):
             return _decision("credentials", path_or_ref, "OS credential-store reference is hard-blocked")
-        for prefix in SECRET_TOKEN_PREFIXES:
-            if any(token.startswith(prefix) and len(token) > 8 for token in text.split()):
-                return _decision("secrets", path_or_ref, "content contains a provider/API secret-shaped token")
+        if text_contains_secret(text):
+            return _decision("secrets", path_or_ref, "content contains a provider/API secret-shaped token")
         return None
 
     def scrub_text(self, text: str) -> str:
@@ -92,7 +91,9 @@ class ReproducibilityRedactionFilter:
             return "excluded-by-default", "empty path is not exportable"
         posix = "/".join(parts)
         lower_name = parts[-1].lower()
-        if parts[0] == ".git":
+        # Match ``.git`` at any depth so a nested/submodule repo's credential
+        # remote URL cannot ride out in the bundle (HL privacy audit H2).
+        if ".git" in parts:
             return "git-internals", ".git internals are hard-blocked"
         if parts[0] == ".hydralab" and len(parts) > 2 and parts[1] == "cache" and parts[2] == "provider":
             return "provider-cache", ".hydralab/cache/provider content is hard-blocked"

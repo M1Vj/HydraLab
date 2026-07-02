@@ -18,6 +18,8 @@ chokepoint enforces — so this classifier can never drift from the policy.
 
 from __future__ import annotations
 
+import re
+
 from hydra.agents.policy import FULL_ACCESS_EXCLUDED_ACTIONS, PROTECTED_CONTEXT_FILES
 
 AUTO_ELIGIBLE = "auto_eligible"
@@ -55,6 +57,55 @@ def _changed_lines(unified_diff: str) -> list[str]:
     return lines
 
 
+_KEY_RE = re.compile(r"^(\s*)([A-Za-z0-9_-]+)\s*:")
+
+
+def _protected_block_edit(unified_diff: str) -> str | None:
+    """Detect an add/remove of a value *under* a protected skill field.
+
+    ``SKILL_PROTECTED_FIELDS`` like ``allowed_capabilities`` are YAML block lists:
+    a capability grant adds ``+  - run_shell`` while the ``allowed_capabilities:``
+    key line stays as unchanged context. The colon-token scan therefore misses
+    it. Here we track the enclosing YAML key by indentation across context AND
+    changed lines (the ``+``/``-``/`` `` prefix is stripped so original
+    indentation is preserved), and flag any changed line whose nearest enclosing
+    key — or the changed key itself — is protected (HL-TRUST-20, list-topology
+    evasion). Returns the matched field name, else ``None``.
+    """
+    stack: list[tuple[int, str]] = []
+    for raw in (unified_diff or "").splitlines():
+        if raw.startswith(("+++", "---")):
+            continue
+        if raw.startswith("@@"):
+            stack = []
+            continue
+        marker = raw[:1]
+        if marker not in ("+", "-", " "):
+            continue
+        body = raw[1:]
+        if not body.strip():
+            continue
+        changed = marker in ("+", "-")
+        indent = len(body) - len(body.lstrip(" "))
+        key_match = _KEY_RE.match(body)
+        if key_match:
+            key_indent = len(key_match.group(1))
+            key_name = key_match.group(2).lower()
+            while stack and stack[-1][0] >= key_indent:
+                stack.pop()
+            stack.append((key_indent, key_name))
+            if changed and key_name in SKILL_PROTECTED_FIELDS:
+                return key_name
+            continue
+        if changed:
+            for enclosing_indent, enclosing_key in reversed(stack):
+                if enclosing_indent < indent:
+                    if enclosing_key in SKILL_PROTECTED_FIELDS:
+                        return enclosing_key
+                    break
+    return None
+
+
 def _basename(path: str) -> str:
     return str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
 
@@ -83,11 +134,17 @@ def classify_diff(category: str, target_path: str, unified_diff: str) -> tuple[s
     # dangerous whether it arrives labeled "skill", "app_code", or "prompt" —
     # category is proposer-supplied and MUST NOT gate this scan (mirrors the
     # protected-context-file check above).
-    for field_name in SKILL_PROTECTED_FIELDS:
-        token = f"{field_name}:"
-        if any(token in line for line in changed):
-            if "skill_capability_field" in FULL_ACCESS_EXCLUDED_ACTIONS:
+    if "skill_capability_field" in FULL_ACCESS_EXCLUDED_ACTIONS:
+        for field_name in SKILL_PROTECTED_FIELDS:
+            token = f"{field_name}:"
+            if any(token in line for line in changed):
                 return REVIEW_REQUIRED, f"skill_capability_field ({field_name})"
+        # Block-list value edits (e.g. `+  - run_shell` under an unchanged
+        # `allowed_capabilities:` header) carry no `field:` token on the changed
+        # line, so match them by their enclosing YAML key instead.
+        block_field = _protected_block_edit(unified_diff)
+        if block_field is not None:
+            return REVIEW_REQUIRED, f"skill_capability_field ({block_field})"
 
     # Permission / privacy / consent / provider-routing settings. Also checked
     # regardless of category for the same reason — a "setting"-only gate lets

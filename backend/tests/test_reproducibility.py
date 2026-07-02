@@ -230,6 +230,34 @@ def test_hl_qual_34_redaction_records_hard_blocks_and_refuses_reinclude(tmp_path
     assert refusal.decision == "refuse"
 
 
+def test_hl_qual_34_redaction_catches_quoted_pem_and_nested_git_secrets(tmp_path):
+    # Privacy audit H1/H2: strong content detection + any-depth .git exclusion so
+    # quoted config keys, non-.pem private keys and nested-repo credential URLs
+    # are never copied into the bundle.
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "app.json").write_text('{"api_key":"sk-proj-abcdefgh1234567890"}\n')
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy" / "id_rsa").write_text(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nMIIsecretbody000\n-----END OPENSSH PRIVATE KEY-----\n"
+    )
+    (tmp_path / "apps" / "web" / ".git").mkdir(parents=True)
+    (tmp_path / "apps" / "web" / ".git" / "config").write_text(
+        "[remote]\n url = https://x-access-token:ghp_abcdefghij0123456789abcd@github.com/o/r.git\n"
+    )
+    redaction = ReproducibilityRedactionFilter(tmp_path)
+
+    decisions = {
+        item.path_or_ref: item
+        for item in redaction.scan_paths(
+            ["config/app.json", "deploy/id_rsa", "apps/web/.git/config"]
+        )
+    }
+
+    assert decisions["config/app.json"].category == "secrets"
+    assert decisions["deploy/id_rsa"].category == "secrets"
+    assert decisions["apps/web/.git/config"].category == "git-internals"
+
+
 @pytest.mark.asyncio
 async def test_hl_qual_33_ledger_export_matches_store_and_surfaces_trust_decisions(session):
     ids = await _seed_records(session)

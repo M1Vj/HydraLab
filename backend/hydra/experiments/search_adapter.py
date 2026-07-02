@@ -92,8 +92,13 @@ class SearchAdapter:
                 justification_trust=justification_trust,
             )
             candidate = Candidate(candidate_id=f"candidate-{index}", config=config, run_id=proposal.run.id)
-            # Every candidate stays fully gated: approve the per-run approval, then
-            # start. A run that cannot be approved (e.g. untrusted) is skipped.
+            # The user-initiated search consumes the per-run approval for each
+            # trusted candidate within its explicit candidate budget (the loop is
+            # the approver of the runs it just proposed). Untrusted-origin
+            # candidates get no approval_id (routed to the Review Inbox by
+            # create_run) and are skipped here — they are NOT auto-run. Callers
+            # driving this from a non-user context MUST pass the real
+            # trust_origin so that routing holds.
             if proposal.approval_id:
                 await self.runner.approve_run(proposal.run.id)
                 run = await self.runner.start_run(proposal.run.id, argv=argv)
