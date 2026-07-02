@@ -58,6 +58,17 @@ class Source(SQLModel, table=True):
     source_type: str = Field(default="article")
     doi: Optional[str] = Field(default=None, index=True)
     arxiv_id: Optional[str] = Field(default=None, index=True)
+    venue: str = Field(default="")
+    publisher: str = Field(default="")
+    keywords: str = Field(default="[]")
+    identifiers: str = Field(default="{}")
+    csl_json: str = Field(default="{}")
+    bibtex: str = Field(default="")
+    ris: str = Field(default="")
+    confidence: float = Field(default=1.0)
+    duplicate_group_id: Optional[str] = Field(default=None, index=True)
+    duplicate_status: str = Field(default="none")
+    merge_confidence: float = Field(default=0.0)
     metadata_json: Optional[str] = None
     metadata_sources_json: str = Field(default="[]")
     trust_origin: str = Field(default="user")
@@ -108,9 +119,17 @@ class Claim(SQLModel, table=True):
     workspace_id: Optional[str] = Field(default=None, foreign_key="workspaces.id", nullable=True)
     project_id: Optional[str] = Field(default=None, index=True)
     text: str
+    claim_type: str = Field(default="")
     location_type: Optional[str] = Field(default=None)
     location_id: Optional[str] = Field(default=None, index=True)
-    status: str = Field(default="needs_review")
+    location_range: Optional[str] = Field(default=None)
+    status: str = Field(default="draft")
+    created_from: str = Field(default="manual")
+    notes_path: Optional[str] = Field(default=None)
+    origin_ref: Optional[str] = Field(default=None)
+    origin_quote: str = Field(default="")
+    extraction_confidence: float = Field(default=0.0)
+    extraction_mode: str = Field(default="manual")
     link_state: str = Field(default="live")
     trust_origin: str = Field(default="user")
     created_at: datetime = Field(default_factory=utcnow)
@@ -123,10 +142,17 @@ class EvidenceLink(SQLModel, table=True):
     claim_id: str = Field(foreign_key="claims.id")
     citation_id: Optional[str] = Field(default=None, foreign_key="citations.id", nullable=True)
     source_id: str = Field(foreign_key="sources.id")
+    asset_id: Optional[str] = Field(default=None)
     passage: str
     support: str
+    support_level: str = Field(default="")
     confidence: float
     review_status: str
+    evidence_type: str = Field(default="quote")
+    locator: str = Field(default="{}")
+    quote_text: str = Field(default="")
+    summary: str = Field(default="")
+    created_by: str = Field(default="user")
     annotation_id: Optional[str] = Field(default=None, index=True)
     sidecar_path: Optional[str] = Field(default=None)
     sidecar_record_id: Optional[str] = Field(default=None, index=True)
@@ -452,6 +478,8 @@ class SourceMergeRecord(SQLModel, table=True):
     merged_ids_json: str
     reason: str
     reversible: bool = Field(default=True)
+    reversed: bool = Field(default=False)
+    repoint_log_json: str = Field(default="[]")
     created_at: datetime = Field(default_factory=utcnow)
 
 
