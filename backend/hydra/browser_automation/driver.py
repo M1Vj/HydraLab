@@ -15,6 +15,11 @@ class DriverPage:
     text: str = ""
     snapshot_bytes: bytes = b""
     automation_blocked: bool = False
+    # Landed-page sensitivity signals inspected AFTER redirects resolve, so the
+    # runner can re-evaluate the real page (not the declared URL) before capture.
+    has_password_field: bool = False
+    has_payment_field: bool = False
+    has_cookies: bool = False
 
 
 class BrowserResearchDriver(Protocol):
@@ -91,7 +96,22 @@ class PlaywrightBrowserResearchDriver:
             return DriverPage(url=url, title=await page.title(), automation_blocked=True)
         text = await page.locator("body").inner_text(timeout=5000)
         snapshot = (await page.content()).encode()
-        return DriverPage(url=page.url, title=await page.title(), text=text, snapshot_bytes=snapshot)
+        has_password = await page.locator("input[type=password]").count() > 0
+        payment_selector = (
+            "input[autocomplete*='cc-'], input[name*='card'], input[name*='cvc'], "
+            "input[name*='cvv'], input[autocomplete='cc-number']"
+        )
+        has_payment = await page.locator(payment_selector).count() > 0
+        has_cookies = bool(await context.cookies())  # type: ignore[attr-defined]
+        return DriverPage(
+            url=page.url,
+            title=await page.title(),
+            text=text,
+            snapshot_bytes=snapshot,
+            has_password_field=has_password,
+            has_payment_field=has_payment,
+            has_cookies=has_cookies,
+        )
 
     async def close_task_group(self, task_group_id: str) -> None:
         context = self._contexts.pop(task_group_id, None)

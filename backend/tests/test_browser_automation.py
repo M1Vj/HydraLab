@@ -314,6 +314,86 @@ async def test_hl_trust_33_hard_blocked_context_never_captured_or_sent(session: 
     assert (await session.exec(select(BrowserEvent))).all() == []
 
 
+@pytest.mark.asyncio
+async def test_hl_browse_39_redirect_to_unapproved_host_is_discarded_before_capture(
+    session: AsyncSession, tmp_path: Path
+):
+    # Declared host is approved, but navigation lands (via redirect) on a host
+    # that was never approved for this run. The landed page must be discarded
+    # before capture or provider promotion (03-06 redirect bypass).
+    await BrowserHostPermissionRepository(session).set(
+        PROJECT_ID, "test.local", "allow_for_task", task_group_id="task-transformers"
+    )
+    declared = "http://test.local/redirector"
+    landed = DriverPage(
+        url="http://tracker.evil.example/landing",
+        title="Redirected",
+        text="content that must never be captured",
+        snapshot_bytes=b"<html></html>",
+    )
+    driver = FakeBrowserResearchDriver({declared: landed})
+    runner = AutonomousBrowserResearchRunner(session, driver=driver, artifact_root=tmp_path)
+
+    result = await runner.start(
+        BrowserRunRequest(
+            project_id=PROJECT_ID,
+            mode=COPILOT,
+            task_id="task-transformers",
+            task_label="Transformer Survey",
+            steps=[BrowserResearchStep(url=declared)],
+        )
+    )
+
+    assert driver.requested_urls == [declared]  # navigation happened
+    run = await session.get(AgentRun, result.run_id)
+    assert run is not None and run.status == "succeeded"
+    steps = (await session.exec(select(AgentRunStep).where(AgentRunStep.run_id == result.run_id))).all()
+    assert any(step.kind == "browser.redirect-blocked" for step in steps)
+    assert not any(step.kind == "browser.capture" for step in steps)
+    assert (await session.exec(select(Source))).all() == []
+    events = (await session.exec(select(BrowserEvent))).all()
+    assert all(event.event_type == "host-blocked" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_hl_browse_40_landed_password_page_is_discarded_before_capture(
+    session: AsyncSession, tmp_path: Path
+):
+    # Same allowed host, but the landed page exposes a password field. The
+    # runner must re-inspect landed DOM signals and hard-block before capture
+    # (03-06 live-field detection).
+    await BrowserHostPermissionRepository(session).set(
+        PROJECT_ID, "test.local", "allow_for_task", task_group_id="task-transformers"
+    )
+    declared = "http://test.local/account"
+    landed = DriverPage(
+        url="http://test.local/account/login",
+        title="Sign in",
+        text="password protected area",
+        snapshot_bytes=b"<html></html>",
+        has_password_field=True,
+    )
+    driver = FakeBrowserResearchDriver({declared: landed})
+    runner = AutonomousBrowserResearchRunner(session, driver=driver, artifact_root=tmp_path)
+
+    result = await runner.start(
+        BrowserRunRequest(
+            project_id=PROJECT_ID,
+            mode=COPILOT,
+            task_id="task-transformers",
+            task_label="Transformer Survey",
+            steps=[BrowserResearchStep(url=declared)],
+        )
+    )
+
+    run = await session.get(AgentRun, result.run_id)
+    assert run is not None and run.status == "succeeded"
+    steps = (await session.exec(select(AgentRunStep).where(AgentRunStep.run_id == result.run_id))).all()
+    assert any(step.kind == "browser.landing-blocked" for step in steps)
+    assert not any(step.kind == "browser.capture" for step in steps)
+    assert (await session.exec(select(Source))).all() == []
+
+
 def test_api_start_and_cancel_autonomous_browser_run(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
     client = TestClient(create_app())

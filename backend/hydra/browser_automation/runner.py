@@ -21,6 +21,7 @@ from hydra.browser_automation.policy import (
     BrowserAutomationContext,
     BrowserAutomationPolicy,
     HOST_PROMPT_CHOICES,
+    host_for_url,
 )
 from hydra.database.models import AgentRun
 from hydra.services.browser.repository import BrowserActionLogRepository
@@ -161,6 +162,13 @@ class AutonomousBrowserResearchRunner:
                     await self.cancel(run.id)
                 if await self._cancelled(run.id):
                     return BrowserResearchRunResult(run_id=run.id, state=RunStatus.CANCELLED.value)
+                # Re-evaluate the LANDED page (post-redirect host + sensitive DOM
+                # fields) before any capture. The pre-navigation decision only
+                # covered the declared step.url; a 302 to a blocked/unapproved
+                # host, or a login/payment page, must never reach capture or the
+                # provider promotion path (03-06 fix).
+                if await self._discard_if_landing_blocked(request, run.id, mode, step, page, decision.host):
+                    continue
                 if await self._budget_blocked(run.id, started, page.text):
                     return BrowserResearchRunResult(
                         run_id=run.id,
@@ -221,6 +229,76 @@ class AutonomousBrowserResearchRunner:
             return BrowserResearchRunResult(run_id=run.id, state=RunStatus.FAILED.value)
         finally:
             await self.driver.close_task_group(request.task_id)
+
+    async def _discard_if_landing_blocked(
+        self,
+        request: BrowserRunRequest,
+        run_id: str,
+        mode: str,
+        step: BrowserResearchStep,
+        page: Any,
+        declared_host: str,
+    ) -> bool:
+        """Re-check the landed page; discard (never capture) if it is not allowed."""
+        landed_url = getattr(page, "url", "") or step.url
+        decision = await self.policy.evaluate_navigation(
+            BrowserAutomationContext(
+                project_id=request.project_id,
+                url=landed_url,
+                task_group_id=request.task_id,
+                has_password_field=bool(getattr(page, "has_password_field", False)),
+                has_payment_field=bool(getattr(page, "has_payment_field", False)),
+                has_cookies=bool(getattr(page, "has_cookies", False)),
+            )
+        )
+        if decision.allowed:
+            return False
+        redirected = host_for_url(landed_url) != declared_host
+        if decision.status == "needs-approval":
+            reason = f"post-redirect host {decision.host} was not pre-approved for this run"
+        else:
+            reason = decision.reason
+        kind = "browser.redirect-blocked" if redirected else "browser.landing-blocked"
+        action = "redirect-blocked" if redirected else "landing-blocked"
+        await self.capture.record_host_blocked(
+            project_id=request.project_id,
+            run_id=run_id,
+            url=landed_url,
+            host=decision.host,
+            reason=reason,
+        )
+        await self.logs.append(
+            project_id=request.project_id,
+            action=action,
+            host=decision.host,
+            mode=mode,
+            approval_result="blocked",
+            target_url=landed_url,
+            task_group_id=request.task_id,
+            trust_level="untrusted-external",
+            payload={
+                "reason": reason,
+                "run_id": run_id,
+                "declared_host": declared_host,
+                "declared_url": step.url,
+                "status": decision.status,
+            },
+        )
+        await self.repo.append_step(
+            run_id,
+            kind=kind,
+            status=StepStatus.DENIED.value,
+            summary=f"discarded landed page: {reason}",
+            trust_origin="untrusted-external",
+            payload={
+                "host": decision.host,
+                "landed_url": landed_url,
+                "declared_url": step.url,
+                "reason": reason,
+                "status": decision.status,
+            },
+        )
+        return True
 
     async def cancel(self, run_id: str) -> None:
         self._cancel_requested = True
