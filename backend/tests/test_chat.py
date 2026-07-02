@@ -148,16 +148,19 @@ def test_hl_assist_05_context_refs_recorded_on_message(tmp_path, monkeypatch):
     assert user["context_refs"][0]["id_or_path"] == "Attention Is All You Need"
 
 
-# @HL-MODE-01 — Passive is the only selectable mode.
+# @HL-MODE-01 — Phase 2 adds Co-pilot; Full Access stays per-project opt-in (OFF).
 def test_hl_mode_01_passive_only_mode(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     modes = client.get("/api/assistant/modes").json()
     assert modes["default_mode"] == "passive"
     by_id = {m["id"]: m for m in modes["modes"]}
     assert by_id["passive"]["enabled"] is True
-    assert by_id["copilot"]["enabled"] is False
+    # Phase 2 lands Co-pilot as a selectable mode.
+    assert by_id["copilot"]["enabled"] is True
     assert by_id["copilot"]["phase"] == 2
+    # Full Access defaults OFF until explicitly enabled for the project.
     assert by_id["full_access"]["enabled"] is False
+    assert modes["full_access_enabled"] is False
 
 
 # @HL-MODE-02 — the assistant streams a reply in Passive mode.

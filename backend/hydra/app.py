@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
@@ -74,6 +75,11 @@ from hydra.schemas import (
     ChatUpdateRequest,
     ChatExportRequest,
     SendScopeRequest,
+    AgentModeUpdateRequest,
+    FullAccessUpdateRequest,
+    SkillEnabledRequest,
+    SkillEditRequest,
+    ApprovalResolveRequest,
     ContextFileSaveRequest,
     MemoryCandidateRequest,
 )
@@ -127,7 +133,17 @@ from hydra.settings.toml_config import load_settings, save_settings
 from hydra.settings.secrets import InMemorySecretStore, KeyringSecretStore, ProviderSecretService, SecretStore
 from hydra.providers import MockProvider, ProviderRouter, RoutingPolicy, RunBudget, build_provider
 from hydra.services.assistant import AssistantConfig, AssistantService, ProviderCache
-from hydra.skills.registry import PLUGIN_REJECTION_MESSAGE, load_skill_registry
+from hydra.skills.registry import (
+    PLUGIN_REJECTION_MESSAGE,
+    edit_skill_text,
+    load_skill_registry,
+    restore_skill,
+    set_skill_enabled,
+)
+from hydra.agents.policy import InvalidModeError, VALID_MODES, normalize_mode
+from hydra.agents.runs import RunRepository
+from hydra.agents.approvals import ApprovalService, to_contract
+from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
 from hydra.services.project_context import (
     ContextFileMemory,
     ensure_hydra_md,
@@ -532,19 +548,60 @@ def create_app() -> FastAPI:
             )
         return {"included": scope.included, "excluded": scope.excluded, "blocked": scope.blocked}
 
+    async def _mode_policy(session: AsyncSession, project_id: str) -> AgentModePolicy:
+        policy = await session.get(AgentModePolicy, project_id)
+        if policy is None:
+            # Full Access defaults OFF on a fresh project (HL-MODE-03).
+            policy = AgentModePolicy(project_id=project_id, default_mode="passive", full_access_enabled=False)
+        return policy
+
     @app.get("/api/assistant/modes")
-    async def assistant_modes() -> dict[str, object]:
+    async def assistant_modes(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         privacy = _assistant_privacy()
+        policy = await _mode_policy(session, project_id)
         return {
-            "default_mode": privacy["default_mode"],
+            "default_mode": policy.default_mode or privacy["default_mode"],
+            "full_access_enabled": bool(policy.full_access_enabled),
             "modes": [
                 {"id": "passive", "label": "Passive (Suggest-only)", "enabled": True, "phase": 1},
-                {"id": "copilot", "label": "Co-pilot (Approve-to-apply)", "enabled": False, "phase": 2},
-                {"id": "full_access", "label": "Full Access (YOLO)", "enabled": False, "phase": 2},
+                {"id": "copilot", "label": "Co-pilot (Approve-to-apply)", "enabled": True, "phase": 2},
+                {"id": "full_access", "label": "Full Access (YOLO)", "enabled": bool(policy.full_access_enabled), "phase": 2},
             ],
             "offline_only": privacy["offline_only"],
             "g3_provider_send": privacy["g3_enabled"],
         }
+
+    @app.post("/api/assistant/mode")
+    async def set_assistant_mode(request: AgentModeUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        try:
+            mode = normalize_mode(request.mode)
+        except InvalidModeError as exc:
+            raise HTTPException(status_code=400, detail={"reason": str(exc), "valid_modes": list(VALID_MODES)}) from exc
+        settings_path = app_data_root() / "settings.toml"
+        settings = load_settings(settings_path).data
+        settings.setdefault("assistant", {})["default_mode"] = mode
+        save_settings(settings_path, settings)
+        policy = await _mode_policy(session, request.project_id)
+        policy.default_mode = mode
+        # Selecting a higher mode never itself enables Full Access; that is a
+        # separate per-project opt-in (HL-MODE-03).
+        policy.updated_at = datetime.now(timezone.utc)
+        session.add(policy)
+        await session.commit()
+        await session.refresh(policy)
+        return {"default_mode": policy.default_mode, "full_access_enabled": bool(policy.full_access_enabled)}
+
+    @app.post("/api/assistant/full-access")
+    async def set_full_access(request: FullAccessUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        policy.full_access_enabled = bool(request.enabled)
+        if not request.enabled and policy.default_mode == "full_access":
+            policy.default_mode = "passive"
+        policy.updated_at = datetime.now(timezone.utc)
+        session.add(policy)
+        await session.commit()
+        await session.refresh(policy)
+        return {"full_access_enabled": bool(policy.full_access_enabled), "default_mode": policy.default_mode}
 
     @app.post("/api/assistant/offline")
     async def set_offline_only(enabled: bool = True) -> dict[str, object]:
@@ -558,13 +615,90 @@ def create_app() -> FastAPI:
         return {"offline_only": bool(enabled), "cache_purged": bool(enabled), "status": "offline-blocked" if enabled else "online"}
 
     # ---------------------------------------------------------------- skills
+    def _skill_project_dir() -> Path:
+        return hydra_project_root() / ".hydralab" / "skills"
+
+    def _skill_state_dir() -> Path:
+        # Kept separate from the scope folders so the state JSON is never mistaken
+        # for a plugin manifest during discovery.
+        return hydra_project_root() / ".hydralab" / "skill-state"
+
+    def _load_skills():
+        return load_skill_registry(project_dir=_skill_project_dir(), state_dir=_skill_state_dir())
+
     @app.get("/api/skills")
     async def list_skills() -> dict[str, object]:
-        registry = load_skill_registry(project_dir=hydra_project_root() / ".hydralab" / "skills")
+        registry = _load_skills()
         return {
             "skills": [s.to_api() for s in registry.skills],
             "rejected_plugins": registry.rejected_plugins,
         }
+
+    @app.post("/api/skills/{skill_id}/enabled")
+    async def toggle_skill(skill_id: str, request: SkillEnabledRequest) -> dict[str, object]:
+        registry = _load_skills()
+        skill = registry.get(skill_id)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        try:
+            set_skill_enabled(_skill_state_dir(), skill, request.enabled)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _load_skills().get(skill_id).to_api()
+
+    @app.put("/api/skills/{skill_id}")
+    async def edit_skill(skill_id: str, request: SkillEditRequest) -> dict[str, object]:
+        registry = _load_skills()
+        if registry.get(skill_id) is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        reason = edit_skill_text(_skill_state_dir(), skill_id, request.text)
+        return {"skill": _load_skills().get(skill_id).to_api(), "validation_error": reason}
+
+    @app.post("/api/skills/{skill_id}/restore")
+    async def restore_skill_default(skill_id: str) -> dict[str, object]:
+        registry = _load_skills()
+        skill = registry.get(skill_id)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        if skill.scope != "builtin":
+            raise HTTPException(status_code=400, detail="only built-in skills restore to factory text")
+        restore_skill(_skill_state_dir(), skill_id)
+        return _load_skills().get(skill_id).to_api()
+
+    # ----------------------------------------------------- agent runs / approvals
+    @app.get("/api/agent/runs/{run_id}")
+    async def get_agent_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runs = RunRepository(session)
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        trace = await runs.get_trace(run_id)
+        return {
+            "run": {"id": run.id, "project_id": run.project_id, "mode": run.mode, "status": run.status, "paused": run.paused},
+            "trace": trace.public_dict(),
+        }
+
+    @app.post("/api/agent/runs/{run_id}/pause")
+    async def pause_agent_run(run_id: str, paused: bool = True, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await RunRepository(session).pause_run(run_id, paused)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused}
+
+    @app.get("/api/agent/approvals")
+    async def list_agent_approvals(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = ApprovalService(session)
+        pending = await service.list_pending(project_id)
+        return {"approvals": [to_contract(row).public_dict() for row in pending]}
+
+    @app.post("/api/agent/approvals/{approval_id}/resolve")
+    async def resolve_agent_approval(approval_id: str, request: ApprovalResolveRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = ApprovalService(session)
+        approval = await service.get(approval_id)
+        if approval is None:
+            raise HTTPException(status_code=404, detail="approval not found")
+        result = await service.resolve(approval_id, decision=request.decision)
+        return {"applied": result.applied, "status": result.status, "reason": result.reason}
 
     # ------------------------------------------------------ context files / memory
     @app.get("/api/context-files")
