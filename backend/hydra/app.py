@@ -2347,22 +2347,16 @@ def create_app() -> FastAPI:
     @app.get("/api/project/objects")
     async def project_objects(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        sources = await repo.list_sources()
-        notes = await repo.search_notes()
-        claims = await repo.list_claims()
-        tasks = await repo.list_tasks()
-        citations = await repo.list_citations()
-        evidence = await repo.list_evidence()
-
-        if project_id:
-            sources = [item for item in sources if item.get("project_id") in (None, project_id)]
-            notes = [item for item in notes if item.get("project_id") in (None, project_id)]
-            claims = [item for item in claims if item.get("project_id") in (None, project_id)]
-            tasks = [item for item in tasks if item.get("project_id") in (None, project_id)]
-            citations = [item for item in citations if item.get("project_id") in (None, project_id)]
+        resolved_project_id = project_id or "default"
+        sources = await repo.list_sources(project_id=resolved_project_id)
+        notes = await repo.search_notes(project_id=resolved_project_id)
+        claims = await repo.list_claims(project_id=resolved_project_id)
+        tasks = await repo.list_tasks(project_id=resolved_project_id)
+        citations = await repo.list_citations(project_id=resolved_project_id)
+        evidence = await repo.list_evidence(project_id=resolved_project_id)
 
         return {
-            "project_id": project_id or "default",
+            "project_id": resolved_project_id,
             "objects": {
                 "notes": notes,
                 "sources": sources,
@@ -2760,7 +2754,7 @@ def create_app() -> FastAPI:
 
         bibliography: list[str] | None = None
         if request.include_bibliography:
-            sources = await repo.list_sources()
+            sources = await repo.list_sources(project_id=request.project_id or "default")
             items = [s["csl_json"] for s in sources if isinstance(s.get("csl_json"), dict) and s.get("csl_json")]
             if items:
                 renderer = CslRenderer(default_style=_resolve_default_citation_style())
@@ -2996,10 +2990,14 @@ def create_app() -> FastAPI:
         return result
 
     @app.get("/api/sources/export")
-    async def export_sources(fmt: str = "bibtex", session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
+    async def export_sources(
+        fmt: str = "bibtex",
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> PlainTextResponse:
         repo = Repository(session)
         try:
-            text = await repo.export_sources(fmt)
+            text = await repo.export_sources(fmt, project_id=project_id)
         except CitationParseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return PlainTextResponse(text)
@@ -3061,7 +3059,7 @@ def create_app() -> FastAPI:
     @app.post("/api/citations/render")
     async def render_citations(request: CitationRenderRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        sources = await repo.list_sources()
+        sources = await repo.list_sources(project_id=request.project_id)
         wanted = set(request.source_ids) if request.source_ids else None
         items = []
         for source in sources:
@@ -3080,9 +3078,9 @@ def create_app() -> FastAPI:
         return {"style": style, "processor": CSL_PROCESSOR, "entries": entries}
 
     @app.get("/api/evidence")
-    async def list_evidence(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def list_evidence(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        return {"evidence": await repo.list_evidence()}
+        return {"evidence": await repo.list_evidence(project_id=project_id)}
 
     @app.post("/api/claims")
     async def create_claim(request: ClaimCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -3095,9 +3093,9 @@ def create_app() -> FastAPI:
         return claim
 
     @app.get("/api/claims")
-    async def list_claims(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def list_claims(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        return {"claims": await repo.list_claims()}
+        return {"claims": await repo.list_claims(project_id=project_id)}
 
     @app.patch("/api/claims/{claim_id}")
     async def promote_claim(claim_id: str, request: ClaimPromoteRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -3161,9 +3159,9 @@ def create_app() -> FastAPI:
         return citation
 
     @app.get("/api/citations")
-    async def list_citations(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def list_citations(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        return {"citations": await repo.list_citations()}
+        return {"citations": await repo.list_citations(project_id=project_id)}
 
     @app.post("/api/notes")
     async def create_note(request: NoteCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -3173,9 +3171,13 @@ def create_app() -> FastAPI:
         return note
 
     @app.get("/api/notes")
-    async def list_notes(query: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def list_notes(
+        query: str | None = None,
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
         repo = Repository(session)
-        return {"notes": await repo.search_notes(query)}
+        return {"notes": await repo.search_notes(query, project_id=project_id)}
 
     @app.get("/api/notes/graph")
     async def get_notes_graph(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -3465,9 +3467,13 @@ def create_app() -> FastAPI:
         return {"events": await repo.list_events()}
 
     @app.get("/api/export/bibliography")
-    async def bibliography(session: AsyncSession = Depends(get_session), style: str = "apa") -> PlainTextResponse:
+    async def bibliography(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+        style: str = "apa",
+    ) -> PlainTextResponse:
         repo = Repository(session)
-        sources = await repo.list_sources()
+        sources = await repo.list_sources(project_id=project_id)
         text = format_bibliography(sources, style)
         return PlainTextResponse(text)
 
@@ -3546,12 +3552,12 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/export/preview")
-    async def export_preview(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def export_preview(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        notes = await repo.search_notes()
-        citations = await repo.list_citations()
-        tasks = await repo.list_tasks()
-        sources = await repo.list_sources()
+        notes = await repo.search_notes(project_id=project_id)
+        citations = await repo.list_citations(project_id=project_id)
+        tasks = await repo.list_tasks(project_id=project_id)
+        sources = await repo.list_sources(project_id=project_id)
         
         # Build file list
         files = []
@@ -3575,7 +3581,7 @@ def create_app() -> FastAPI:
         }
 
     @app.post("/api/export")
-    async def export_workspace_zip(session: AsyncSession = Depends(get_session)) -> StreamingResponse:
+    async def export_workspace_zip(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> StreamingResponse:
         import zipfile
         import io
         import json
@@ -3585,7 +3591,7 @@ def create_app() -> FastAPI:
         
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             # Notes
-            notes = await repo.search_notes()
+            notes = await repo.search_notes(project_id=project_id)
             for note in notes:
                 safe_title = "".join(c for c in note["title"] if c.isalnum() or c in (" ", "_", "-")).rstrip()
                 if not safe_title:
@@ -3595,8 +3601,8 @@ def create_app() -> FastAPI:
                 zip_file.writestr(filename, content)
 
             # Citations
-            citations = await repo.list_citations()
-            sources = await repo.list_sources()
+            citations = await repo.list_citations(project_id=project_id)
+            sources = await repo.list_sources(project_id=project_id)
             sources_map = {s["id"]: s for s in sources}
             citations_md = ["# Citations\n"]
             for cit in citations:
@@ -3606,7 +3612,7 @@ def create_app() -> FastAPI:
             zip_file.writestr("citations.md", "\n".join(citations_md))
 
             # Tasks
-            tasks = await repo.list_tasks()
+            tasks = await repo.list_tasks(project_id=project_id)
             tasks_md = ["# Kanban Tasks\n", "| Column | Position | Progress | Title | Detail | Phase |", "| --- | --- | --- | --- | --- | --- |"]
             for t in tasks:
                 col = t.get("column") or "to_do"
@@ -3624,7 +3630,7 @@ def create_app() -> FastAPI:
                 "notes": notes,
                 "tasks": tasks,
                 "citations": citations,
-                "evidence": await repo.list_evidence(),
+                "evidence": await repo.list_evidence(project_id=project_id),
                 "events": await repo.list_events(),
                 "settings": await repo.list_settings(),
                 "provider_settings": await repo.list_provider_settings(),
@@ -3640,9 +3646,9 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/export/workspace")
-    async def export_workspace(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def export_workspace(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        return await repo.export_workspace()
+        return await repo.export_workspace(project_id=project_id)
 
     @app.post("/api/reviews/analyze")
     def analyze_review(request: WritingReviewRequest) -> dict[str, object]:
@@ -3784,7 +3790,7 @@ def create_app() -> FastAPI:
     @app.post("/api/export/citations")
     async def export_citations(request: CitationExportRequest, session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
         repo = Repository(session)
-        sources = await repo.list_sources()
+        sources = await repo.list_sources(project_id=request.project_id)
         if request.source_ids:
             wanted = set(request.source_ids)
             sources = [s for s in sources if s["id"] in wanted]
