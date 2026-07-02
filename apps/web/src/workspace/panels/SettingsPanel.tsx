@@ -194,6 +194,7 @@ export function SettingsPanel() {
       const auth = await authenticateCollaborator({ project_id: projectId, invite_token: authInviteToken.trim() });
       window.localStorage.setItem("hydra:collaboration:sessionToken", auth.session_token);
       window.localStorage.setItem("hydra:collaboration:displayName", auth.display_name);
+      window.localStorage.setItem("hydra:collaboration:permission", auth.permission);
       setAuthInviteToken("");
       void loadCollaboration(projectId);
     } catch (caught) {

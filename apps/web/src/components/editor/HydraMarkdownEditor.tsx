@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Code2, Columns2, Eye, Quote, Save, Users, WifiOff, X } from "lucide-react";
+import { Check, Code2, Columns2, Eye, MessageSquare, Quote, Save, Users, WifiOff, X } from "lucide-react";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -25,14 +25,17 @@ import {
 
 type SaveState = "saved" | "dirty" | "saving" | "failed";
 type SyncState = "offline" | "connecting" | "synced" | "syncing" | "conflict" | "revoked";
+type CollaborationPermission = "read" | "comment" | "edit";
 type RemoteUser = { id: string; displayName: string; color?: string };
 type CollaborationConfig = {
   enabled: boolean;
   projectId: string;
   documentId: string;
   syncState: SyncState;
+  permission: CollaborationPermission;
   remoteUsers: RemoteUser[];
 };
+type InlineComment = { id: string; author: string; range: string; text: string };
 
 export function HydraMarkdownEditor({
   fileRef,
@@ -68,6 +71,9 @@ export function HydraMarkdownEditor({
   const [runtimeSyncState, setRuntimeSyncState] = useState<SyncState>(collaboration?.syncState ?? "offline");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
+  const [commentOpen, setCommentOpen] = useState(false);
+  const [commentDraft, setCommentDraft] = useState("");
+  const [comments, setComments] = useState<InlineComment[]>([]);
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null);
 
   const context = useMemo(() => ({ notes, citations, highlights }), [notes, citations, highlights]);
@@ -122,6 +128,8 @@ export function HydraMarkdownEditor({
           markdown(),
           syntaxHighlighting(defaultHighlightStyle),
           keymap.of([...defaultKeymap, ...historyKeymap]),
+          EditorState.readOnly.of(Boolean(collaboration?.enabled && collaboration.permission !== "edit")),
+          EditorView.editable.of(!collaboration?.enabled || collaboration.permission === "edit"),
           ...collaborationExtensions,
           hydraDecorationPlugin({ notes, citations, highlights, suggestions, onAcceptSuggestion, onRejectSuggestion }),
           EditorView.lineWrapping,
@@ -241,6 +249,8 @@ export function HydraMarkdownEditor({
   const canShowPreview = mode === "live" || mode === "split";
   const syncState = collaboration?.enabled ? runtimeSyncState : "offline";
   const presence = collaboration?.enabled ? collaboration.remoteUsers : [];
+  const canEditDocument = !collaboration?.enabled || collaboration.permission === "edit";
+  const canComment = Boolean(collaboration?.enabled && collaboration.permission !== "read");
 
   return (
     <div className="markdown-editor-shell" data-editor-mode={mode}>
@@ -262,7 +272,12 @@ export function HydraMarkdownEditor({
         <button onClick={() => setPickerOpen(true)}>
           <Quote size={14} /> Cite
         </button>
-        <button onClick={() => void persistDraft(viewRef.current?.state.doc.toString() ?? draft)}>
+        {canComment && (
+          <button onClick={() => setCommentOpen((current) => !current)}>
+            <MessageSquare size={14} /> Comment
+          </button>
+        )}
+        <button disabled={!canEditDocument} onClick={() => void persistDraft(viewRef.current?.state.doc.toString() ?? draft)}>
           <Save size={14} /> Save
         </button>
         <span className={`save-indicator ${saveState}`} aria-live="polite">
@@ -293,6 +308,20 @@ export function HydraMarkdownEditor({
         </div>
       )}
 
+      {commentOpen && (
+        <div className="comment-popover" role="dialog" aria-label="Inline comment">
+          <textarea value={commentDraft} onChange={(event) => setCommentDraft(event.target.value)} placeholder="Comment on the current selection" />
+          <div>
+            <button onClick={() => submitInlineComment(selectionContext.fileRef, selectionContext.selection.from, selectionContext.selection.to)}>
+              <Check size={13} /> Add
+            </button>
+            <button onClick={() => setCommentOpen(false)}>
+              <X size={13} /> Close
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="markdown-editor-grid">
         {canShowEditor && <div ref={hostRef} className={mode === "live" ? "editor-pane live" : "editor-pane"} aria-label="CodeMirror 6 Markdown editor" />}
         {canShowPreview && <article className="markdown-preview" dangerouslySetInnerHTML={{ __html: preview }} aria-label="Markdown live preview" />}
@@ -309,9 +338,27 @@ export function HydraMarkdownEditor({
             {presence.map((user) => user.displayName).join(", ")}
           </span>
         )}
+        {collaboration?.enabled && <span className="status-pill">{collaboration.permission}</span>}
+        {comments.length > 0 && <span>{comments.length} comments</span>}
       </div>
     </div>
   );
+
+  function submitInlineComment(file: string, from: number, to: number) {
+    if (!canComment || !commentDraft.trim()) return;
+    const author = window.localStorage.getItem("hydra:collaboration:displayName") || "Local researcher";
+    setComments((current) => [
+      ...current,
+      {
+        id: `${Date.now()}`,
+        author,
+        range: `${file}:${from}-${to}`,
+        text: commentDraft.trim(),
+      },
+    ]);
+    setCommentDraft("");
+    setCommentOpen(false);
+  }
 }
 
 function buildCollaborationExtensions({

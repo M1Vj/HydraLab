@@ -11,6 +11,7 @@ type PanelSyncState = "offline" | "connecting" | "synced" | "syncing" | "conflic
 type PanelCollaborationState = {
   enabled: boolean;
   syncState: PanelSyncState;
+  permission: "read" | "comment" | "edit";
   remoteUsers: Array<{ id: string; displayName: string; color?: string }>;
 };
 
@@ -25,6 +26,7 @@ export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
   const [collaboration, setCollaboration] = useState<PanelCollaborationState>({
     enabled: false,
     syncState: "offline",
+    permission: "edit",
     remoteUsers: [],
   });
 
@@ -88,20 +90,22 @@ export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
     const projectId = note?.project_id || "default";
     try {
       const settings = await getCollaborationSettings(projectId);
+      const permission = collaborationPermission();
       if (!settings.enabled) {
-        setCollaboration({ enabled: false, syncState: "offline", remoteUsers: [] });
+        setCollaboration({ enabled: false, syncState: "offline", permission, remoteUsers: [] });
         return;
       }
       const collaborators = await listCollaborators(projectId);
       setCollaboration({
         enabled: true,
         syncState: "connecting",
+        permission,
         remoteUsers: collaborators.collaborators
           .filter((collaborator) => !collaborator.revoked)
           .map((collaborator) => ({ id: collaborator.collaborator_id, displayName: collaborator.display_name })),
       });
     } catch {
-      setCollaboration({ enabled: false, syncState: "offline", remoteUsers: [] });
+      setCollaboration({ enabled: false, syncState: "offline", permission: "edit", remoteUsers: [] });
     }
   }
 
@@ -136,6 +140,7 @@ export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
           documentId: note.relative_path || fileRef || note.id,
           projectId: note.project_id || "default",
           syncState: collaboration.syncState,
+          permission: collaboration.permission,
           remoteUsers: collaboration.remoteUsers,
         }}
         onChange={setContent}
@@ -143,6 +148,11 @@ export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
       />
     </PanelScaffold>
   );
+}
+
+function collaborationPermission(): "read" | "comment" | "edit" {
+  const value = window.localStorage.getItem("hydra:collaboration:permission");
+  return value === "read" || value === "comment" || value === "edit" ? value : "edit";
 }
 
 function noteOptions(data: ProjectObjectsResponse | null | undefined) {
