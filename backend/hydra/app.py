@@ -35,8 +35,14 @@ from hydra.schemas import (
     AnnotationCreateRequest,
     EvidenceCreateRequest,
     CitationCreateRequest,
+    CitationRenderRequest,
     ClaimCreateRequest,
     ClaimDetectRequest,
+    ClaimPromoteRequest,
+    SourceImportRequest,
+    SourceMergeRequest,
+    SourceTrashRequest,
+    SourceUnmergeRequest,
     NoteCreateRequest,
     NoteFileSaveRequest,
     NoteSuggestionRequest,
@@ -53,7 +59,7 @@ from hydra.schemas import (
     WritingReviewRequest,
     ChatCompletionRequest,
 )
-from hydra.database.models import Annotation, IngestionJob
+from hydra.database.models import Annotation, Claim, IngestionJob
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
 from hydra.services.annotations import AnnotationIndexer, create_annotation_record, read_sidecar_records, write_sidecar_records
@@ -68,6 +74,14 @@ from hydra.services.discovery import (
     result_from_dict,
 )
 from hydra.services.discovery.providers import default_providers
+from hydra.services.citations import (
+    CSL_PROCESSOR,
+    DEFAULT_STYLE_ID,
+    CitationParseError,
+    CslRenderer,
+    CslRenderError,
+    resolve_manuscript_style,
+)
 from hydra.services.ingestion import IngestionService
 from hydra.services.ingestion.safety import validate_source_file
 from hydra.services.ingestion.types import QuarantineError
@@ -632,6 +646,100 @@ def create_app() -> FastAPI:
         await repo.add_event("evidence.linked", f"Linked evidence for claim: {request.claim_id}")
         return evidence
 
+    @app.post("/api/sources/import")
+    async def import_sources(request: SourceImportRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            result = await repo.import_sources(request.content, request.format, request.project_id)
+        except CitationParseError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "parse-error", "entry": exc.entry, "message": str(exc)}) from exc
+        await repo.add_event("sources.imported", f"Imported {result['count']} source(s) from {result['format']}")
+        return result
+
+    @app.get("/api/sources/export")
+    async def export_sources(fmt: str = "bibtex", session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
+        repo = Repository(session)
+        try:
+            text = await repo.export_sources(fmt)
+        except CitationParseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return PlainTextResponse(text)
+
+    @app.post("/api/sources/merge")
+    async def merge_sources(request: SourceMergeRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            result = await repo.merge_sources(request.source_ids, reason=request.reason, merge_confidence=request.merge_confidence)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        await repo.add_event("sources.merged", f"Merged into survivor {result['survivor_id']}")
+        return result
+
+    @app.post("/api/sources/unmerge")
+    async def unmerge_sources(request: SourceUnmergeRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            result = await repo.unmerge_sources(request.merge_record_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        await repo.add_event("sources.unmerged", f"Reversed merge {request.merge_record_id}")
+        return result
+
+    @app.post("/api/sources/duplicates")
+    async def detect_source_duplicates(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        verdicts = await repo.detect_duplicates(project_id)
+        return {"duplicates": verdicts}
+
+    @app.post("/api/sources/dedupe")
+    async def dedupe_sources(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        merges = await repo.dedupe_by_citation_key(project_id)
+        return {"merges": merges}
+
+    @app.post("/api/sources/{source_id}/trash")
+    async def trash_source(source_id: str, request: SourceTrashRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.trash_source(source_id, confirmed=request.confirmed)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/sources/{source_id}/restore")
+    async def restore_source(source_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.restore_source(source_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/refint/scan")
+    async def refint_scan(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        findings = await repo.scan_referential_integrity(project_id)
+        return {"findings": findings, "count": len(findings)}
+
+    @app.post("/api/citations/render")
+    async def render_citations(request: CitationRenderRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        sources = await repo.list_sources()
+        wanted = set(request.source_ids) if request.source_ids else None
+        items = []
+        for source in sources:
+            if wanted is not None and source["id"] not in wanted:
+                continue
+            csl = source.get("csl_json")
+            if isinstance(csl, dict) and csl:
+                items.append(csl)
+        global_default = _resolve_default_citation_style()
+        style = resolve_manuscript_style(hydra_project_root(), request.manuscript, request.style or global_default)
+        renderer = CslRenderer(default_style=global_default)
+        try:
+            entries = renderer.render_bibliography_html(items, style) if request.html else renderer.render_bibliography(items, style)
+        except CslRenderError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "render-error", "message": str(exc)}) from exc
+        return {"style": style, "processor": CSL_PROCESSOR, "entries": entries}
+
     @app.get("/api/evidence")
     async def list_evidence(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
@@ -640,7 +748,10 @@ def create_app() -> FastAPI:
     @app.post("/api/claims")
     async def create_claim(request: ClaimCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        claim = await repo.add_claim(**request.model_dump())
+        try:
+            claim = await repo.add_claim(**request.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         await repo.add_event("claim.created", "Created new claim")
         return claim
 
@@ -649,38 +760,59 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         return {"claims": await repo.list_claims()}
 
+    @app.patch("/api/claims/{claim_id}")
+    async def promote_claim(claim_id: str, request: ClaimPromoteRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            claim = await repo.promote_claim(claim_id, request.status, reviewed=request.reviewed)
+        except ValueError as exc:
+            message = str(exc)
+            if message == "claim not found":
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=422, detail=message) from exc
+        await repo.add_event("claim.status.changed", f"Claim {claim_id} -> {request.status}")
+        return claim
+
+    @app.get("/api/claims/{claim_id}/location")
+    async def resolve_claim_location(claim_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        claim = await session.get(Claim, claim_id)
+        if claim is None:
+            raise HTTPException(status_code=404, detail="Claim not found")
+        return await repo.resolve_claim_location(claim.location_type, claim.location_id)
+
     @app.post("/api/claims/detect")
     async def detect_claims(request: ClaimDetectRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        """Suggestion-only claim extraction (HL-CITE-07/08).
+
+        By default no claim row is committed; the passage is returned as a
+        suggestion for the researcher to accept/reject. When the opt-in
+        ``auto_create`` flag is on, a single ``draft`` claim is created with
+        ``extraction_mode=auto_draft`` (never a supported status, HL-CITE-08).
+        """
         repo = Repository(session)
-        claim1 = await repo.add_claim("Hydra reduces hallucinated citations.")
-        claim2 = await repo.add_claim("LLMs always tell the truth.")
-        
-        # Link some evidence mock
-        sources = await repo.list_sources()
-        source_id = sources[0]["id"] if sources else (await repo.upsert_source({"title": "Placeholder Source"}))["id"]
-        
-        await repo.add_evidence(
-            claim_id=claim1["id"],
-            source_id=source_id,
-            passage="Hydra architecture aims to reduce hallucinations.",
-            support="supported",
-            confidence=0.9
-        )
-        await repo.add_evidence(
-            claim_id=claim2["id"],
-            source_id=source_id,
-            passage="Some LLMs have hallucination problems.",
-            support="unsupported",
-            confidence=0.2
-        )
-        
-        await repo.add_event("claims.detected", "Detected placeholder claims from draft text")
-        
-        return {
-            "claims": [claim1, claim2],
-            "evidence": await repo.list_evidence(),
-            "placeholder": True,
-        }
+        suggestions = extract_claim_suggestions(request.text, request)
+        created: list[dict[str, object]] = []
+        if request.auto_create and suggestions:
+            top = suggestions[0]
+            claim = await repo.add_claim(
+                text=top["claim_text"],
+                project_id=None,
+                location_type=request.location_type,
+                location_id=request.location_id,
+                status="draft",
+                created_from="extraction",
+                origin_ref=request.origin_ref,
+                origin_quote=top["origin_quote"],
+                extraction_confidence=top["extraction_confidence"],
+                extraction_mode="auto_draft",
+                trust_origin="user",
+            )
+            created.append(claim)
+            await repo.add_event("claims.auto_draft", "Auto-created draft claim from opt-in extraction")
+        else:
+            await repo.add_event("claims.suggested", f"Suggested {len(suggestions)} claim candidate(s) (no commit)")
+        return {"suggestions": suggestions, "created_claims": created, "committed": bool(created)}
 
     @app.post("/api/citations")
     async def create_citation(request: CitationCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -1390,6 +1522,51 @@ def annotation_to_api(annotation: Annotation) -> dict[str, object]:
         "link_state": annotation.link_state,
         "trust_origin": annotation.trust_origin,
     }
+
+
+def extract_claim_suggestions(text: str, request: "ClaimDetectRequest") -> list[dict[str, object]]:
+    """Heuristic, suggestion-only claim candidate extraction.
+
+    Untrusted text is treated as data, not instructions (DEC-11): this only ever
+    proposes candidates and never commits a claim by itself.
+    """
+    import re as _re
+
+    sentences = [segment.strip() for segment in _re.split(r"(?<=[.!?])\s+", text) if segment.strip()]
+    suggestions: list[dict[str, object]] = []
+    for sentence in sentences:
+        words = sentence.split()
+        if len(words) < 4:
+            continue
+        confidence = min(0.9, 0.4 + 0.02 * len(words))
+        suggestions.append(
+            {
+                "claim_text": sentence,
+                "origin_quote": sentence,
+                "origin_ref": request.origin_ref,
+                "location_type": request.location_type,
+                "location_id": request.location_id,
+                "extraction_confidence": round(confidence, 3),
+                "extraction_mode": "suggested",
+                "user_selected": False,
+            }
+        )
+    return suggestions
+
+
+def _resolve_default_citation_style() -> str:
+    try:
+        settings = load_settings(app_data_root() / "settings.toml").data
+    except Exception:
+        return DEFAULT_STYLE_ID
+    citation = settings.get("citation", {}) if isinstance(settings, dict) else {}
+    workspace = settings.get("workspace", {}) if isinstance(settings, dict) else {}
+    for source in (citation, workspace):
+        if isinstance(source, dict):
+            value = source.get("default_citation_style") or source.get("citation_style")
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+    return DEFAULT_STYLE_ID
 
 
 def format_bibliography(sources: list[dict[str, object]], style: str) -> str:
