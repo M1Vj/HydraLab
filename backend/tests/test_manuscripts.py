@@ -102,7 +102,15 @@ def _write_manuscript(root: Path, *, missing_citation: bool = False, hazards: bo
     return manuscript
 
 
-async def _approved(session: AsyncSession, target: str) -> AgentApproval:
+async def _approved(
+    session: AsyncSession,
+    target: str,
+    *,
+    acknowledged_redaction_item_ids: list[str] | None = None,
+) -> AgentApproval:
+    payload: dict[str, object] = {}
+    if acknowledged_redaction_item_ids is not None:
+        payload["acknowledged_redaction_item_ids"] = list(acknowledged_redaction_item_ids)
     row = AgentApproval(
         project_id="default",
         mode=FULL_ACCESS,
@@ -110,6 +118,7 @@ async def _approved(session: AsyncSession, target: str) -> AgentApproval:
         target_kind="manuscript",
         target_ref=target,
         status=ApprovalStatus.APPROVED.value,
+        payload_json=json.dumps(payload, sort_keys=True),
     )
     session.add(row)
     await session.commit()
@@ -271,13 +280,22 @@ async def test_hl_write_38_redaction_blocks_until_hazards_acknowledged(session, 
     categories = {item.category for item in blocked.redaction.items}
     assert {"internal_logs", "private_notes"} <= categories
 
-    approval2 = await _approved(session, "attention-survey")
+    acked_ids = [item.id for item in blocked.redaction.items]
+
+    # Acks are only honoured when the human approval itself carries them. An
+    # approval WITHOUT the ids in its payload cannot be self-acknowledged from the
+    # request alone (03-04: item ids are client-derivable sha256 digests).
+    self_ack = await _approved(session, "attention-survey")
+    still_blocked = await service.create_package(
+        "attention-survey",
+        PackageRequest(approval_id=self_ack.id, acknowledged_redaction_item_ids=acked_ids),
+    )
+    assert still_blocked.status == "redaction_blocked"
+
+    approval2 = await _approved(session, "attention-survey", acknowledged_redaction_item_ids=acked_ids)
     created = await service.create_package(
         "attention-survey",
-        PackageRequest(
-            approval_id=approval2.id,
-            acknowledged_redaction_item_ids=[item.id for item in blocked.redaction.items],
-        ),
+        PackageRequest(approval_id=approval2.id, acknowledged_redaction_item_ids=acked_ids),
     )
     assert created.status == "created"
 

@@ -13,6 +13,8 @@ _SECRET_PATTERNS = (
     re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\b(AKIA|ASIA)[A-Z0-9]{12,}\b"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
 )
 _EXCLUDED_TOP_LEVEL = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache"}
 

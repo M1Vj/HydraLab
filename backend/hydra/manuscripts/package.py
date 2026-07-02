@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,10 +10,12 @@ from typing import Any, Callable
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from hydra.agents.contracts import ApprovalStatus
 from hydra.agents.policy import COPILOT
 from hydra.autonomy.audit import AuditLedger
 from hydra.autonomy.checkpoints import CheckpointService
 from hydra.autonomy.gate import ActionGate, GateResult, GovernedAction
+from hydra.database.models import AgentApproval
 from hydra.services.docx import detect_latex_toolchain
 
 from .builder import ManuscriptBuilder
@@ -93,7 +96,14 @@ class ManuscriptPackageService:
         if validation.has_issues and not request.acknowledge_citation_issues:
             return PackageResult(status="validation_blocked", document=document, validation=validation, redaction=redaction)
 
-        unresolved_redactions = redaction.unresolved(set(request.acknowledged_redaction_item_ids))
+        # Redaction acknowledgements are only honoured when the human approval
+        # itself authorised them. Item ids are deterministic sha256 digests a
+        # client can precompute, so a request-supplied ack is never trusted on
+        # its own: the effective set is the request acks intersected with the
+        # ids baked into the APPROVED AgentApproval payload (03-04 fix).
+        authorised_acks = await self._approved_redaction_acks(request.approval_id, request.project_id)
+        effective_acks = set(request.acknowledged_redaction_item_ids) & authorised_acks
+        unresolved_redactions = redaction.unresolved(effective_acks)
         if unresolved_redactions:
             return PackageResult(
                 status="redaction_blocked",
@@ -176,6 +186,26 @@ class ManuscriptPackageService:
             )
         )
         return SubmissionResult(status=gate.status, gate=gate)
+
+    async def _approved_redaction_acks(self, approval_id: str | None, project_id: str) -> set[str]:
+        """Redaction ids the human approval authorised, from its APPROVED payload."""
+        if not approval_id:
+            return set()
+        approval = await self.session.get(AgentApproval, approval_id)
+        if approval is None or approval.status != ApprovalStatus.APPROVED.value:
+            return set()
+        if approval.action_kind != "manuscript_package_create":
+            return set()
+        if (approval.project_id or None) not in (None, project_id):
+            return set()
+        try:
+            payload = json.loads(approval.payload_json or "{}")
+        except json.JSONDecodeError:
+            return set()
+        acks = payload.get("acknowledged_redaction_item_ids")
+        if not isinstance(acks, list):
+            return set()
+        return {str(item) for item in acks}
 
     def _gate(self) -> ActionGate:
         checkpoint = CheckpointService(self.session, project_root=self.project_root, git=_PackageCheckpointGit())
