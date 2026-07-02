@@ -13,7 +13,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlmodel import select
@@ -85,6 +85,10 @@ from hydra.schemas import (
     ChatUpdateRequest,
     ChatExportRequest,
     SendScopeRequest,
+    CollaborationAuthenticateRequest,
+    CollaborationInviteRequest,
+    CollaborationRevokeRequest,
+    CollaborationSettingsRequest,
     AgentModeUpdateRequest,
     AutonomyPolicyRequest,
     AutopilotCancelRequest,
@@ -207,6 +211,8 @@ from hydra.orchestrator.advanced import (
     build_advanced_run_config,
     route_untrusted_advanced_preset,
 )
+from hydra.collaboration.identity import CollaborationPermissionError, IdentityProvider
+from hydra.collaboration.transport import InProcessSyncTransport, SelfHostedSyncTransport, SyncAuthenticationError
 from hydra.recipes.literature_review import (
     LiteratureReviewInput,
     LiteratureReviewSaveRequest,
@@ -265,6 +271,7 @@ BRIDGE_NONCE_TTL_SECONDS = 300
 
 _MEMORY_SECRET_STORE = InMemorySecretStore()
 _PROVIDER_CACHE = ProviderCache()
+_COLLAB_SYNC_TRANSPORT = InProcessSyncTransport()
 
 
 def _assistant_privacy() -> dict[str, Any]:
@@ -1146,6 +1153,141 @@ def create_app() -> FastAPI:
             }
         result = await service.resolve(approval_id, decision=request.decision)
         return {"applied": result.applied, "status": result.status, "reason": result.reason}
+
+    # ------------------------------------------- collaboration
+    @app.get("/api/collaboration/settings")
+    async def get_collaboration_settings(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        settings = await IdentityProvider(session).settings(project_id)
+        return {
+            "project_id": settings.project_id,
+            "enabled": settings.enabled,
+            "sync_server_url": settings.sync_server_url,
+            "sync_server_kind": settings.sync_server_kind,
+        }
+
+    @app.post("/api/collaboration/settings")
+    async def save_collaboration_settings(
+        request: CollaborationSettingsRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        if request.enabled:
+            if not request.sync_server_url:
+                raise HTTPException(status_code=400, detail="sync_server_url is required when collaboration is enabled")
+            try:
+                SelfHostedSyncTransport(request.sync_server_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        settings = await IdentityProvider(session).set_project_settings(
+            project_id=request.project_id,
+            enabled=request.enabled,
+            sync_server_url=request.sync_server_url,
+        )
+        return {
+            "project_id": settings.project_id,
+            "enabled": settings.enabled,
+            "sync_server_url": settings.sync_server_url,
+            "sync_server_kind": settings.sync_server_kind,
+        }
+
+    @app.get("/api/collaboration/collaborators")
+    async def list_collaborators(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return {"collaborators": await IdentityProvider(session).list_collaborators(project_id)}
+
+    @app.post("/api/collaboration/invites")
+    async def invite_collaborator(
+        request: CollaborationInviteRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            invite = await IdentityProvider(session).invite(
+                project_id=request.project_id,
+                display_name=request.display_name,
+                permission=request.permission,
+            )
+        except CollaborationPermissionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "collaborator_id": invite.collaborator_id,
+            "permission": invite.permission,
+            "invite_token": invite.invite_token,
+        }
+
+    @app.post("/api/collaboration/authenticate")
+    async def authenticate_collaborator(
+        request: CollaborationAuthenticateRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            auth = await IdentityProvider(session).authenticate(
+                project_id=request.project_id,
+                invite_token=request.invite_token,
+            )
+        except CollaborationPermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return {
+            "collaborator_id": auth.collaborator_id,
+            "display_name": auth.display_name,
+            "permission": auth.permission,
+            "session_token": auth.session_token,
+        }
+
+    @app.post("/api/collaboration/collaborators/{collaborator_id}/revoke")
+    async def revoke_collaborator(
+        collaborator_id: str,
+        request: CollaborationRevokeRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        await IdentityProvider(session).revoke(project_id=request.project_id, collaborator_id=collaborator_id)
+        disconnected = await _COLLAB_SYNC_TRANSPORT.disconnect_revoked(session)
+        return {"collaborator_id": collaborator_id, "revoked": True, "disconnected": disconnected}
+
+    @app.websocket("/api/collaboration/ws/{project_id}/{document_id:path}")
+    async def collaboration_websocket(websocket: WebSocket, project_id: str, document_id: str) -> None:
+        origin = websocket.headers.get("origin")
+        authorization = websocket.headers.get("authorization", "")
+        token = websocket.query_params.get("token")
+        if authorization.startswith("Bearer "):
+            token = authorization[len("Bearer "):]
+        async with async_session_maker() as session:
+            try:
+                connection = await _COLLAB_SYNC_TRANSPORT.connect(
+                    session,
+                    project_id=project_id,
+                    document_id=document_id,
+                    auth_token=token,
+                    origin=origin,
+                )
+            except SyncAuthenticationError:
+                await websocket.close(code=1008)
+                return
+            await websocket.accept()
+            await websocket.send_json(
+                {
+                    "type": "presence",
+                    "sync_state": "synced",
+                    "document_id": document_id,
+                    "collaborator": {
+                        "id": connection.collaborator_id,
+                        "display_name": connection.display_name,
+                        "permission": connection.permission,
+                    },
+                }
+            )
+            try:
+                while connection.connected:
+                    message = await websocket.receive_text()
+                    # Document and presence channels stay distinct at the protocol
+                    # level; this self-hosted first pass echoes document updates
+                    # only after auth so unauthenticated clients receive zero bytes.
+                    await websocket.send_text(message)
+            finally:
+                connection.disconnect()
 
     # ------------------------------------------- autonomy safety shell
     @app.get("/api/autonomy/policy")

@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Code2, Columns2, Eye, Quote, Save, X } from "lucide-react";
+import { Check, Code2, Columns2, Eye, Quote, Save, Users, WifiOff, X } from "lucide-react";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorState, type Range } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
+import * as Y from "yjs";
+import { yCollab } from "y-codemirror.next";
 import { commandRegistry } from "../../core/commands";
 import {
   applyInlineSuggestion,
@@ -22,6 +24,15 @@ import {
 } from "../../lib/editor/markdown";
 
 type SaveState = "saved" | "dirty" | "saving" | "failed";
+type SyncState = "offline" | "connecting" | "synced" | "syncing" | "conflict" | "revoked";
+type RemoteUser = { id: string; displayName: string; color?: string };
+type CollaborationConfig = {
+  enabled: boolean;
+  projectId: string;
+  documentId: string;
+  syncState: SyncState;
+  remoteUsers: RemoteUser[];
+};
 
 export function HydraMarkdownEditor({
   fileRef,
@@ -31,6 +42,7 @@ export function HydraMarkdownEditor({
   highlights = [],
   suggestions = [],
   trustOrigin = "user",
+  collaboration,
   onChange,
   onSave,
 }: {
@@ -41,16 +53,19 @@ export function HydraMarkdownEditor({
   highlights?: TextHighlight[];
   suggestions?: InlineSuggestion[];
   trustOrigin?: "user" | "assistant" | "untrusted";
+  collaboration?: CollaborationConfig;
   onChange: (value: string) => void;
   onSave: (value: string) => Promise<void> | void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const collaborationRef = useRef<{ doc: Y.Doc; awareness: LocalAwareness; socket: WebSocket | null } | null>(null);
   const valueRef = useRef(value);
   const lastEditAtRef = useRef(Date.now());
   const [mode, setMode] = useState<EditorMode>("live");
   const [draft, setDraft] = useState(value);
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [runtimeSyncState, setRuntimeSyncState] = useState<SyncState>(collaboration?.syncState ?? "offline");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
   const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null);
@@ -79,9 +94,24 @@ export function HydraMarkdownEditor({
   }, []);
 
   useEffect(() => {
+    setRuntimeSyncState(collaboration?.enabled ? collaboration.syncState : "offline");
+  }, [collaboration?.enabled, collaboration?.syncState]);
+
+  useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const lineSeparator = draft.includes("\r\n") ? "\r\n" : "\n";
+    const collaborationExtensions = buildCollaborationExtensions({
+      collaboration,
+      draft,
+      onRemoteDocument: (next) => {
+        valueRef.current = next;
+        setDraft(next);
+        onChange(next);
+      },
+      onSyncState: setRuntimeSyncState,
+      ref: collaborationRef,
+    });
     const view = new EditorView({
       parent: host,
       state: EditorState.create({
@@ -92,6 +122,7 @@ export function HydraMarkdownEditor({
           markdown(),
           syntaxHighlighting(defaultHighlightStyle),
           keymap.of([...defaultKeymap, ...historyKeymap]),
+          ...collaborationExtensions,
           hydraDecorationPlugin({ notes, citations, highlights, suggestions, onAcceptSuggestion, onRejectSuggestion }),
           EditorView.lineWrapping,
           EditorView.domEventHandlers({
@@ -134,9 +165,12 @@ export function HydraMarkdownEditor({
     viewRef.current = view;
     return () => {
       view.destroy();
+      collaborationRef.current?.socket?.close();
+      collaborationRef.current?.doc.destroy();
+      collaborationRef.current = null;
       viewRef.current = null;
     };
-  }, [fileRef, notes, citations, highlights, suggestions]);
+  }, [fileRef, notes, citations, highlights, suggestions, collaboration?.enabled, collaboration?.documentId, collaboration?.projectId]);
 
   useEffect(() => {
     if (saveState !== "dirty") return;
@@ -205,6 +239,8 @@ export function HydraMarkdownEditor({
 
   const canShowEditor = mode === "source" || mode === "split" || mode === "live";
   const canShowPreview = mode === "live" || mode === "split";
+  const syncState = collaboration?.enabled ? runtimeSyncState : "offline";
+  const presence = collaboration?.enabled ? collaboration.remoteUsers : [];
 
   return (
     <div className="markdown-editor-shell" data-editor-mode={mode}>
@@ -231,6 +267,10 @@ export function HydraMarkdownEditor({
         </button>
         <span className={`save-indicator ${saveState}`} aria-live="polite">
           {saveState === "dirty" ? "unsaved" : saveState}
+        </span>
+        <span className={`sync-indicator ${syncState}`} aria-live="polite">
+          {syncState === "offline" ? <WifiOff size={13} /> : <Users size={13} />}
+          {syncState}
         </span>
         {lastLatencyMs !== null && <span className="latency-indicator">{lastLatencyMs} ms</span>}
       </div>
@@ -264,9 +304,153 @@ export function HydraMarkdownEditor({
           {selectionContext.selection.from}:{selectionContext.selection.to}
         </span>
         {trustOrigin === "untrusted" && <span className="status-pill warning">untrusted text routes edits to Review Inbox</span>}
+        {presence.length > 0 && (
+          <span className="presence-list" aria-label="Remote collaborators">
+            {presence.map((user) => user.displayName).join(", ")}
+          </span>
+        )}
       </div>
     </div>
   );
+}
+
+function buildCollaborationExtensions({
+  collaboration,
+  draft,
+  onRemoteDocument,
+  onSyncState,
+  ref,
+}: {
+  collaboration: CollaborationConfig | undefined;
+  draft: string;
+  onRemoteDocument: (value: string) => void;
+  onSyncState: (state: SyncState) => void;
+  ref: React.MutableRefObject<{ doc: Y.Doc; awareness: LocalAwareness; socket: WebSocket | null } | null>;
+}) {
+  if (!collaboration?.enabled) return [];
+  const doc = new Y.Doc();
+  const ytext = doc.getText("markdown");
+  ytext.insert(0, draft);
+  const awareness = new LocalAwareness(doc);
+  const displayName = window.localStorage.getItem("hydra:collaboration:displayName") || "Local researcher";
+  awareness.setLocalStateField("user", { name: displayName, color: "#2f81f7", colorLight: "rgba(47, 129, 247, 0.18)" });
+  for (const [index, user] of collaboration.remoteUsers.entries()) {
+    const cursor = Y.createRelativePositionFromTypeIndex(ytext, 0);
+    awareness.setRemoteState(10_000 + index, {
+      user: { name: user.displayName, color: user.color || "#3fb950", colorLight: "rgba(63, 185, 80, 0.18)" },
+      cursor: { anchor: cursor, head: cursor },
+    });
+  }
+  const socket = openCollaborationSocket(collaboration, doc, onRemoteDocument, onSyncState);
+  ref.current = { doc, awareness, socket };
+  return [yCollab(ytext, awareness, { undoManager: new Y.UndoManager(ytext) })];
+}
+
+function openCollaborationSocket(
+  collaboration: CollaborationConfig,
+  doc: Y.Doc,
+  onRemoteDocument: (value: string) => void,
+  onSyncState: (state: SyncState) => void,
+) {
+  const token = window.localStorage.getItem("hydra:collaboration:sessionToken");
+  if (!token) {
+    onSyncState("offline");
+    return null;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`/api/collaboration/ws/${encodeURIComponent(collaboration.projectId)}/${encodeURIComponent(collaboration.documentId)}`, window.location.href);
+  url.protocol = protocol;
+  url.searchParams.set("token", token);
+  const socket = new WebSocket(url);
+  onSyncState("connecting");
+  socket.addEventListener("open", () => onSyncState("syncing"));
+  socket.addEventListener("close", () => onSyncState("offline"));
+  socket.addEventListener("error", () => onSyncState("offline"));
+  doc.on("update", (update: Uint8Array) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: "document-update", update: bytesToBase64(update) }));
+  });
+  socket.addEventListener("message", (event) => {
+    try {
+      const payload = JSON.parse(String(event.data)) as { type?: string; update?: string; content?: string };
+      if (payload.type === "document-update" && payload.update) {
+        Y.applyUpdate(doc, base64ToBytes(payload.update));
+        onRemoteDocument(doc.getText("markdown").toString());
+        onSyncState("synced");
+      }
+      if (payload.type === "document-snapshot" && typeof payload.content === "string") {
+        const ytext = doc.getText("markdown");
+        ytext.delete(0, ytext.length);
+        ytext.insert(0, payload.content);
+        onRemoteDocument(payload.content);
+        onSyncState("synced");
+      }
+      if (payload.type === "presence") {
+        onSyncState("synced");
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  });
+  return socket;
+}
+
+class LocalAwareness {
+  readonly doc: Y.Doc;
+  private localState: Record<string, unknown> = {};
+  private readonly states = new Map<number, Record<string, unknown>>();
+  private readonly listeners = new Set<(change: { added: number[]; updated: number[]; removed: number[] }) => void>();
+
+  constructor(doc: Y.Doc) {
+    this.doc = doc;
+    this.states.set(doc.clientID, this.localState);
+  }
+
+  getLocalState() {
+    return this.localState;
+  }
+
+  setLocalStateField(field: string, value: unknown) {
+    this.localState = { ...this.localState, [field]: value };
+    this.states.set(this.doc.clientID, this.localState);
+    this.emit({ added: [], updated: [this.doc.clientID], removed: [] });
+  }
+
+  setRemoteState(clientId: number, state: Record<string, unknown>) {
+    const added = this.states.has(clientId) ? [] : [clientId];
+    const updated = this.states.has(clientId) ? [clientId] : [];
+    this.states.set(clientId, state);
+    this.emit({ added, updated, removed: [] });
+  }
+
+  getStates() {
+    return this.states;
+  }
+
+  on(_event: "change", listener: (change: { added: number[]; updated: number[]; removed: number[] }) => void) {
+    this.listeners.add(listener);
+  }
+
+  off(_event: "change", listener: (change: { added: number[]; updated: number[]; removed: number[] }) => void) {
+    this.listeners.delete(listener);
+  }
+
+  private emit(change: { added: number[]; updated: number[]; removed: number[] }) {
+    for (const listener of this.listeners) listener(change);
+  }
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
 function hydraDecorationPlugin({

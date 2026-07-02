@@ -386,6 +386,27 @@ class SettingsUpdateRequest(BaseModel):
     workspace_preferences: dict[str, str] | None = None
 
 
+class CollaborationSettingsRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    enabled: bool = False
+    sync_server_url: str = Field(default="", max_length=500)
+
+
+class CollaborationInviteRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    display_name: str = Field(min_length=1, max_length=200)
+    permission: Literal["read", "comment", "edit"]
+
+
+class CollaborationAuthenticateRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    invite_token: str = Field(min_length=8, max_length=200)
+
+
+class CollaborationRevokeRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+
+
 class BrowserHandshakeRequest(BaseModel):
     handshake_nonce: str = Field(min_length=8, max_length=200)
 

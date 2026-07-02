@@ -625,6 +625,43 @@ export type SettingsResponse = {
   global_settings: Record<string, unknown>;
 };
 
+export type CollaborationPermission = "read" | "comment" | "edit";
+export type SyncState = "offline" | "connecting" | "synced" | "syncing" | "conflict" | "revoked";
+
+export type CollaborationSettings = {
+  project_id: string;
+  enabled: boolean;
+  sync_server_url: string;
+  sync_server_kind: "self-hosted" | string;
+};
+
+export type CollaboratorRecord = {
+  collaborator_id: string;
+  display_name: string;
+  permission: CollaborationPermission;
+  revoked: boolean;
+  authenticated_at?: number | null;
+};
+
+export type CollaborationInvite = {
+  collaborator_id: string;
+  permission: CollaborationPermission;
+  invite_token: string;
+};
+
+export type CollaborationAuth = {
+  collaborator_id: string;
+  display_name: string;
+  permission: CollaborationPermission;
+  session_token: string;
+};
+
+export type CollaborationRevokeResponse = {
+  collaborator_id: string;
+  revoked: boolean;
+  disconnected: number;
+};
+
 export type ApiClient = {
   get<T>(path: string, init?: RequestInit): Promise<T>;
   post<T>(path: string, body?: unknown, init?: RequestInit): Promise<T>;

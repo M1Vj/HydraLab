@@ -1,7 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { createApiClient, HydraApiError } from "../../lib/api";
-import { booleanPreference, looksLikeRawSecret, providerSecretStored, saveProviderModel, saveProviderSecret, saveWorkspacePreferences } from "./settingsController";
+import {
+  authenticateCollaborator,
+  booleanPreference,
+  inviteCollaborator,
+  looksLikeRawSecret,
+  providerSecretStored,
+  revokeCollaborator,
+  saveCollaborationSettings,
+  saveProviderModel,
+  saveProviderSecret,
+  saveWorkspacePreferences,
+} from "./settingsController";
 
 const originalFetch = globalThis.fetch;
 
@@ -76,5 +87,47 @@ describe("settings secret-write flow", () => {
 
     expect(capturedBody).toEqual({ workspace_preferences: { offlineOnly: "true" } });
     expect(response.workspace_preferences.offlineOnly).toBe("true");
+  });
+});
+
+describe("collaboration settings flow", () => {
+  test("collaboration opt-in posts the self-hosted sync URL", async () => {
+    let capturedBody: unknown = null;
+    globalThis.fetch = async (_input, init) => {
+      capturedBody = JSON.parse(String(init?.body ?? "{}"));
+      return jsonResponse({ project_id: "transformer-survey", enabled: true, sync_server_url: "wss://lab.local:8443", sync_server_kind: "self-hosted" });
+    };
+    const client = createApiClient("/api", 100);
+
+    const result = await saveCollaborationSettings({ project_id: "transformer-survey", enabled: true, sync_server_url: "wss://lab.local:8443" }, client);
+
+    expect(capturedBody).toEqual({ project_id: "transformer-survey", enabled: true, sync_server_url: "wss://lab.local:8443" });
+    expect(result.sync_server_kind).toBe("self-hosted");
+  });
+
+  test("invite, authenticate, and revoke use collaboration endpoints", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      urls.push(String(input));
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (String(input).includes("/invites")) return jsonResponse({ collaborator_id: "c1", permission: body.permission, invite_token: "invite-token" });
+      if (String(input).includes("/authenticate")) {
+        return jsonResponse({ collaborator_id: "c1", display_name: "Dana Reyes", permission: "edit", session_token: "session-token" });
+      }
+      return jsonResponse({ collaborator_id: "c1", revoked: true, disconnected: 1 });
+    };
+    const client = createApiClient("/api", 100);
+
+    const invite = await inviteCollaborator({ project_id: "transformer-survey", display_name: "Dana Reyes", permission: "edit" }, client);
+    const auth = await authenticateCollaborator({ project_id: "transformer-survey", invite_token: invite.invite_token }, client);
+    const revoked = await revokeCollaborator("c1", "transformer-survey", client);
+
+    expect(auth.display_name).toBe("Dana Reyes");
+    expect(revoked.revoked).toBe(true);
+    expect(urls).toEqual([
+      "/api/collaboration/invites",
+      "/api/collaboration/authenticate",
+      "/api/collaboration/collaborators/c1/revoke",
+    ]);
   });
 });

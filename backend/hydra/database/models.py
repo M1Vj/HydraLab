@@ -442,6 +442,46 @@ class AgentAuditLedgerEntry(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class ProjectCollaborationSettings(SQLModel, table=True):
+    __tablename__ = "project_collaboration_settings"
+    project_id: str = Field(primary_key=True)
+    enabled: bool = Field(default=False)
+    sync_server_url: str = Field(default="")
+    sync_server_kind: str = Field(default="self-hosted")
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class CollaboratorIdentity(SQLModel, table=True):
+    __tablename__ = "collaborator_identities"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    display_name: str = Field(index=True)
+    auth_token_hash: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    revoked_at: Optional[datetime] = Field(default=None, nullable=True)
+
+
+class ProjectCollaborationPermission(SQLModel, table=True):
+    __tablename__ = "project_collaboration_permissions"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    collaborator_id: str = Field(foreign_key="collaborator_identities.id", index=True)
+    permission: str = Field(index=True)
+    invite_token_hash: str = Field(default="", index=True)
+    invited_at: datetime = Field(default_factory=utcnow)
+    authenticated_at: Optional[datetime] = Field(default=None, nullable=True)
+    revoked_at: Optional[datetime] = Field(default=None, nullable=True)
+
+
+class CollaborativeEditAuditEntry(SQLModel, table=True):
+    __tablename__ = "collaborative_edit_audit"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    collaborator_id: str = Field(index=True)
+    document_id: str = Field(index=True)
+    change_summary: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class Annotation(SQLModel, table=True):
     __tablename__ = "annotations"
     sidecar_record_id: str = Field(default_factory=uuid_text, primary_key=True)
