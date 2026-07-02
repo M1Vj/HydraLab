@@ -2289,18 +2289,24 @@ def create_app() -> FastAPI:
     async def research_chat(request: ResearchRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
         await repo.add_event("research.started", f"Searching literature for {request.query}")
-        sources = [await repo.upsert_source(source) for source in await search_academic_sources(request.query)]
+        allow_network = _scholarly_network_allowed()
+        if not allow_network:
+            await repo.add_event("consent.offline_blocked", f"Scholarly search suppressed for '{request.query}' (offline/scholarly disabled)")
+        sources = [await repo.upsert_source(source) for source in await search_academic_sources(request.query, allow_network=allow_network)]
         answer = compose_research_answer(request.query, sources)
         citations = [await repo.add_citation(**citation_for(request.query, sources[0]))]
         await repo.add_event("research.completed", f"Completed cited answer for {request.query}")
-        return {"answer": answer, "citations": citations, "sources": sources, "status": "completed"}
+        return {"answer": answer, "citations": citations, "sources": sources, "status": "completed", "offline_blocked": not allow_network}
 
     @app.post("/api/sources/search")
     async def source_search(request: SourceSearchRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        sources = [await repo.upsert_source(source) for source in await search_academic_sources(request.query)]
+        allow_network = _scholarly_network_allowed()
+        if not allow_network:
+            await repo.add_event("consent.offline_blocked", f"Source search suppressed for '{request.query}' (offline/scholarly disabled)")
+        sources = [await repo.upsert_source(source) for source in await search_academic_sources(request.query, allow_network=allow_network)]
         await repo.add_event("sources.search.completed", f"Found {len(sources)} source candidates")
-        return {"sources": sources}
+        return {"sources": sources, "offline_blocked": not allow_network}
 
     @app.get("/api/project/objects")
     async def project_objects(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -3945,6 +3951,21 @@ def _offline_posture() -> bool:
     privacy = settings.get("privacy", {})
     general = settings.get("general", {})
     return bool(privacy.get("offline_only") or general.get("offline_only"))
+
+
+def _scholarly_network_allowed() -> bool:
+    """True only when scholarly egress (OpenAlex/arXiv/Unpaywall) is permitted.
+
+    Enforces the offline-first invariant for the legacy research endpoints:
+    blocked when offline_only is engaged OR scholarly APIs are disabled. Mirrors
+    the posture resolution used by /api/sources/discover.
+    """
+    settings = load_settings(app_data_root() / "settings.toml").data
+    privacy = settings.get("privacy", {})
+    general = settings.get("general", {})
+    offline_only = bool(privacy.get("offline_only") or general.get("offline_only"))
+    scholarly_enabled = bool(privacy.get("scholarly_apis_enabled", True))
+    return scholarly_enabled and not offline_only
 
 
 def _discovery_limiter_from_settings() -> ProviderRateLimiter:

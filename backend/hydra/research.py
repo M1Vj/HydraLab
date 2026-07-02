@@ -8,7 +8,12 @@ from urllib.parse import quote_plus
 import httpx
 
 
-async def search_academic_sources(query: str) -> list[dict[str, Any]]:
+async def search_academic_sources(query: str, *, allow_network: bool = True) -> list[dict[str, Any]]:
+    # Offline-first hard invariant: when scholarly network access is not permitted
+    # (offline_only engaged, or scholarly APIs disabled), no request may leave the
+    # machine. Return the local fallback WITHOUT touching OpenAlex/arXiv/Unpaywall.
+    if not allow_network:
+        return [_fallback_source(query)]
     results = []
     results.extend(await _openalex(query))
     results.extend(await _arxiv(query))

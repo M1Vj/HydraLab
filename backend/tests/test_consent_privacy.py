@@ -78,6 +78,26 @@ def test_hl_consent_03_offline_only_blocks_and_purges(tmp_path, monkeypatch):
     assert modes["offline_only"] is True
 
 
+# @HL-CONSENT-03b — legacy research endpoints must honour offline_only (no scholarly egress).
+def test_hl_consent_03b_offline_blocks_legacy_research_egress(tmp_path, monkeypatch):
+    async def _must_not_call(*args, **kwargs):
+        raise AssertionError("scholarly network must not be touched when offline_only is engaged")
+
+    monkeypatch.setattr("hydra.research._openalex", _must_not_call)
+    monkeypatch.setattr("hydra.research._arxiv", _must_not_call)
+    monkeypatch.setattr("hydra.research._unpaywall", _must_not_call)
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/assistant/offline", params={"enabled": True})
+
+    research = client.post("/api/chat/research", json={"query": "attention transformers"}).json()
+    assert research["offline_blocked"] is True
+    assert research["sources"][0]["id"].startswith("local_")
+
+    search = client.post("/api/sources/search", json={"query": "attention"}).json()
+    assert search["offline_blocked"] is True
+    assert search["sources"][0]["id"].startswith("local_")
+
+
 # @HL-CONSENT-04 — granting only G2 does not make browser page text sendable.
 def test_hl_consent_04_browser_page_text_separate_optin():
     items = [SendScopeItem("browser_event", "https://example.com/page", label="page")]
