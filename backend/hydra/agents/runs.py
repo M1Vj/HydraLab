@@ -110,13 +110,15 @@ class RunRepository:
         await self.session.refresh(step)
         return step
 
-    async def cancel_run(self, run_id: str) -> Optional[AgentRun]:
+    async def cancel_run(self, run_id: str, *, stop_reason: str = "") -> Optional[AgentRun]:
         """Cancel a run, leaving its completed step prefix intact."""
 
         run = await self.session.get(AgentRun, run_id)
         if run is None:
             return None
         run.status = RunStatus.CANCELLED.value
+        if stop_reason:
+            run.stop_reason = stop_reason
         run.ended_at = _utcnow()
         run.updated_at = _utcnow()
         self.session.add(run)

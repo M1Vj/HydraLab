@@ -83,6 +83,9 @@ from hydra.schemas import (
     ChatExportRequest,
     SendScopeRequest,
     AgentModeUpdateRequest,
+    AutonomyPolicyRequest,
+    AutopilotCancelRequest,
+    AutopilotRunStartRequest,
     FullAccessUpdateRequest,
     SkillEnabledRequest,
     SkillEditRequest,
@@ -173,6 +176,16 @@ from hydra.agents.runs import RunBudget as AgentRunBudget
 from hydra.agents.runs import RunRepository
 from hydra.agents.approvals import ApprovalService, to_contract
 from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
+from hydra.autonomy.audit import AuditLedger
+from hydra.autonomy.loop import AutopilotLoop
+from hydra.autonomy.policy import (
+    AutonomyPolicy,
+    AutonomyPolicyError,
+    BudgetLimits,
+    default_autonomy_policy,
+    policy_to_json,
+    resolve_autonomy_policy,
+)
 from hydra.orchestrator.run import OrchestratorConfigError, RunConfig, RunStateMachine
 from hydra.orchestrator.stages import StageEnum
 from hydra.recipes.literature_review import (
@@ -989,7 +1002,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="run not found")
         trace = await runs.get_trace(run_id)
         return {
-            "run": {"id": run.id, "project_id": run.project_id, "mode": run.mode, "status": run.status, "paused": run.paused},
+            "run": {
+                "id": run.id,
+                "project_id": run.project_id,
+                "mode": run.mode,
+                "status": run.status,
+                "paused": run.paused,
+                "stop_reason": run.stop_reason,
+            },
             "trace": trace.public_dict(),
             "artifacts": json.loads(run.artifacts or "[]"),
         }
@@ -1006,7 +1026,7 @@ def create_app() -> FastAPI:
         run = await RunRepository(session).cancel_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
-        return {"id": run.id, "status": run.status, "paused": run.paused}
+        return {"id": run.id, "status": run.status, "paused": run.paused, "stop_reason": run.stop_reason}
 
     @app.get("/api/agent/approvals")
     async def list_agent_approvals(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -1031,6 +1051,206 @@ def create_app() -> FastAPI:
             }
         result = await service.resolve(approval_id, decision=request.decision)
         return {"applied": result.applied, "status": result.status, "reason": result.reason}
+
+    # ------------------------------------------- autonomy safety shell
+    @app.get("/api/autonomy/policy")
+    async def get_autonomy_policy(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        stored = await _mode_policy(session, project_id)
+        if stored.autonomy_policy_json:
+            try:
+                resolved = resolve_autonomy_policy(stored, require_enabled=False)
+            except AutonomyPolicyError:
+                resolved = default_autonomy_policy(stored.default_mode, autopilot_enabled=bool(stored.autopilot_enabled))
+        else:
+            resolved = default_autonomy_policy(stored.default_mode, autopilot_enabled=bool(stored.autopilot_enabled))
+        return {"project_id": project_id, "policy": resolved.public_dict()}
+
+    @app.post("/api/autonomy/policy")
+    async def set_autonomy_policy(request: AutonomyPolicyRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        stored = await _mode_policy(session, request.project_id)
+        resolved = AutonomyPolicy(
+            mode=request.mode,
+            allowed_action_types=request.allowed_action_types,
+            blocked_action_types=request.blocked_action_types,
+            budget_limits=BudgetLimits(
+                tokens=int(request.budget_limits.get("tokens", 60000)),
+                wall_clock_seconds=int(request.budget_limits.get("wall_clock_seconds", 120)),
+            ),
+            max_loop_count=request.max_loop_count,
+            stop_conditions=request.stop_conditions,
+            checkpoint_required=request.checkpoint_required,
+            approval_required=request.approval_required,
+            rollback_behavior=request.rollback_behavior,
+            autopilot_enabled=request.autopilot_enabled,
+        )
+        stored.default_mode = request.mode
+        stored.autopilot_enabled = request.autopilot_enabled
+        stored.autonomy_policy_json = policy_to_json(resolved)
+        stored.updated_at = datetime.now(timezone.utc)
+        session.add(stored)
+        await session.commit()
+        await session.refresh(stored)
+        return {"project_id": request.project_id, "policy": resolved.public_dict()}
+
+    @app.post("/api/autonomy/runs")
+    async def start_autopilot_run(
+        request: AutopilotRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        stored = await _mode_policy(session, request.project_id)
+        try:
+            policy = resolve_autonomy_policy(stored)
+            config = RunConfig.resolve(
+                stage_overrides=request.enabled_stages or {stage.value: True for stage in StageEnum},
+                scoring_method=request.scoring_method,
+            )
+        except (AutonomyPolicyError, OrchestratorConfigError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await AutopilotLoop(
+            session, policy, config, full_access_enabled=bool(stored.full_access_enabled)
+        ).start(project_id=request.project_id, inputs=request.inputs)
+        return await _autonomy_run_response(session, result.run_id, state=result.state)
+
+    @app.post("/api/autonomy/runs/{run_id}/pause")
+    async def pause_autopilot_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await RunRepository(session).pause_run(run_id, True)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused, "stop_reason": run.stop_reason}
+
+    @app.post("/api/autonomy/runs/{run_id}/resume")
+    async def resume_autopilot_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        stored = await _mode_policy(session, run.project_id)
+        try:
+            policy = resolve_autonomy_policy(stored)
+        except AutonomyPolicyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await AutopilotLoop(
+            session, policy, RunConfig.all_enabled(), full_access_enabled=bool(stored.full_access_enabled)
+        ).resume(run_id=run_id, project_id=run.project_id)
+        return await _autonomy_run_response(session, result.run_id, state=result.state)
+
+    @app.post("/api/autonomy/runs/{run_id}/cancel")
+    async def cancel_autopilot_run(
+        run_id: str,
+        request: AutopilotCancelRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        run = await RunRepository(session).cancel_run(run_id, stop_reason=request.stop_reason)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused, "stop_reason": run.stop_reason}
+
+    @app.post("/api/autonomy/runs/{run_id}/retry")
+    async def retry_autopilot_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        stored = await _mode_policy(session, run.project_id)
+        try:
+            policy = resolve_autonomy_policy(stored)
+        except AutonomyPolicyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await AutopilotLoop(
+            session, policy, RunConfig.all_enabled(), full_access_enabled=bool(stored.full_access_enabled)
+        ).retry(project_id=run.project_id)
+        return await _autonomy_run_response(session, result.run_id, state=result.state)
+
+    @app.get("/api/autonomy/pending-actions")
+    async def list_pending_governed_actions(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        review_items = [
+            item
+            for item in await Repository(session).list_review_items("agent-stage-proposal")
+            if item.get("project_id") in (None, project_id)
+        ]
+        approvals = await ApprovalService(session).list_pending(project_id)
+        pending: list[dict[str, object]] = []
+        for item in review_items:
+            payload = item.get("payload") or {}
+            pending.append(
+                {
+                    "id": item["id"],
+                    "kind": "review_item",
+                    "action_kind": payload.get("action_kind", item.get("item_type")),
+                    "summary": item.get("summary") or item.get("title"),
+                    "target_ref": item.get("target_id"),
+                    "risk_level": payload.get("risk_level", "high"),
+                    "status": item.get("status", "pending"),
+                    "reason": item.get("summary", ""),
+                    "payload": payload,
+                }
+            )
+        for approval in approvals:
+            payload = json.loads(approval.payload_json or "{}")
+            pending.append(
+                {
+                    "id": approval.id,
+                    "kind": "approval",
+                    "action_kind": approval.action_kind,
+                    "summary": approval.summary,
+                    "target_ref": approval.target_ref,
+                    "risk_level": payload.get("risk_level", "medium"),
+                    "status": approval.status,
+                    "reason": approval.reason,
+                    "payload": payload,
+                }
+            )
+        return {"pending_actions": pending}
+
+    @app.post("/api/autonomy/pending-actions/{approval_id}/resolve")
+    async def resolve_pending_governed_action(
+        approval_id: str,
+        request: ApprovalResolveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        result = await ApprovalService(session).resolve(approval_id, decision=request.decision)
+        return {"applied": result.applied, "status": result.status, "reason": result.reason}
+
+    @app.get("/api/autonomy/audit-ledger")
+    async def read_autonomy_audit_ledger(
+        project_id: str = "default",
+        run_id: str | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        rows = await AuditLedger(session).list(project_id=project_id, run_id=run_id)
+        return {
+            "entries": [
+                {
+                    "id": row.id,
+                    "project_id": row.project_id,
+                    "run_id": row.run_id,
+                    "actor": row.actor,
+                    "action": row.action,
+                    "risk_level": row.risk_level,
+                    "target": row.target,
+                    "approval_state": row.approval_state,
+                    "created_at": row.created_at.timestamp(),
+                }
+                for row in rows
+            ]
+        }
+
+    async def _autonomy_run_response(session: AsyncSession, run_id: str, *, state: str) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        trace = await RunRepository(session).get_trace(run_id)
+        return {
+            "run": {
+                "id": run.id,
+                "project_id": run.project_id,
+                "mode": run.mode,
+                "status": run.status,
+                "state": state,
+                "paused": bool(run.paused),
+                "stop_reason": run.stop_reason,
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads(run.artifacts or "[]"),
+        }
 
     # ------------------------------------------- idea recipe (02-06, HL-ASSIST-*)
     def _idea_candidate_public(candidate: IdeaCandidateModel) -> dict[str, object]:

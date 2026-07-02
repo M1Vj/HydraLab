@@ -480,6 +480,31 @@ class OrchestratorRunStartRequest(BaseModel):
     recipe_inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class AutonomyPolicyRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    autopilot_enabled: bool = False
+    mode: Literal["passive", "copilot", "full_access"] = "passive"
+    allowed_action_types: list[str] = Field(default_factory=list)
+    blocked_action_types: list[str] = Field(default_factory=list)
+    budget_limits: dict[str, int] = Field(default_factory=lambda: {"tokens": 60000, "wall_clock_seconds": 120})
+    max_loop_count: int = Field(default=1, ge=1, le=100)
+    stop_conditions: list[str] = Field(default_factory=lambda: ["max_loop_count"])
+    checkpoint_required: bool = True
+    approval_required: bool = True
+    rollback_behavior: str = Field(default="restore_last_checkpoint", max_length=120)
+
+
+class AutopilotRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    inputs: list[Any] = Field(default_factory=list)
+    enabled_stages: dict[str, bool] = Field(default_factory=dict)
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "pairwise"
+
+
+class AutopilotCancelRequest(BaseModel):
+    stop_reason: str = Field(default="cancelled by user", max_length=400)
+
+
 class LiteratureReviewRunStartRequest(BaseModel):
     project_id: str = Field(default="default", max_length=200)
     question: str = Field(default="", max_length=2000)

@@ -101,6 +101,10 @@ class GitService:
         result = self._run_read_only("rev-parse", ["--abbrev-ref", "HEAD"])
         return result.stdout.strip() or "HEAD"
 
+    def head_commit(self) -> str:
+        """Return the current HEAD commit sha (empty string outside a repo)."""
+        return self._run_read_only("rev-parse", ["HEAD"]).stdout.strip()
+
     # -- explicit safe writes ------------------------------------------------
     def commit(self, message: str, paths: Optional[list[str]] = None) -> dict[str, object]:
         """Record a commit. Only ever called from an explicit user click (HL-GIT-03)."""
@@ -111,7 +115,8 @@ class GitService:
         result = self._run(["commit", "-m", message])
         if not result.ok:
             raise GitError(result.stderr.strip() or "commit failed")
-        return {"committed": True, "message": message, "branch": self.current_branch()}
+        head = self._run_read_only("rev-parse", ["HEAD"]).stdout.strip()
+        return {"committed": True, "message": message, "branch": self.current_branch(), "commit": head}
 
     def checkpoint(self, label: str = "checkpoint") -> Optional[dict[str, object]]:
         """Auto-checkpoint commit before a risky action (HL-GIT-04)."""

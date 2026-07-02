@@ -329,6 +329,7 @@ class AgentRun(SQLModel, table=True):
     inputs_ref: str = Field(default="[]")
     status: str = Field(default="queued")
     paused: bool = Field(default=False)
+    stop_reason: str = Field(default="")
     tokens_used: int = Field(default=0)
     started_at: Optional[datetime] = Field(default=None)
     ended_at: Optional[datetime] = Field(default=None)
@@ -399,7 +400,32 @@ class AgentModePolicy(SQLModel, table=True):
     project_id: str = Field(primary_key=True)
     default_mode: str = Field(default="passive")
     full_access_enabled: bool = Field(default=False)
+    autopilot_enabled: bool = Field(default=False)
+    autonomy_policy_json: str = Field(default="{}")
     updated_at: datetime = Field(default_factory=utcnow)
+
+class AgentCheckpoint(SQLModel, table=True):
+    __tablename__ = "agent_checkpoints"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    run_id: Optional[str] = Field(default=None, foreign_key="agent_runs.id", index=True, nullable=True)
+    git_ref: Optional[str] = Field(default=None)
+    commit: Optional[str] = Field(default=None)
+    label: str = Field(default="checkpoint")
+    target: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+
+class AgentAuditLedgerEntry(SQLModel, table=True):
+    __tablename__ = "agent_audit_ledger"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    run_id: Optional[str] = Field(default=None, foreign_key="agent_runs.id", index=True, nullable=True)
+    actor: str = Field(default="autopilot")
+    action: str = Field(default="")
+    risk_level: str = Field(default="high")
+    target: str = Field(default="")
+    approval_state: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Annotation(SQLModel, table=True):
