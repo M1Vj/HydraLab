@@ -10,6 +10,11 @@ import {
   type SettingsResponse,
 } from "../../lib/api";
 
+// Self-evolution audit/history is surfaced read-only on the Settings panel; the
+// canonical fetch lives in selfEvolutionController and is re-exported here so the
+// Settings surface and the Self-Evolution panel never drift on the endpoint.
+export { fetchSelfEvolutionAudit, type SelfEvolutionAuditEntry } from "./selfEvolutionController";
+
 type ProviderSetting = SettingsResponse["provider_settings"][number];
 
 /** Mirrors backend RAW_SECRET_PREFIXES so raw keys can be flagged before hitting the API. */

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Ban, KeyRound, Save, ShieldCheck, UserPlus, Wifi } from "lucide-react";
+import { Ban, History, KeyRound, Save, ShieldCheck, UserPlus, Wifi } from "lucide-react";
 import type { CollaborationPermission, CollaborationSettings, CollaboratorRecord, SettingsResponse } from "../../lib/api";
 import { HydraApiError } from "../../lib/api";
 import { useWorkspaceData } from "../data";
@@ -7,7 +7,9 @@ import { FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import {
   authenticateCollaborator,
   booleanPreference,
+  fetchSelfEvolutionAudit,
   getCollaborationSettings,
+  type SelfEvolutionAuditEntry,
   inviteCollaborator,
   listCollaborators,
   looksLikeRawSecret,
@@ -51,10 +53,21 @@ export function SettingsPanel() {
   const [authInviteToken, setAuthInviteToken] = useState("");
   const [collabBusy, setCollabBusy] = useState<string | null>(null);
   const [collabError, setCollabError] = useState("");
+  const [selfEvoAudit, setSelfEvoAudit] = useState<SelfEvolutionAuditEntry[]>([]);
 
   useEffect(() => {
     void loadCollaboration(projectId);
+    void loadSelfEvolutionAudit(projectId);
   }, [projectId]);
+
+  async function loadSelfEvolutionAudit(nextProjectId = projectId) {
+    try {
+      const payload = await fetchSelfEvolutionAudit(nextProjectId);
+      setSelfEvoAudit(payload.entries);
+    } catch {
+      setSelfEvoAudit([]);
+    }
+  }
 
   if (settings.status === "loading" && !settings.data) return <LoadingState title="Loading settings" />;
   if (settings.status === "failure") return <FailureState error={settings.error} onRetry={settings.reload} />;
@@ -379,6 +392,36 @@ export function SettingsPanel() {
                 </div>
               );
             })
+          )}
+        </section>
+
+        <section className="settings-section self-evolution-history">
+          <header>
+            <History size={15} />
+            <strong>Self-evolution history</strong>
+          </header>
+          <p className="settings-hint">
+            Read-only audit of self-evolution proposals. Protected-field diffs (skill capability/permission, provider
+            routing, consent settings, SOUL/USER/MEMORY/HYDRA context files) and untrusted-external proposals always route to
+            the Review Inbox and never auto-apply.
+          </p>
+          {selfEvoAudit.length === 0 ? (
+            <span className="settings-hint">No self-evolution activity recorded yet.</span>
+          ) : (
+            <ul className="self-evolution-audit-list" aria-label="Self-evolution audit entries">
+              {selfEvoAudit.map((entry) => (
+                <li key={entry.id} className="self-evolution-audit-row">
+                  <code>{entry.action.replace("self_evolution.", "")}</code>
+                  <span className="audit-target">{entry.target}</span>
+                  <span className={`status-pill tone-${entry.approval_state === "applied" || entry.approval_state === "pass" ? "ok" : "muted"}`}>
+                    {entry.approval_state}
+                  </span>
+                  <small>
+                    {entry.actor} · {new Date(entry.created_at * 1000).toLocaleString()}
+                  </small>
+                </li>
+              ))}
+            </ul>
           )}
         </section>
 

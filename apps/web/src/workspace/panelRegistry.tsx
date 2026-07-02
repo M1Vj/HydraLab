@@ -9,6 +9,7 @@ import {
   FlaskConical,
   FolderTree,
   GitBranch,
+  GitPullRequestArrow,
   Globe2,
   Inbox,
   Lightbulb,
@@ -38,6 +39,7 @@ export type PanelId =
   | "citation-evidence"
   | "tasks"
   | "exports"
+  | "self-evolution"
   | "settings"
   | "logs"
   | "terminal"
@@ -99,6 +101,14 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
   },
   tasks: { id: "tasks", title: "Tasks", icon: ListTodo, defaultLocation: "border-right", singleton: true, allowMultiple: false },
   exports: { id: "exports", title: "Exports", icon: PackageOpen, defaultLocation: "border-right", singleton: true, allowMultiple: false },
+  "self-evolution": {
+    id: "self-evolution",
+    title: "Self-Evolution",
+    icon: GitPullRequestArrow,
+    defaultLocation: "border-right",
+    singleton: true,
+    allowMultiple: false,
+  },
   settings: { id: "settings", title: "Settings", icon: Settings, defaultLocation: "border-right", singleton: true, allowMultiple: false },
   logs: { id: "logs", title: "Logs", icon: Terminal, defaultLocation: "border-bottom", singleton: true, allowMultiple: false },
   terminal: { id: "terminal", title: "Console", icon: SquareTerminal, defaultLocation: "border-bottom", singleton: true, allowMultiple: false },
@@ -167,7 +177,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 24,
           selected: 0,
           enableMaximize: true,
-          children: [tab("citation-evidence"), tab("tasks"), tab("exports"), tab("settings")],
+          children: [tab("citation-evidence"), tab("tasks"), tab("exports"), tab("self-evolution"), tab("settings")],
         },
       ],
     },

@@ -21,6 +21,7 @@ import { IdeaBoardPanel } from "./panels/IdeaBoardPanel";
 import { MarkdownEditorPanel } from "./panels/MarkdownEditorPanel";
 import { WritingPanel } from "./panels/WritingPanel";
 import { TasksPanel } from "./panels/TasksPanel";
+import { SelfEvolutionPanel } from "./panels/SelfEvolutionPanel";
 import { BrowserPanel } from "./panels/BrowserPanel";
 import {
   CitationEvidencePanel,
@@ -89,6 +90,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         "citation-evidence": CitationEvidencePanel,
         tasks: TasksPanel,
         exports: ExportPanel,
+        "self-evolution": SelfEvolutionPanel,
         settings: SettingsPanel,
         logs: LogsPanel,
         terminal: TerminalPanel,
@@ -125,6 +127,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
       { id: "workbench.toggle-terminal", title: "Toggle bottom panel", run: () => setBottomVisible((current) => !current) },
       { id: "workbench.close-project", title: "Close project", run: () => store.setActiveProject(null) },
       { id: "review.open", title: "Open Review Inbox", run: () => openPanel("review-inbox") },
+      { id: "self-evolution.open", title: "Open Self-Evolution", run: () => openPanel("self-evolution") },
       { id: "git.init", title: "Initialize Git", disabledReason: "Existing folders require explicit confirmation before Git init.", run: () => undefined },
       { id: "view.reset-layout", title: "View: Reset layout", run: () => resetLayout() },
       { id: "view.save-layout-as", title: "View: Save layout as...", run: () => saveLayoutAs() },
@@ -236,7 +239,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
 }
 
 function ActivityBar({ openPanel, reviewCount }: { openPanel: (id: PanelId) => void; reviewCount: number }) {
-  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "agent-runs", "experiments", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "settings"];
+  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "agent-runs", "experiments", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "self-evolution", "settings"];
   return (
     <nav className="activity-bar" aria-label="Activity Bar">
       {ids.map((id) => {
