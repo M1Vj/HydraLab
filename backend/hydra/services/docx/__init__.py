@@ -26,6 +26,29 @@ from hydra.services.docx.service import (
     detect_latex_toolchain,
     scrub_secrets,
 )
+from hydra.services.docx.reader import (
+    DocxNode,
+    StructuralModel,
+    read_structural_model,
+)
+from hydra.services.docx.planner import (
+    DocxPlanError,
+    EditPlan,
+    EditProposal,
+    OP_TYPES,
+    PlannedOperation,
+    build_plan,
+)
+from hydra.services.docx.applier import (
+    ApplyResult,
+    DocxApplyError,
+    OperationOutcome,
+    apply_operations,
+    create_checkpoint,
+    resolve_working_docx,
+    rollback,
+    validate_docx_package,
+)
 
 __all__ = [
     "ConverterAvailability",
@@ -44,4 +67,21 @@ __all__ = [
     "ImportResult",
     "detect_latex_toolchain",
     "scrub_secrets",
+    "DocxNode",
+    "StructuralModel",
+    "read_structural_model",
+    "DocxPlanError",
+    "EditPlan",
+    "EditProposal",
+    "OP_TYPES",
+    "PlannedOperation",
+    "build_plan",
+    "ApplyResult",
+    "DocxApplyError",
+    "OperationOutcome",
+    "apply_operations",
+    "create_checkpoint",
+    "resolve_working_docx",
+    "rollback",
+    "validate_docx_package",
 ]
