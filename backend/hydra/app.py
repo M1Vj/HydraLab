@@ -260,7 +260,7 @@ from hydra.services.project_context import (
     load_project_context,
 )
 from hydra.storage.app_data import app_data_root, init_app_data
-from hydra.storage.runtime import DEFAULT_PORT, BackendRuntime, choose_bind_host
+from hydra.storage.runtime import DEFAULT_PORT, PORT_RANGE, BackendRuntime, choose_bind_host
 from hydra.writing import review_text
 
 HYDRALAB_BIND_HOST = choose_bind_host()
@@ -271,6 +271,20 @@ HYDRALAB_FRONTEND_ORIGINS = {
     for origin in (f"http://localhost:{port}", f"http://127.0.0.1:{port}")
 }
 HYDRALAB_BRIDGE_ORIGINS = {HYDRALAB_EXTENSION_ORIGIN, *HYDRALAB_FRONTEND_ORIGINS}
+# The backend may bind any port in PORT_RANGE (8765-8799); when the UI is served
+# from the backend itself its page origin is one of these.
+HYDRALAB_BACKEND_ORIGINS = {
+    origin
+    for port in PORT_RANGE
+    for origin in (f"http://localhost:{port}", f"http://127.0.0.1:{port}")
+}
+# Packaged Tauri v2 webview origin (production is NOT served from localhost:5173).
+HYDRALAB_TAURI_ORIGINS = {"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"}
+# Every browser origin permitted to issue a state-changing request. A cross-site
+# page (e.g. https://evil.example) is not in this set, so its drive-by POST to the
+# loopback API is refused before the handler runs (CSRF containment).
+HYDRALAB_APP_ORIGINS = HYDRALAB_FRONTEND_ORIGINS | HYDRALAB_BACKEND_ORIGINS | HYDRALAB_TAURI_ORIGINS
+CSRF_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 EXTENSION_BRIDGE_PATHS = {
     "/api/browser/handshake",
     "/api/browser/capture",
@@ -462,6 +476,28 @@ def create_app() -> FastAPI:
         if path.startswith("/api/browser") and request.method != "OPTIONS":
             if origin not in HYDRALAB_BRIDGE_ORIGINS:
                 return JSONResponse({"detail": "Forbidden browser bridge origin"}, status_code=403)
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def csrf_origin_guard(request: Request, call_next):
+        # Same-origin/CSRF containment for the loopback API. A browser always
+        # attaches an ``Origin`` header on a cross-origin state-changing request,
+        # so a foreign origin is a reliable drive-by-CSRF signal: refuse it before
+        # any handler runs. Requests with no Origin (curl, the Tauri IPC channel,
+        # server-side callers, tests) are not browser cross-site attacks and pass.
+        # CORS only stops a page from READING our response — it never stops the
+        # request from EXECUTING, which is exactly what a state change must block.
+        if request.method not in CSRF_SAFE_METHODS:
+            origin = request.headers.get("origin")
+            if origin is not None:
+                allowed = HYDRALAB_APP_ORIGINS
+                if request.url.path in EXTENSION_BRIDGE_PATHS:
+                    allowed = allowed | {HYDRALAB_EXTENSION_ORIGIN}
+                if origin not in allowed:
+                    return JSONResponse(
+                        {"detail": "Cross-origin state-changing request refused"},
+                        status_code=403,
+                    )
         return await call_next(request)
 
     def require_bridge_auth(request: Request) -> dict[str, str]:
@@ -3485,6 +3521,19 @@ def create_app() -> FastAPI:
             for k, v in request.workspace_preferences.items():
                 await repo.save_setting(k, v)
                 global_settings.setdefault("workspace", {})[k] = v
+            if "offlineOnly" in request.workspace_preferences:
+                # The offline kill-switch is ENFORCED off privacy/general.offline_only
+                # (_assistant_privacy). The Settings UI only wrote workspace.offlineOnly,
+                # so the toggle was inert. Mirror it into the enforced keys (as
+                # /api/assistant/offline does) so flipping it actually air-gaps
+                # provider egress, and purge cached provider results when engaging.
+                offline_on = str(request.workspace_preferences["offlineOnly"]).strip().lower() in {
+                    "true", "1", "yes", "on",
+                }
+                global_settings.setdefault("privacy", {})["offline_only"] = offline_on
+                global_settings.setdefault("general", {})["offline_only"] = offline_on
+                if offline_on:
+                    _PROVIDER_CACHE.purge()
         save_settings(settings_path, global_settings)
         await repo.add_event("settings.updated", "Saved settings and workspace preferences")
         return {

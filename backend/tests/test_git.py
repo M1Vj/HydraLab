@@ -106,6 +106,42 @@ def test_hl_git_04_auto_checkpoint_precedes_restore(tmp_path, monkeypatch):
     assert any(s.startswith("checkpoint:") for s in subjects)
 
 
+def test_restore_always_checkpoints_even_without_auto_checkpoint_setting(tmp_path, monkeypatch):
+    # The restore path has no UI-approval gate, so it must never silently drop
+    # uncommitted work: a recovery checkpoint is captured regardless of the
+    # auto_checkpoint preference (which is left at its default/off here).
+    service = _init_repo(tmp_path)
+    (tmp_path / "drafts").mkdir()
+    intro = tmp_path / "drafts" / "intro.md"
+    intro.write_text("original\n")
+    service.commit("docs: add intro", paths=["drafts/intro.md"])
+    intro.write_text("precious uncommitted edit\n")
+
+    client = _client(tmp_path, monkeypatch)
+    result = client.post("/api/git/restore", json={"path": "drafts/intro.md", "ref": "HEAD"}).json()
+
+    assert result["checkpoint"] is not None  # the discarded edit was preserved
+    assert intro.read_text() == "original\n"
+    subjects = [c["subject"] for c in client.get("/api/git/log").json()["commits"]]
+    assert any(s.startswith("checkpoint:") for s in subjects)
+
+
+def test_restore_clean_tree_makes_no_checkpoint(tmp_path):
+    # Nothing to lose: a restore on a genuinely clean working tree must not
+    # fabricate an empty checkpoint commit. Exercised at the service level so the
+    # app-data files the HTTP client writes into the repo root don't dirty it.
+    service = _init_repo(tmp_path)
+    (tmp_path / "drafts").mkdir()
+    intro = tmp_path / "drafts" / "intro.md"
+    intro.write_text("original\n")
+    service.commit("chore: baseline", paths=None)  # stage everything -> clean tree
+    assert service.status()["clean"] is True
+
+    result = service.restore_previous_version("drafts/intro.md", ref="HEAD")
+
+    assert result["checkpoint"] is None
+
+
 # @HL-GIT-05 ----------------------------------------------------------------
 def test_hl_git_05_destructive_reset_requires_ui_approval_not_console(tmp_path, monkeypatch):
     _init_repo(tmp_path)

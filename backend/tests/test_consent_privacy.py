@@ -98,6 +98,42 @@ def test_hl_consent_03b_offline_blocks_legacy_research_egress(tmp_path, monkeypa
     assert search["sources"][0]["id"].startswith("local_")
 
 
+# @HL-CONSENT-03c — the Settings-panel offline toggle (workspace_preferences) must
+# actually engage enforcement, not just persist an inert workspace key.
+def test_hl_consent_03c_settings_offline_toggle_engages_enforcement(tmp_path, monkeypatch):
+    async def _must_not_call(*args, **kwargs):
+        raise AssertionError("scholarly network must not be touched when offline_only is engaged")
+
+    monkeypatch.setattr("hydra.research._openalex", _must_not_call)
+    monkeypatch.setattr("hydra.research._arxiv", _must_not_call)
+    monkeypatch.setattr("hydra.research._unpaywall", _must_not_call)
+    client = _client(tmp_path, monkeypatch)
+
+    saved = client.post(
+        "/api/settings",
+        json={"workspace_preferences": {"offlineOnly": "true"}},
+    )
+    assert saved.status_code == 200
+
+    # Enforcement surface reflects the toggle...
+    modes = client.get("/api/assistant/modes").json()
+    assert modes["offline_only"] is True
+
+    # ...and the legacy scholarly egress paths are air-gapped.
+    research = client.post("/api/chat/research", json={"query": "attention transformers"}).json()
+    assert research["offline_blocked"] is True
+    assert research["sources"][0]["id"].startswith("local_")
+
+
+def test_hl_consent_03c_settings_offline_toggle_off_restores_online(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    client.post("/api/settings", json={"workspace_preferences": {"offlineOnly": "true"}})
+    assert client.get("/api/assistant/modes").json()["offline_only"] is True
+
+    client.post("/api/settings", json={"workspace_preferences": {"offlineOnly": "false"}})
+    assert client.get("/api/assistant/modes").json()["offline_only"] is False
+
+
 # @HL-CONSENT-04 — granting only G2 does not make browser page text sendable.
 def test_hl_consent_04_browser_page_text_separate_optin():
     items = [SendScopeItem("browser_event", "https://example.com/page", label="page")]

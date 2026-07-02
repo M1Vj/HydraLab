@@ -128,14 +128,21 @@ class GitService:
     def restore_previous_version(
         self, path: str, *, ref: str = "HEAD", auto_checkpoint: bool = False
     ) -> dict[str, object]:
-        """Restore a file to a previous committed version (HL-GIT-01 / HL-GIT-04)."""
-        # Resolve the target ref to a concrete commit BEFORE any checkpoint so an
-        # auto-checkpoint (which advances HEAD) cannot capture the edit we are
-        # about to discard as the "previous version".
+        """Restore a file to a previous committed version (HL-GIT-01 / HL-GIT-04).
+
+        A restore runs ``git checkout <ref> -- <path>`` which discards uncommitted
+        edits to that file. Unlike the ``destructive()`` path it carries no UI
+        approval gate, so it MUST NOT be able to silently drop unsaved work: a
+        recovery checkpoint is always captured first (regardless of the
+        ``auto_checkpoint`` preference), making every restore reversible. The
+        ``checkpoint()`` call no-ops on a clean tree, so a checkpoint commit is
+        created only when there is genuinely something to preserve.
+        """
+        # Resolve the target ref to a concrete commit BEFORE the checkpoint so the
+        # checkpoint (which advances HEAD) cannot capture the edit we are about to
+        # discard as the "previous version".
         resolved = self._run(["rev-parse", ref]).stdout.strip() or ref
-        checkpoint = None
-        if auto_checkpoint:
-            checkpoint = self.checkpoint(f"before restore {path}")
+        checkpoint = self.checkpoint(f"before restore {path}")
         result = self._run(["checkout", resolved, "--", path])
         if not result.ok:
             raise GitError(result.stderr.strip() or "restore failed")
