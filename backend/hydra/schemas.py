@@ -478,6 +478,22 @@ class OrchestratorRunStartRequest(BaseModel):
     scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "rubric"
 
 
+class IdeaRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    topic: str = Field(max_length=2_000)
+    source_scope: str = Field(default="", max_length=2_000)
+    constraints: str = Field(default="", max_length=4_000)
+    novelty_target: str = Field(default="medium", max_length=40)
+    enabled_stages: dict[str, bool] = Field(default_factory=dict)
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "rubric"
+
+
+class IdeaPromoteRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    candidate_id: str = Field(max_length=200)
+    target_kind: Literal["task", "note", "related_work"] = "task"
+
+
 class ChatMessageResponse(BaseModel):
     id: str
     conversation_id: str

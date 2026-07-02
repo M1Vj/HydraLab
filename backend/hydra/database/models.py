@@ -755,3 +755,45 @@ class ContextFileChange(SQLModel, table=True):
     checkpoint_ref: Optional[str] = Field(default=None)  # Git/checkpoint id for HYDRA.md
     logs_only: bool = Field(default=True)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class IdeaCandidate(SQLModel, table=True):
+    """A saved idea-generation candidate artifact (branch 02-06, HL-ASSIST-04).
+
+    Every field of the canonical candidate schema is persisted so a candidate
+    round-trips. ``evidence_links``/``required_sources`` hold resolvable refs to
+    existing source/evidence ids as JSON (never fabricated free text, DEC-11);
+    they are intentionally NOT source-FK columns, so no entry is added to the
+    Repository source FK-repoint registry. ``parent_candidate_id`` records single
+    Evolve-pass lineage (HL-ASSIST-09). ``rubric_results`` carries the normalized
+    Compare output (per-criterion value/rationale/stage_run_id/source_refs,
+    HL-ASSIST-06/07); it stays empty when Compare is disabled (HL-ASSIST-08).
+    """
+
+    __tablename__ = "idea_candidates"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(foreign_key="agent_runs.id", index=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    title: str = Field(default="")
+    short_hypothesis: str = Field(default="")
+    research_question: str = Field(default="")
+    motivation: str = Field(default="")
+    method_sketch: str = Field(default="")
+    expected_contribution: str = Field(default="")
+    required_sources: str = Field(default="[]")  # json list of source ids
+    evidence_links: str = Field(default="[]")  # json list of {source_id, evidence_id?}
+    novelty_claim: str = Field(default="")
+    feasibility_notes: str = Field(default="")
+    risks: str = Field(default="")
+    estimated_effort: str = Field(default="")
+    generated_by_stage: str = Field(default="generate")  # generate | evolve
+    parent_candidate_id: Optional[str] = Field(
+        default=None, foreign_key="idea_candidates.id", index=True, nullable=True
+    )
+    status: str = Field(default="draft", index=True)  # draft|reviewed|ranked|promoted|rejected
+    critique: str = Field(default="{}")  # json {weaknesses, risks, missing_evidence}
+    rubric_results: str = Field(default="[]")  # json RubricResult list (empty when Compare off)
+    rank: Optional[int] = Field(default=None)
+    trust_origin: str = Field(default="user")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
