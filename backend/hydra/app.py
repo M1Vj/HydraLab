@@ -182,6 +182,8 @@ from hydra.recipes.literature_review import (
     save_literature_review_artifact,
     validate_literature_review_input,
 )
+from hydra.recipes.paper_critique import PAPER_CRITIQUE_RECIPE_ID, paper_critique_recipe, run_paper_critique_recipe
+from hydra.recipes.related_work import RELATED_WORK_RECIPE_ID, related_work_recipe, run_related_work_recipe
 from hydra.services.project_context import (
     ContextFileMemory,
     ensure_hydra_md,
@@ -776,14 +778,19 @@ def create_app() -> FastAPI:
     @app.get("/api/orchestrator/recipes")
     async def list_orchestrator_recipes() -> dict[str, object]:
         descriptor = literature_review_descriptor(engine_enabled=True)
-        return {"recipes": [] if descriptor is None else [descriptor.public_dict()]}
+        recipes: list[dict[str, object]] = [] if descriptor is None else [descriptor.public_dict()]
+        recipes.extend([paper_critique_recipe(), related_work_recipe()])
+        return {"recipes": recipes}
 
     @app.get("/api/orchestrator/runs")
     async def list_orchestrator_runs(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         rows = (
             await session.exec(
                 select(AgentRun)
-                .where(AgentRun.project_id == project_id, AgentRun.recipe == "bounded-stage-pass")
+                .where(
+                    AgentRun.project_id == project_id,
+                    AgentRun.recipe.in_(["bounded-stage-pass", PAPER_CRITIQUE_RECIPE_ID, RELATED_WORK_RECIPE_ID]),
+                )
                 .order_by(AgentRun.created_at.desc())
             )
         ).all()
@@ -809,6 +816,38 @@ def create_app() -> FastAPI:
     ) -> dict[str, object]:
         policy = await _mode_policy(session, request.project_id)
         privacy = _assistant_privacy()
+        mode = policy.default_mode or privacy["default_mode"]
+        recipe_privacy = {
+            "g3_enabled": privacy["g3_enabled"],
+            "offline_only": privacy["offline_only"],
+            "opt_ins": privacy["opt_ins"],
+        }
+        if request.recipe_id in {PAPER_CRITIQUE_RECIPE_ID, RELATED_WORK_RECIPE_ID}:
+            runner = run_paper_critique_recipe if request.recipe_id == PAPER_CRITIQUE_RECIPE_ID else run_related_work_recipe
+            result = await runner(
+                session,
+                request.recipe_inputs,
+                project_id=request.project_id,
+                mode=mode,
+                budget=AgentRunBudget(
+                    run_budget_tokens=int(privacy["run_budget"]),
+                    wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+                ),
+                privacy=recipe_privacy,
+            )
+            run = await session.get(AgentRun, result.run_id)
+            return {
+                "run": {
+                    "id": result.run_id,
+                    "project_id": request.project_id,
+                    "mode": run.mode if run else mode,
+                    "status": run.status if run else result.state,
+                    "state": result.state,
+                    "paused": bool(run.paused) if run else False,
+                },
+                "trace": result.trace.public_dict(),
+                "artifacts": result.artifacts,
+            }
         try:
             config = RunConfig.resolve(
                 stage_overrides=request.enabled_stages or {stage.value: True for stage in StageEnum},

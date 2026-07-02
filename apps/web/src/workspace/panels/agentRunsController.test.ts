@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { ApiClient } from "../../lib/api";
 import {
+  BUILTIN_RECIPE_IDS,
   CANONICAL_STAGE_IDS,
   buildLiteratureReviewPayload,
   buildStartRunPayload,
   fetchOrchestratorStages,
+  fetchRecipes,
   startLiteratureReviewRun,
   startOrchestratorRun,
   summarizeRunState,
@@ -54,6 +56,28 @@ describe("agent runs controller", () => {
     expect(JSON.stringify(payload)).not.toContain("stop_condition");
   });
 
+  test("buildStartRunPayload records recipe inputs without loop controls", () => {
+    const payload = buildStartRunPayload(
+      "default",
+      { generate: true, validate: true },
+      {
+        recipe_id: "paper-critique",
+        draft_or_source: { title: "Sparse Attention", text: "draft" },
+        target_venue_style: "ACL",
+        source_scope: ["src_attention", "src_bert"],
+      },
+    );
+
+    expect(payload.recipe_id).toBe("paper-critique");
+    expect(payload.recipe_inputs).toEqual({
+      draft_or_source: { title: "Sparse Attention", text: "draft" },
+      target_venue_style: "ACL",
+      source_scope: ["src_attention", "src_bert"],
+    });
+    expect(JSON.stringify(payload)).not.toContain("loop_count");
+    expect(JSON.stringify(payload)).not.toContain("stop_condition");
+  });
+
   test("toggleStage preserves stable stage order", () => {
     const toggles = toggleStage({ generate: true, compare: true }, "compare", false);
     expect(Object.keys(toggles)).toEqual(CANONICAL_STAGE_IDS);
@@ -70,6 +94,17 @@ describe("agent runs controller", () => {
     ]);
   });
 
+  test("fetchRecipes exposes the built-in writing recipes", async () => {
+    const client = fakeClient((path) => {
+      expect(path).toBe("/api/orchestrator/recipes");
+      return { recipes: BUILTIN_RECIPE_IDS.map((id) => ({ id, name: id, stages: [] })) };
+    });
+    await expect(fetchRecipes(client)).resolves.toEqual([
+      { id: "paper-critique", name: "paper-critique", stages: [] },
+      { id: "related-work", name: "related-work", stages: [] },
+    ]);
+  });
+
   test("startOrchestratorRun posts the bounded run request", async () => {
     const captured: { path: string; body: unknown } = { path: "", body: null };
     const client = fakeClient((path, body) => {
@@ -82,7 +117,7 @@ describe("agent runs controller", () => {
       };
     });
 
-    await startOrchestratorRun("default", { compare: false }, client);
+    await startOrchestratorRun("default", { compare: false }, undefined, client);
 
     expect(captured.path).toBe("/api/orchestrator/runs");
     expect(captured.body).toEqual(buildStartRunPayload("default", { compare: false }));
