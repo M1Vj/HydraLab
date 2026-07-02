@@ -48,11 +48,71 @@ export type TaskRecord = {
   id: string;
   title: string;
   column: string;
+  status?: string;
   detail?: string;
   progress?: number;
   position?: number;
   phase_indicator?: string;
   project_id?: string | null;
+  due?: string | null;
+  priority?: "low" | "normal" | "high" | "urgent" | string;
+  tags?: string[];
+  origin?: string;
+  assistant_created?: boolean;
+  lifecycle_state?: "active" | "draft" | "dismissed" | string;
+  review_category?: string | null;
+  trust_origin?: string;
+};
+
+export type TaskLinkRecord = {
+  id: string;
+  task_id: string;
+  target_type: string;
+  target_id_or_path: string;
+  link_role: string;
+  link_state: "live" | "source_trashed" | string;
+};
+
+export type GitChangedFile = { code: string; path: string };
+export type GitStatusResponse = {
+  is_repo: boolean;
+  branch?: string | null;
+  changed_files: GitChangedFile[];
+  clean?: boolean;
+};
+export type GitCommit = { hash: string; author: string; at: string; subject: string };
+export type GitCommitSuggestion = { message: string; files: string[] };
+
+export type ConsoleRunResult = {
+  status: "ran" | "rejected" | "blocked" | "disabled" | "approval_required" | string;
+  command?: string;
+  kind?: string;
+  message?: string;
+  output?: string;
+  stderr?: string;
+  returncode?: number;
+  spawned?: boolean;
+  approved_now?: string;
+};
+
+export type ConsoleAllowlist = {
+  git_inspection: string[];
+  verification: string[];
+  offline: boolean;
+};
+
+export type ExportBundleFormat = {
+  id: string;
+  label: string;
+  available: boolean;
+  state?: string;
+  message?: string;
+};
+export type ExportOptionsResponse = {
+  citation_formats: string[];
+  bundle_formats: ExportBundleFormat[];
+  opt_in_categories: string[];
+  excluded_by_default: string[];
 };
 
 export type ClaimRecord = {

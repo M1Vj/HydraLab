@@ -17,12 +17,14 @@ import { TasksPanel } from "./panels/TasksPanel";
 import {
   BrowserPanel,
   CitationEvidencePanel,
+  ExportPanel,
   GitPanel,
   LogsPanel,
   PdfReaderPanel,
   ProblemsPanel,
   ReviewInboxPanel,
   SettingsPanel,
+  TerminalPanel,
 } from "./panels/ResearchObjectPanels";
 
 export function WorkbenchRoot() {
@@ -62,8 +64,10 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         browser: BrowserPanel,
         "citation-evidence": CitationEvidencePanel,
         tasks: TasksPanel,
+        exports: ExportPanel,
         settings: SettingsPanel,
         logs: LogsPanel,
+        terminal: TerminalPanel,
         problems: ProblemsPanel,
       }),
     [],
@@ -208,7 +212,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
 }
 
 function ActivityBar({ openPanel, reviewCount }: { openPanel: (id: PanelId) => void; reviewCount: number }) {
-  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "browser", "citation-evidence", "tasks", "git", "settings"];
+  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "browser", "citation-evidence", "tasks", "git", "terminal", "exports", "settings"];
   return (
     <nav className="activity-bar" aria-label="Activity Bar">
       {ids.map((id) => {
