@@ -109,12 +109,12 @@ describe("Hydra UI helpers", () => {
 
   test("@HL-UX-04 @HL-CORE-05 creates a default project with only core folders", () => {
     const project = createWorkbenchProject({
-      name: "Attention Mechanisms Review",
-      folderPath: "/research/attention",
+      name: "Workspace Fixture",
+      folderPath: "/research/workspace-fixture",
       template: "empty research",
     });
 
-    expect(project.name).toBe("Attention Mechanisms Review");
+    expect(project.name).toBe("Workspace Fixture");
     expect(project.folders.map((folder) => folder.role)).toEqual(["sources", "knowledge", "work", "writing", "outputs"]);
     expect(project.folders.some((folder) => folder.role.includes("autonomy"))).toBe(false);
   });
