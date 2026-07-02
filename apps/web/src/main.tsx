@@ -53,6 +53,7 @@ import { Dialog, DropdownMenu, Switch, Tooltip } from "./components/ui/primitive
 import { SettingsModule } from "./components/modules/SettingsModule";
 import { SourceDiscoveryPanel } from "./components/modules/SourcesModule";
 import { PdfModule } from "./components/modules/PdfModule";
+import { HydraMarkdownEditor } from "./components/editor/HydraMarkdownEditor";
 
 type Surface = "welcome" | "workbench";
 type PanelStateKind = "empty" | "loading" | "partial" | "failure" | "offline-permission" | "permission-denied";
@@ -759,6 +760,15 @@ function ObjectPanel({
   onCreateNote: () => void;
   onUndo: () => void;
 }) {
+  const [markdownDraft, setMarkdownDraft] = useState(
+    "# Method comparison\n\n> [!warning] Reproducibility\n\nUse [[Attention Is All You Need]] to connect notes, claims and evidence.\n\nSelf-attention replaces recurrence entirely. Cite [@vaswani2017].",
+  );
+  const [markdownSaved, setMarkdownSaved] = useState(markdownDraft);
+  const sampleClaim = "Self-attention replaces recurrence entirely";
+  const sampleClaimStart = markdownDraft.indexOf(sampleClaim);
+  const sampleSuggestion = "connect";
+  const sampleSuggestionStart = markdownDraft.indexOf(sampleSuggestion);
+
   if (panelId === "browser") {
     const preview = resolveInAppBrowserSurface({
       url: "https://www.nature.com/articles/d41586-024-00001-2",
@@ -823,7 +833,19 @@ function ObjectPanel({
           <FileText size={16} />
           <strong>Method comparison</strong>
         </header>
-        <textarea defaultValue={"# Method comparison\n\nUse [[Attention Is All You Need]] to connect notes, claims and evidence."} />
+        <HydraMarkdownEditor
+          fileRef="knowledge/method-comparison.md"
+          value={markdownSaved}
+          notes={[{ id: "src_attention", title: "Attention Is All You Need" }]}
+          citations={[{ key: "vaswani2017", sourceId: "src_attention", title: "Attention Is All You Need" }]}
+          highlights={sampleClaimStart >= 0 ? [{ id: "claim_attention", type: "claim", from: sampleClaimStart, to: sampleClaimStart + sampleClaim.length }] : []}
+          suggestions={sampleSuggestionStart >= 0 ? [{ id: "suggestion-method", from: sampleSuggestionStart, to: sampleSuggestionStart + sampleSuggestion.length, replacement: "link" }] : []}
+          onChange={setMarkdownDraft}
+          onSave={(content) => {
+            setMarkdownSaved(content);
+            setMarkdownDraft(content);
+          }}
+        />
         <div className="link-strip">
           <span>Backlinks: Attention Is All You Need</span>
           <span>Forward links: Self-attention scales quadratically</span>

@@ -34,6 +34,8 @@ from hydra.schemas import (
     ClaimCreateRequest,
     ClaimDetectRequest,
     NoteCreateRequest,
+    NoteFileSaveRequest,
+    NoteSuggestionRequest,
     NoteUpdateRequest,
     ProviderSettingsRequest,
     SettingsUpdateRequest,
@@ -50,6 +52,7 @@ from hydra.database.models import Annotation
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
 from hydra.services.annotations import AnnotationIndexer, create_annotation_record, read_sidecar_records, write_sidecar_records
+from hydra.services.notes import NoteFileService
 from hydra.services.discovery import (
     DiscoveryCache,
     DiscoveryCoordinator,
@@ -572,6 +575,69 @@ def create_app() -> FastAPI:
     async def get_note_links(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
         return await repo.get_note_links(note_id)
+
+    @app.get("/api/note-files")
+    async def open_note_file(
+        path: str,
+        project_id: str = "default",
+        trust_origin: str = "user",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            return await NoteFileService(session, hydra_project_root()).open_note(
+                path,
+                project_id=project_id,
+                trust_origin=trust_origin,
+            )
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Note file not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/note-files/{note_id}")
+    async def save_note_file(
+        note_id: str,
+        request: NoteFileSaveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            return await NoteFileService(session, hydra_project_root()).save_note(note_id, request.content)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Note file not indexed") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/note-files/{note_id}/backlinks")
+    async def list_note_file_backlinks(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return {"backlinks": await NoteFileService(session, hydra_project_root()).list_backlinks(note_id)}
+
+    @app.post("/api/note-files/{note_id}/suggestions")
+    async def propose_note_file_suggestion(
+        note_id: str,
+        request: NoteSuggestionRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            return await NoteFileService(session, hydra_project_root()).propose_inline_suggestion(
+                note_id,
+                suggestion_id=request.suggestion_id,
+                replacement=request.replacement,
+                auto_apply=request.auto_apply,
+                origin_excerpt=request.origin_excerpt,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Note file not indexed") from None
+
+    @app.get("/api/note-files/recovery/pending")
+    async def list_note_recovery_journals(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return {"journals": NoteFileService(session, hydra_project_root()).list_recovery_journals()}
+
+    @app.post("/api/note-files/recovery/{journal_id}/accept")
+    async def accept_note_recovery(journal_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        journal_path = hydra_project_root() / ".hydralab" / "temp" / f"{journal_id}.note-recovery.json"
+        if not journal_path.exists():
+            raise HTTPException(status_code=404, detail="Recovery journal not found")
+        return await NoteFileService(session, hydra_project_root()).accept_recovery(journal_id)
 
     @app.get("/api/annotations/{source_id}")
     async def list_annotations(source_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:

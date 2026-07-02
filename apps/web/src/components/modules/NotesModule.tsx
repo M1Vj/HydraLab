@@ -2,6 +2,7 @@ import React from "react";
 import { Search, FileText, X } from "lucide-react";
 import { useAppContext, Note } from "../../core/context";
 import { registry } from "../../core/registry";
+import { HydraMarkdownEditor } from "../editor/HydraMarkdownEditor";
 
 export function LocalGraphView({
   activeNode,
@@ -205,8 +206,10 @@ export function NotesMain() {
     selectedNote,
     setSelectedNote,
     noteLinks,
+    sources,
     selectNote,
-    saveNote,
+    fetchNotes,
+    fetchNoteLinks,
     deleteNote
   } = useAppContext();
 
@@ -219,6 +222,48 @@ export function NotesMain() {
       </div>
     );
   }
+  const activeNote = selectedNote;
+
+  async function saveNoteContent(body: string) {
+    const payload: Note = { ...activeNote, body };
+    setSelectedNote(payload);
+    const res = await fetch(`http://localhost:8000/api/notes/${activeNote.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: activeNote.title,
+        body,
+        source_id: activeNote.source_id
+      })
+    });
+    if (!res.ok) {
+      throw new Error("Failed to save note");
+    }
+    const data = await res.json();
+    setSelectedNote(data);
+    await fetchNotes();
+    await fetchNoteLinks(data.id);
+  }
+
+  const citationOptions = sources.map((source, index) => ({
+    key: source.citation_key || source.metadata_json?.citation_key || source.id || `source${index + 1}`,
+    sourceId: source.id,
+    title: source.title,
+  }));
+
+  const noteOptions = notes.map((note) => ({ id: note.id, title: note.title }));
+  const claimText = "Self-attention replaces recurrence entirely";
+  const evidenceText = "Use [[Attention Is All You Need]]";
+  const claimStart = activeNote.body.indexOf(claimText);
+  const evidenceStart = activeNote.body.indexOf(evidenceText);
+  const highlights = [
+    ...(claimStart >= 0 ? [{ id: "claim-inline", type: "claim" as const, from: claimStart, to: claimStart + claimText.length }] : []),
+    ...(evidenceStart >= 0 ? [{ id: "evidence-inline", type: "evidence" as const, from: evidenceStart, to: evidenceStart + evidenceText.length }] : []),
+  ];
+  const suggestionStart = activeNote.body.indexOf("Use ");
+  const suggestions = suggestionStart >= 0
+    ? [{ id: "suggestion-passive", from: suggestionStart, to: suggestionStart + 3, replacement: "Compare" }]
+    : [];
 
   return (
     <div style={{ display: "flex", height: "100%", overflow: "hidden", width: "100%" }}>
@@ -227,8 +272,8 @@ export function NotesMain() {
         <div style={{ padding: "12px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" }}>
           <input
             type="text"
-            value={selectedNote.title}
-            onChange={(e) => setSelectedNote({ ...selectedNote, title: e.target.value })}
+            value={activeNote.title}
+            onChange={(e) => setSelectedNote({ ...activeNote, title: e.target.value })}
             placeholder="Note Title"
             style={{
               flex: 1,
@@ -243,7 +288,7 @@ export function NotesMain() {
           />
           <div style={{ display: "flex", gap: "8px" }}>
             <button
-              onClick={saveNote}
+              onClick={() => void saveNoteContent(activeNote.body)}
               style={{
                 padding: "6px 12px",
                 background: "var(--accent)",
@@ -258,7 +303,7 @@ export function NotesMain() {
               Save
             </button>
             <button
-              onClick={() => deleteNote(selectedNote.id)}
+              onClick={() => deleteNote(activeNote.id)}
               style={{
                 padding: "6px 12px",
                 background: "transparent",
@@ -274,23 +319,16 @@ export function NotesMain() {
             </button>
           </div>
         </div>
-        <textarea
-          value={selectedNote.body}
-          onChange={(e) => setSelectedNote({ ...selectedNote, body: e.target.value })}
-          style={{
-            flex: 1,
-            padding: "20px",
-            background: "var(--bg-dark)",
-            color: "var(--fg)",
-            border: "none",
-            resize: "none",
-            fontFamily: "inherit",
-            fontSize: "14px",
-            lineHeight: "1.6",
-            boxSizing: "border-box",
-            outline: "none"
-          }}
-          placeholder="Write your note content here... Use double brackets like [[Other Note Title]] to link notes."
+        <HydraMarkdownEditor
+          fileRef={activeNote.relative_path || `knowledge/${activeNote.title}.md`}
+          value={activeNote.body}
+          notes={noteOptions}
+          citations={citationOptions}
+          highlights={highlights}
+          suggestions={suggestions}
+          trustOrigin={activeNote.trust_origin || "user"}
+          onChange={(body) => setSelectedNote({ ...activeNote, body })}
+          onSave={saveNoteContent}
         />
       </div>
 
@@ -302,7 +340,7 @@ export function NotesMain() {
 
         <div style={{ padding: "16px" }}>
           <LocalGraphView
-            activeNode={{ id: selectedNote.id, title: selectedNote.title, type: "note" }}
+            activeNode={{ id: activeNote.id, title: activeNote.title, type: "note" }}
             neighbors={[
               ...noteLinks.backlinks.map(l => ({ ...l, type: l.type || "note" })),
               ...noteLinks.forward.map(l => ({ ...l, type: l.type || "note" }))

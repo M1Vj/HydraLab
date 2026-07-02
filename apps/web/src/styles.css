@@ -1254,6 +1254,237 @@ kbd {
   min-height: 72px;
 }
 
+.markdown-editor-shell {
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-panel);
+}
+
+.markdown-toolbar {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-panel-raised);
+}
+
+.markdown-toolbar button,
+.citation-picker button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-panel);
+  color: var(--text-active);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.markdown-toolbar button:focus-visible,
+.citation-picker button:focus-visible,
+.citation-picker input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mode-segment {
+  display: inline-flex;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mode-segment button {
+  border: 0;
+  border-radius: 0;
+}
+
+.mode-segment button.active {
+  background: var(--accent);
+  color: white;
+}
+
+.save-indicator,
+.latency-indicator {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.latency-indicator {
+  margin-left: 0;
+}
+
+.save-indicator.dirty {
+  color: #f59e0b;
+}
+
+.save-indicator.failed {
+  color: #ef4444;
+}
+
+.markdown-editor-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.markdown-editor-shell[data-editor-mode="split"] .markdown-editor-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.editor-pane,
+.markdown-preview {
+  min-height: 0;
+  overflow: auto;
+}
+
+.editor-pane .cm-editor {
+  height: 100%;
+  background: var(--bg-dark);
+  color: var(--fg);
+  font-size: 14px;
+}
+
+.editor-pane .cm-scroller {
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  line-height: 1.58;
+}
+
+.markdown-preview {
+  padding: 18px;
+  line-height: 1.6;
+  color: var(--fg);
+  border-left: 1px solid var(--border-color);
+  white-space: pre-wrap;
+}
+
+.md-wikilink,
+.cm-hydra-wikilink {
+  color: #7dd3fc;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.md-citation,
+.cm-hydra-citation {
+  color: #a7f3d0;
+  background: rgba(16, 185, 129, 0.14);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+.md-wikilink[data-state="dangling"],
+.md-citation[data-state="dangling"],
+.cm-hydra-wikilink.dangling,
+.cm-hydra-citation.dangling {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.md-callout,
+.cm-hydra-callout {
+  border-left: 3px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.md-callout {
+  padding: 8px 10px;
+  border-radius: 6px;
+  margin: 4px 0;
+}
+
+.cm-hydra-claim-highlight,
+.md-claim-highlight {
+  background: rgba(47, 129, 247, 0.28);
+  color: inherit;
+}
+
+.cm-hydra-evidence-highlight,
+.md-evidence-highlight {
+  background: rgba(16, 185, 129, 0.22);
+  color: inherit;
+}
+
+.cm-hydra-suggestion {
+  background: rgba(245, 158, 11, 0.2);
+  border-bottom: 1px dotted #f59e0b;
+}
+
+.cm-suggestion-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 3px;
+}
+
+.cm-suggestion-actions button {
+  width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--border-color);
+  background: var(--bg-panel-raised);
+  color: var(--text-active);
+  border-radius: 4px;
+  padding: 0;
+}
+
+.citation-picker {
+  position: absolute;
+  top: 46px;
+  left: 12px;
+  z-index: 8;
+  width: min(420px, calc(100% - 24px));
+  max-height: 340px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.32);
+}
+
+.citation-picker input {
+  border: 1px solid var(--border-color);
+  background: var(--bg-dark);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.citation-picker button {
+  justify-content: space-between;
+}
+
+.citation-picker button span,
+.picker-state,
+.selection-context {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.selection-context {
+  min-height: 28px;
+  border-top: 1px solid var(--border-color);
+  padding: 5px 8px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  overflow: hidden;
+}
+
 .toast {
   position: fixed;
   right: 14px;

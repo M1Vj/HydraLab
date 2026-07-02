@@ -30,6 +30,8 @@ export interface Note {
   title: string;
   body: string;
   source_id?: string | null;
+  relative_path?: string;
+  trust_origin?: "user" | "assistant" | "untrusted";
 }
 
 export interface NoteLinks {

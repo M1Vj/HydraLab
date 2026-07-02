@@ -10,6 +10,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@codemirror/commands": "6.10.4",
+    "@codemirror/lang-markdown": "6.5.0",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/state": "6.7.0",
+    "@codemirror/view": "6.43.4",
+    "@lezer/highlight": "1.2.3",
     "@vitejs/plugin-react": "^5.1.1",
     "lucide-react": "^0.561.0",
     "pdfjs-dist": "6.1.200",

@@ -49,6 +49,17 @@ class NoteUpdateRequest(BaseModel):
     source_id: str | None = None
 
 
+class NoteFileSaveRequest(BaseModel):
+    content: str = Field(max_length=2_000_000)
+
+
+class NoteSuggestionRequest(BaseModel):
+    suggestion_id: str = Field(min_length=1, max_length=200)
+    replacement: str = Field(max_length=20000)
+    auto_apply: bool = False
+    origin_excerpt: str = Field(default="", max_length=12000)
+
+
 
 class TaskCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
