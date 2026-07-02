@@ -50,6 +50,9 @@ from hydra.schemas import (
     NoteUpdateRequest,
     ProviderSettingsRequest,
     ProviderSecretRequest,
+    McpServerRegisterRequest,
+    McpServerEnableRequest,
+    McpToolPermissionRequest,
     SettingsUpdateRequest,
     SourceDiscoveryRequest,
     SourceSaveRequest,
@@ -565,6 +568,119 @@ def create_app() -> FastAPI:
             "skills": [s.to_api() for s in registry.skills],
             "rejected_plugins": registry.rejected_plugins,
         }
+
+    # ----------------------------------------------------------- MCP (02-02)
+    def _mcp_transport_for(server: dict[str, Any]):
+        from hydra.tools.mcp.client import HttpMCPTransport
+
+        connection = json.loads(server.get("connection_json") or "{}") if isinstance(server.get("connection_json"), str) else (server.get("connection_json") or {})
+        return HttpMCPTransport(url=str(connection.get("url") or ""))
+
+    def _mcp_server_view(server: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        # Derive the Settings state (HL-ASSIST-07): failure > permission-denied > ready.
+        if server.get("status") == "failed":
+            state = "failure"
+        elif tools and all(not (t.get("enabled") and t.get("permission") == "allow") for t in tools):
+            state = "permission-denied"
+        else:
+            state = "ready"
+        return {
+            "id": server["id"],
+            "name": server["name"],
+            "transport": server.get("transport"),
+            "enabled": server.get("enabled"),
+            "connector": server.get("connector"),
+            "status": server.get("status"),
+            "connection_error": server.get("connection_error") or "",
+            "auth_handle_ref": server.get("auth_handle_ref"),
+            "state": state,
+            "tools": [
+                {
+                    "id": t["id"],
+                    "name": t["name"],
+                    "description": t.get("description") or "",
+                    "enabled": t.get("enabled"),
+                    "permission": t.get("permission"),
+                    "read_only": t.get("read_only"),
+                    "status": "allowed" if (t.get("enabled") and t.get("permission") == "allow") else "disabled",
+                }
+                for t in tools
+            ],
+        }
+
+    @app.get("/api/mcp/servers")
+    async def list_mcp_servers(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        servers = await repo.list_mcp_servers()
+        views = []
+        for server in servers:
+            tools = await repo.list_mcp_tools(server_id=server["id"])
+            views.append(_mcp_server_view(server, tools))
+        # Empty state (HL-ASSIST-07) is derived by the client when servers == [].
+        return {"servers": views}
+
+    @app.post("/api/mcp/servers")
+    async def register_mcp_server(request: McpServerRegisterRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        from hydra.tools.mcp import MCPService
+
+        service = MCPService(Repository(session))
+        try:
+            if request.connector:
+                server = await service.register_connector(request.connector, name=request.name)
+            else:
+                server = await service.register_server(
+                    name=request.name,
+                    transport=request.transport,
+                    connection=request.connection,
+                    auth_handle_ref=request.auth_handle_ref,
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        repo = Repository(session)
+        tools = await repo.list_mcp_tools(server_id=server["id"])
+        return {"server": _mcp_server_view(server, tools)}
+
+    @app.post("/api/mcp/servers/{server_id}/enable")
+    async def enable_mcp_server(server_id: str, request: McpServerEnableRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        server = await repo.set_mcp_server_enabled(server_id, request.enabled)
+        if server is None:
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        tools = await repo.list_mcp_tools(server_id=server_id)
+        return {"server": _mcp_server_view(server, tools)}
+
+    @app.post("/api/mcp/servers/{server_id}/discover")
+    async def discover_mcp_tools(server_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        from hydra.tools.mcp import MCPService
+
+        repo = Repository(session)
+        server = await repo.get_mcp_server(server_id)
+        if server is None:
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        service = MCPService(repo)
+        try:
+            result = await service.connect_and_discover(server_id, _mcp_transport_for(server))
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        server = await repo.get_mcp_server(server_id)
+        tools = await repo.list_mcp_tools(server_id=server_id)
+        return {"result_status": result["status"], "server": _mcp_server_view(server, tools)}
+
+    @app.patch("/api/mcp/tools/{tool_id}")
+    async def set_mcp_tool_permission(tool_id: str, request: McpToolPermissionRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            tool = await repo.set_mcp_tool_permission(tool_id, enabled=request.enabled, permission=request.permission)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if tool is None:
+            raise HTTPException(status_code=404, detail="MCP tool not found")
+        return {"tool": tool}
+
+    @app.get("/api/mcp/events")
+    async def list_mcp_events(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"events": await repo.list_mcp_call_events()}
 
     # ------------------------------------------------------ context files / memory
     @app.get("/api/context-files")

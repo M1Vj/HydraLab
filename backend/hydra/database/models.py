@@ -515,6 +515,85 @@ class MigrationIdMap(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class McpServer(SQLModel, table=True):
+    """MCP server registry (HL-ASSIST-01, Section 25.7).
+
+    Stores transport/connection config and a keychain *reference* to the auth
+    handle (never a raw secret). ``enabled`` defaults to ``False``; a server is
+    inert until the researcher turns it on.
+    """
+
+    __tablename__ = "mcp_servers"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    name: str = Field(index=True)
+    transport: str = Field(default="stdio")  # stdio | http | inproc
+    connection_json: str = Field(default="{}")  # transport/connection config
+    auth_handle_ref: Optional[str] = Field(default=None)  # keychain:* reference only
+    enabled: bool = Field(default=False)
+    connector: Optional[str] = Field(default=None)  # e.g. "zotero-local" for connector contracts
+    status: str = Field(default="registered")  # registered | connected | failed
+    connection_error: str = Field(default="")  # populated on failure state
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class McpTool(SQLModel, table=True):
+    """Discovered MCP tool as a managed capability (HL-ASSIST-02/03).
+
+    Every discovered tool persists ``enabled=False`` and ``permission='deny'``;
+    it is not callable until explicitly enabled/allowed.
+    """
+
+    __tablename__ = "mcp_tools"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    server_id: str = Field(foreign_key="mcp_servers.id", index=True)
+    name: str = Field(index=True)
+    description: str = Field(default="")
+    input_schema_json: str = Field(default="{}")
+    enabled: bool = Field(default=False)
+    permission: str = Field(default="deny")  # allow | deny (resolved before invocation)
+    read_only: bool = Field(default=False)  # connector contract advertises read-only
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class McpToolCallEvent(SQLModel, table=True):
+    """Exactly one trace event per attempted MCP tool call (HL-ASSIST-04).
+
+    Records tool id, status, request/output summaries, redaction applied and any
+    content-type exclusions enforced by the consent gate.
+    """
+
+    __tablename__ = "mcp_tool_call_events"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    server_id: Optional[str] = Field(default=None, index=True)
+    tool_id: Optional[str] = Field(default=None, index=True)
+    tool_name: str = Field(default="")
+    status: str = Field(index=True)  # allowed-completed | denied | error
+    request_summary: str = Field(default="")
+    output_summary: str = Field(default="")
+    redaction: str = Field(default="none")
+    content_exclusions_json: str = Field(default="[]")
+    detail: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class McpArtifact(SQLModel, table=True):
+    """Retained result of a completed MCP tool call, tagged untrusted-external.
+
+    Linked to its trace event (HL-ASSIST-05, Section 34.1). Tool output re-enters
+    the model only through the delimited untrusted region (HL-TRUST-01).
+    """
+
+    __tablename__ = "mcp_artifacts"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    event_id: str = Field(foreign_key="mcp_tool_call_events.id", index=True)
+    tool_id: Optional[str] = Field(default=None, index=True)
+    trust_level: str = Field(default="untrusted-external", index=True)
+    content: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class ContextFileChange(SQLModel, table=True):
     """Append-only log of automated/manual edits to the four context files.
 
