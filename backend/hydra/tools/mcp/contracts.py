@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from hydra.services.assistant.untrusted import assemble_untrusted_region
+from hydra.services.browser.actions import browser_copilot_tool_descriptors
 
 # HL-TRUST-04 / DEC-6: the Section 26.6 verification allowlist is the ONLY
 # code-execution surface and MUST stay disjoint from the MCP tool surface.

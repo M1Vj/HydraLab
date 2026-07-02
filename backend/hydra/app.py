@@ -30,8 +30,10 @@ from hydra.browser_bridge import (
 from hydra.research import citation_for, compose_research_answer, search_academic_sources
 from hydra.schemas import (
     BrowserCaptureRequest,
+    BrowserCopilotActionRequest,
     BrowserHandshakeRequest,
     BrowserHistoryRequest,
+    BrowserHostPermissionUpdateRequest,
     AnnotationClaimRequest,
     AnnotationCreateRequest,
     EvidenceCreateRequest,
@@ -134,6 +136,12 @@ from hydra.services.ingestion.types import QuarantineError
 from hydra.services.tasks import TaskProposal, propose_task
 from hydra.services.git import GitError, GitService, suggest_grouped_commits
 from hydra.services.console import ConsoleService
+from hydra.services.browser import (
+    BrowserActionRequest as BrowserServiceActionRequest,
+    BrowserActionLogRepository,
+    BrowserCopilotService,
+    BrowserHostPermissionRepository,
+)
 from hydra.services.export import (
     build_project_zip,
     export_options,
@@ -426,6 +434,66 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         events = await repo.list_browser_events(project_id)
         return build_browser_working_set(events, project_id=project_id, budget_tokens=budget_tokens)
+
+    @app.get("/api/browser/modes")
+    async def browser_modes(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return {"modes": BrowserCopilotService(session).browser_modes()}
+
+    @app.get("/api/browser/actions")
+    async def browser_actions(host: str = "") -> dict[str, object]:
+        from hydra.services.browser import browser_copilot_tool_descriptors
+
+        return {"actions": browser_copilot_tool_descriptors(host)}
+
+    @app.get("/api/browser/permissions")
+    async def browser_host_permission(
+        project_id: str,
+        host: str,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        permission = await BrowserHostPermissionRepository(session).get(project_id, host)
+        return {"permission": permission}
+
+    @app.post("/api/browser/permissions")
+    async def set_browser_host_permission(
+        request: BrowserHostPermissionUpdateRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        permission = await BrowserHostPermissionRepository(session).set(
+            request.project_id,
+            request.host,
+            request.state,
+            task_group_id=request.task_group_id,
+        )
+        return {"permission": permission}
+
+    @app.get("/api/browser/action-log")
+    async def browser_action_log(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return {"actions": await BrowserActionLogRepository(session).list(project_id=project_id)}
+
+    @app.post("/api/browser/copilot/actions")
+    async def propose_browser_action(
+        request: BrowserCopilotActionRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        result = await BrowserCopilotService(session).propose(
+            BrowserServiceActionRequest(
+                project_id=request.project_id,
+                action=request.action,
+                url=request.url,
+                title=request.title,
+                page_text=request.page_text,
+                host=request.host,
+                mode=request.mode,
+                task_group_id=request.task_group_id,
+                task_group_label=request.task_group_label,
+                user_triggered=request.user_triggered,
+            )
+        )
+        return result.__dict__
 
     @app.post("/api/browser/propose-source")
     async def browser_propose_source(
@@ -787,6 +855,15 @@ def create_app() -> FastAPI:
         approval = await service.get(approval_id)
         if approval is None:
             raise HTTPException(status_code=404, detail="approval not found")
+        if approval.action_kind.startswith("browser."):
+            result = await BrowserCopilotService(session).resolve_approval(approval_id, decision=request.decision)
+            return {
+                "applied": result.outcome == "applied",
+                "status": result.outcome,
+                "reason": result.reason,
+                "log": result.log,
+                "artifact": result.artifact,
+            }
         result = await service.resolve(approval_id, decision=request.decision)
         return {"applied": result.applied, "status": result.status, "reason": result.reason}
 

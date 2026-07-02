@@ -16,8 +16,8 @@ import { AgentRunsPanel } from "./panels/AgentRunsPanel";
 import { MarkdownEditorPanel } from "./panels/MarkdownEditorPanel";
 import { WritingPanel } from "./panels/WritingPanel";
 import { TasksPanel } from "./panels/TasksPanel";
+import { BrowserPanel } from "./panels/BrowserPanel";
 import {
-  BrowserPanel,
   CitationEvidencePanel,
   ExportPanel,
   GitPanel,
