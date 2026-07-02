@@ -1,5 +1,8 @@
 import {
   api,
+  type AutonomyAuditEntry,
+  type AutonomyPendingAction,
+  type AutonomyPolicy,
   type AgentTraceStep,
   type ApiClient,
   type OrchestratorRunResponse,
@@ -27,6 +30,8 @@ export type LiteratureReviewFormInput = {
   depth: LiteratureDepth;
   semanticSearch?: boolean;
 };
+
+export type AutonomyPolicyPayload = AutonomyPolicy & { project_id: string };
 
 export type RecipeDescriptor = {
   id: BuiltinRecipeId | string;
@@ -99,6 +104,67 @@ export function fetchRecipes(client: ApiClient = api): Promise<RecipeDescriptor[
   return client.get<{ recipes: RecipeDescriptor[] }>("/api/orchestrator/recipes").then((payload) => payload.recipes);
 }
 
+export function fetchAutonomyPolicy(projectId: string, client: ApiClient = api): Promise<AutonomyPolicy> {
+  return client
+    .get<{ policy: AutonomyPolicy }>(`/api/autonomy/policy?project_id=${encodeURIComponent(projectId)}`)
+    .then((payload) => payload.policy);
+}
+
+export function saveAutonomyPolicy(payload: AutonomyPolicyPayload, client: ApiClient = api): Promise<AutonomyPolicy> {
+  return client.post<{ policy: AutonomyPolicy }>("/api/autonomy/policy", payload).then((response) => response.policy);
+}
+
+export function startAutopilotRun(
+  projectId: string,
+  toggles: Partial<Record<string, boolean>>,
+  client: ApiClient = api,
+): Promise<OrchestratorRunResponse> {
+  return client.post<OrchestratorRunResponse>("/api/autonomy/runs", {
+    project_id: projectId,
+    enabled_stages: normalizeStageToggles(toggles),
+  });
+}
+
+export function pauseAutopilotRun(runId: string, client: ApiClient = api): Promise<{ id: string; status: string; paused: boolean }> {
+  return client.post(`/api/autonomy/runs/${encodeURIComponent(runId)}/pause`, {});
+}
+
+export function resumeAutopilotRun(runId: string, client: ApiClient = api): Promise<OrchestratorRunResponse> {
+  return client.post(`/api/autonomy/runs/${encodeURIComponent(runId)}/resume`, {});
+}
+
+export function cancelAutopilotRun(
+  runId: string,
+  stopReason = "cancelled by user",
+  client: ApiClient = api,
+): Promise<{ id: string; status: string; paused: boolean; stop_reason?: string }> {
+  return client.post(`/api/autonomy/runs/${encodeURIComponent(runId)}/cancel`, { stop_reason: stopReason });
+}
+
+export function retryAutopilotRun(runId: string, client: ApiClient = api): Promise<OrchestratorRunResponse> {
+  return client.post(`/api/autonomy/runs/${encodeURIComponent(runId)}/retry`, {});
+}
+
+export function fetchPendingGovernedActions(projectId: string, client: ApiClient = api): Promise<AutonomyPendingAction[]> {
+  return client
+    .get<{ pending_actions: AutonomyPendingAction[] }>(`/api/autonomy/pending-actions?project_id=${encodeURIComponent(projectId)}`)
+    .then((payload) => payload.pending_actions);
+}
+
+export function resolveGovernedApproval(
+  approvalId: string,
+  decision: "approve" | "reject",
+  client: ApiClient = api,
+): Promise<{ applied: boolean; status: string; reason?: string }> {
+  return client.post(`/api/autonomy/pending-actions/${encodeURIComponent(approvalId)}/resolve`, { decision });
+}
+
+export function fetchAutonomyAuditLedger(projectId: string, runId?: string, client: ApiClient = api): Promise<AutonomyAuditEntry[]> {
+  const params = new URLSearchParams({ project_id: projectId });
+  if (runId) params.set("run_id", runId);
+  return client.get<{ entries: AutonomyAuditEntry[] }>(`/api/autonomy/audit-ledger?${params}`).then((payload) => payload.entries);
+}
+
 export function startOrchestratorRun(
   projectId: string,
   toggles: Partial<Record<string, boolean>>,
@@ -123,7 +189,7 @@ export function fetchOrchestratorRun(runId: string, client: ApiClient = api): Pr
   return client.get<OrchestratorRunResponse>(`/api/agent/runs/${encodeURIComponent(runId)}`);
 }
 
-export function cancelAgentRun(runId: string, client: ApiClient = api): Promise<{ id: string; status: string }> {
+export function cancelAgentRun(runId: string, client: ApiClient = api): Promise<{ id: string; status: string; stop_reason?: string }> {
   return client.post<{ id: string; status: string }>(`/api/agent/runs/${encodeURIComponent(runId)}/cancel`, {});
 }
 

@@ -397,6 +397,45 @@ export type AgentApproval = {
   summary: string;
 };
 
+export type AutonomyRiskLevel = "low" | "medium" | "high" | string;
+
+export type AutonomyPolicy = {
+  mode: "passive" | "copilot" | "full_access" | string;
+  allowed_action_types: string[];
+  blocked_action_types: string[];
+  budget_limits: { tokens: number; wall_clock_seconds: number };
+  max_loop_count: number;
+  stop_conditions: string[];
+  checkpoint_required: boolean;
+  approval_required: boolean;
+  rollback_behavior: string;
+  autopilot_enabled: boolean;
+};
+
+export type AutonomyPendingAction = {
+  id: string;
+  kind: "review_item" | "approval" | string;
+  action_kind: string;
+  summary?: string;
+  target_ref?: string | null;
+  risk_level: AutonomyRiskLevel;
+  status: string;
+  reason?: string;
+  payload?: Record<string, unknown>;
+};
+
+export type AutonomyAuditEntry = {
+  id: string;
+  project_id: string;
+  run_id?: string | null;
+  actor: string;
+  action: string;
+  risk_level: AutonomyRiskLevel;
+  target: string;
+  approval_state: string;
+  created_at: number;
+};
+
 export type AgentTraceStep = {
   index: number;
   kind: string;
@@ -410,7 +449,7 @@ export type AgentTraceStep = {
 };
 
 export type AgentRunTrace = {
-  run: { id: string; project_id: string; mode: string; status: string; paused: boolean };
+  run: { id: string; project_id: string; mode: string; status: string; paused: boolean; stop_reason?: string };
   trace: { run_id: string; steps: AgentTraceStep[] };
   artifacts?: AgentRunArtifact[];
 };
@@ -446,6 +485,7 @@ export type OrchestratorRunSummary = {
   status: string;
   state?: string;
   paused: boolean;
+  stop_reason?: string;
   tokens_used?: number;
   created_at?: number;
 };
