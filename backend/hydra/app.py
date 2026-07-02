@@ -3219,9 +3219,9 @@ def create_app() -> FastAPI:
         return {"notes": await repo.search_notes(query, project_id=project_id)}
 
     @app.get("/api/notes/graph")
-    async def get_notes_graph(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def get_notes_graph(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        return await repo.get_graph()
+        return await repo.get_graph(project_id=project_id)
 
     @app.get("/api/notes/{note_id}")
     async def get_note(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:

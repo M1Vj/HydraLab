@@ -96,6 +96,29 @@ async def test_unscoped_reads_still_return_all_project_rows(session):
 
 
 @pytest.mark.asyncio
+async def test_get_graph_is_project_scoped(session):
+    repo = Repository(session)
+    alpha = await _create_project_content(repo, "alpha")
+    beta = await _create_project_content(repo, "beta")
+
+    graph = await repo.get_graph(project_id="alpha")
+    node_ids = {node["id"] for node in graph["nodes"]}
+    assert alpha["source"]["id"] in node_ids
+    assert alpha["note"]["id"] in node_ids
+    assert beta["source"]["id"] not in node_ids
+    assert beta["note"]["id"] not in node_ids
+    # Every edge connects two in-scope nodes — no cross-project or dangling edge.
+    for link in graph["links"]:
+        assert link["source"] in node_ids
+        assert link["target"] in node_ids
+    assert graph["links"], "in-project note->source reference should still be linked"
+
+    # The unscoped graph still spans every project.
+    all_ids = {node["id"] for node in (await repo.get_graph())["nodes"]}
+    assert {alpha["source"]["id"], beta["source"]["id"]} <= all_ids
+
+
+@pytest.mark.asyncio
 async def test_merge_sources_refuses_cross_project(session):
     repo = Repository(session)
     await repo.upsert_source({"id": "src-a", "title": "A", "doi": "10.1/x", "project_id": "alpha"})

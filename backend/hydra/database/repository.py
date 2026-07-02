@@ -939,24 +939,35 @@ class Repository:
         }
 
     # Graph implementation
-    async def get_graph(self) -> dict[str, Any]:
-        notes = await self.session.exec(select(Note))
-        sources = await self.session.exec(select(Source))
-        tasks = await self.session.exec(select(Task))
-        claims = await self.session.exec(select(Claim))
-        conversations = await self.session.exec(select(Conversation))
+    async def get_graph(self, project_id: Optional[str] = None) -> dict[str, Any]:
+        def scoped(query, column):
+            return query.where(_project_scope(column, project_id)) if project_id else query
+
+        notes = await self.session.exec(scoped(select(Note), Note.project_id))
+        sources = await self.session.exec(scoped(select(Source), Source.project_id))
+        tasks = await self.session.exec(scoped(select(Task), Task.project_id))
+        claims = await self.session.exec(scoped(select(Claim), Claim.project_id))
+        # Conversations carry no project attribution, so a project-scoped graph
+        # omits them rather than risk leaking another project's chats.
+        conversations = [] if project_id else (await self.session.exec(select(Conversation))).all()
 
         nodes = []
+        node_ids: set[str] = set()
+
+        def add_node(node_id: str, title: str, node_type: str):
+            nodes.append({"id": node_id, "title": title, "type": node_type})
+            node_ids.add(node_id)
+
         for n in notes.all():
-            nodes.append({"id": n.id, "title": n.title, "type": "note"})
+            add_node(n.id, n.title, "note")
         for s in sources.all():
-            nodes.append({"id": s.id, "title": s.title, "type": "source"})
+            add_node(s.id, s.title, "source")
         for t in tasks.all():
-            nodes.append({"id": t.id, "title": t.title, "type": "task"})
+            add_node(t.id, t.title, "task")
         for c in claims.all():
-            nodes.append({"id": c.id, "title": c.text[:50], "type": "claim"})
-        for conv in conversations.all():
-            nodes.append({"id": conv.id, "title": conv.title, "type": "conversation"})
+            add_node(c.id, c.text[:50], "claim")
+        for conv in conversations:
+            add_node(conv.id, conv.title, "conversation")
 
         links = []
         seen_links = set()
@@ -965,6 +976,10 @@ class Repository:
             if not source_id or not target_id:
                 return
             if source_id == target_id:
+                return
+            # Only connect nodes present in this (possibly project-scoped) graph —
+            # never emit an edge to a filtered-out or non-node id.
+            if source_id not in node_ids or target_id not in node_ids:
                 return
             link_key = (source_id, target_id, rel_type)
             if link_key not in seen_links:
