@@ -45,6 +45,8 @@ from hydra.schemas import (
     SourceTrashRequest,
     SourceUnmergeRequest,
     ManuscriptExportRequest,
+    DocxEditPlanRequest,
+    DocxOperationReviewRequest,
     NoteCreateRequest,
     NoteFileSaveRequest,
     NoteSuggestionRequest,
@@ -110,6 +112,16 @@ from hydra.services.citations import (
     resolve_manuscript_style,
 )
 from hydra.services.docx import DocxPackageError, DocxService, detect_latex_toolchain
+from hydra.services.docx import (
+    DocxApplyError,
+    DocxPlanError,
+    EditProposal,
+    apply_operations,
+    build_plan,
+    read_structural_model,
+    resolve_working_docx,
+    rollback as rollback_docx_plan,
+)
 from hydra.services.writing import (
     global_defaults_from_settings,
     list_manuscripts,
@@ -1279,6 +1291,187 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail={"reason": "export-failed", "message": result.error_detail})
         await repo.add_event("writing.docx.exported", f"Exported manuscript {manuscript} to DOCX")
         return {"status": result.status, "output_path": result.output_path, "format": resolved.format.model_dump()}
+
+    # --- DOCX OpenXML assisted edits (branch 02-08, Phase 2) -----------------
+    @app.post("/api/writing/docx/edit-plan")
+    async def create_docx_edit_plan(
+        request: DocxEditPlanRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        try:
+            working_path = resolve_working_docx(project_root, request.manuscript, request.source_file)
+        except DocxApplyError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "unsafe-path", "message": str(exc)}) from exc
+        if not working_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail={"reason": "manuscript-missing", "message": f"working DOCX not found: {request.source_file}"},
+            )
+        try:
+            model = read_structural_model(working_path, project_root)
+        except DocxPackageError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "package-validation", "message": str(exc)}) from exc
+
+        proposals = [
+            EditProposal(
+                op_type=p.op_type,
+                target_locator=p.target_locator,
+                payload=dict(p.payload),
+                justification=p.justification,
+                justification_source=p.justification_source,
+                motivating_excerpt=p.motivating_excerpt,
+            )
+            for p in request.proposals
+        ]
+        try:
+            plan = build_plan(
+                model,
+                proposals,
+                manuscript=request.manuscript,
+                target_relpath=request.source_file,
+                mode=request.mode,
+                project_id=request.project_id,
+            )
+        except DocxPlanError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "unsupported-op", "message": str(exc)}) from exc
+
+        plan_row = await repo.create_docx_edit_plan(
+            manuscript=request.manuscript,
+            target_relpath=request.source_file,
+            mode=request.mode,
+            trust_level=plan.trust_level,
+            project_id=request.project_id,
+        )
+        operations: list[dict[str, object]] = []
+        for op in plan.operations:
+            operations.append(
+                await repo.add_docx_edit_operation(
+                    plan_id=plan_row["id"],
+                    op_type=op.op_type,
+                    target_locator=op.target_locator,
+                    location_label=op.location_label,
+                    before_summary=op.before_summary,
+                    after_summary=op.after_summary,
+                    payload=op.payload,
+                    risk_label=op.risk_label,
+                    trust_level=op.trust_level,
+                    justification=op.justification,
+                    motivating_excerpt=op.motivating_excerpt,
+                )
+            )
+        for item in plan.review_inbox_items:
+            await repo.create_review_item(item)
+        for entry in plan.downgrade_log:
+            await repo.add_event("writing.docx.mode_downgrade", json.dumps(entry, sort_keys=True))
+        await repo.add_event("writing.docx.plan_created", f"Built DOCX edit plan for {request.manuscript}")
+        return {
+            "plan": plan_row,
+            "operations": operations,
+            "review_inbox": plan.review_inbox_items,
+            "downgrade_log": plan.downgrade_log,
+        }
+
+    @app.get("/api/writing/docx/edit-plan/{plan_id}")
+    async def get_docx_edit_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        plan = await repo.get_docx_edit_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "edit plan not found"})
+        return {"plan": plan, "operations": await repo.list_docx_edit_operations(plan_id)}
+
+    @app.post("/api/writing/docx/edit-plan/{plan_id}/operations/{op_id}/review")
+    async def review_docx_operation(
+        plan_id: str,
+        op_id: str,
+        request: DocxOperationReviewRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        op = await repo.get_docx_edit_operation(op_id)
+        if op is None or op.get("plan_id") != plan_id:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "operation not found"})
+        updated = await repo.review_docx_operation(op_id, request.decision)
+        return {"operation": updated}
+
+    @app.post("/api/writing/docx/edit-plan/{plan_id}/apply")
+    async def apply_docx_edit_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        plan = await repo.get_docx_edit_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "edit plan not found"})
+        operations = await repo.list_docx_edit_operations(plan_id)
+        # HL-WRITE-35: only operations with review_status == "approved" may apply.
+        approved = [op for op in operations if op.get("review_status") == "approved"]
+        if not approved:
+            raise HTTPException(
+                status_code=422,
+                detail={"reason": "no-approved-operations", "message": "no approved operations to apply"},
+            )
+        try:
+            working_path = resolve_working_docx(project_root, plan["manuscript"], plan["target_relpath"])
+        except DocxApplyError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "unsafe-path", "message": str(exc)}) from exc
+
+        result = apply_operations(
+            project_root,
+            plan_id,
+            working_path,
+            [{"op_type": op["op_type"], "target_locator": op["target_locator"], "payload": op["payload"]} for op in approved],
+        )
+        by_index = {outcome.index: outcome for outcome in result.outcomes}
+        for position, op in enumerate(approved):
+            outcome = by_index.get(position)
+            validation = outcome.validation_status if outcome else "unvalidated"
+            await repo.record_docx_operation_result(
+                op["id"],
+                validation_status=validation,
+                applied=(result.status == "applied" and validation == "valid"),
+                rollback_ref=result.checkpoint_ref if result.status == "applied" else None,
+            )
+        await repo.update_docx_plan_status(
+            plan_id,
+            status="applied" if result.status == "applied" else "failed",
+            checkpoint_ref=result.checkpoint_ref,
+        )
+        if result.status != "applied":
+            await repo.add_event("writing.docx.apply_failed", result.error_detail)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "reason": "apply-failed",
+                    "message": result.error_detail,
+                    "outcomes": [outcome.__dict__ for outcome in result.outcomes],
+                },
+            )
+        await repo.add_event("writing.docx.applied", f"Applied DOCX edit plan {plan_id}")
+        return {
+            "status": result.status,
+            "plan": await repo.get_docx_edit_plan(plan_id),
+            "operations": await repo.list_docx_edit_operations(plan_id),
+            "outcomes": [outcome.__dict__ for outcome in result.outcomes],
+        }
+
+    @app.post("/api/writing/docx/edit-plan/{plan_id}/rollback")
+    async def rollback_docx_edit_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        plan = await repo.get_docx_edit_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "edit plan not found"})
+        if not plan.get("checkpoint_ref"):
+            raise HTTPException(
+                status_code=422, detail={"reason": "no-checkpoint", "message": "plan has no pre-apply checkpoint"}
+            )
+        try:
+            working_path = resolve_working_docx(project_root, plan["manuscript"], plan["target_relpath"])
+            rollback_docx_plan(project_root, working_path, plan["checkpoint_ref"])
+        except DocxApplyError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "rollback-failed", "message": str(exc)}) from exc
+        updated = await repo.rollback_docx_plan(plan_id)
+        await repo.add_event("writing.docx.rolled_back", f"Rolled back DOCX edit plan {plan_id}")
+        return {"status": "rolled_back", "plan": updated, "operations": await repo.list_docx_edit_operations(plan_id)}
 
     @app.post("/api/evidence")
     async def create_evidence(request: EvidenceCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:

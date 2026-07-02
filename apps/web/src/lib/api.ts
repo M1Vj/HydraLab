@@ -726,3 +726,98 @@ export function exportManuscript(
 ): Promise<ManuscriptExportResponse> {
   return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/export`, input);
 }
+
+// --- DOCX OpenXML assisted edits (branch 02-08, Phase 2) --------------------
+
+export type DocxOpType =
+  | "replace_text"
+  | "insert_paragraph"
+  | "apply_style"
+  | "update_table"
+  | "update_citation"
+  | "comment"
+  | "delete"
+  | "other";
+export type DocxReviewStatus = "pending" | "approved" | "rejected";
+export type DocxValidationStatus = "unvalidated" | "valid" | "invalid";
+export type DocxRiskLabel = "low" | "medium" | "high";
+
+export type DocxEditOperation = {
+  id: string;
+  plan_id: string;
+  op_type: DocxOpType | string;
+  target_locator: string;
+  location_label: string;
+  before_summary: string;
+  after_summary: string;
+  payload: Record<string, unknown>;
+  risk_label: DocxRiskLabel | string;
+  review_status: DocxReviewStatus | string;
+  validation_status: DocxValidationStatus | string;
+  applied: boolean;
+  trust_level: string;
+  motivating_excerpt?: string;
+};
+
+export type DocxEditPlan = {
+  id: string;
+  manuscript: string;
+  target_relpath: string;
+  status: "draft" | "applied" | "rolled_back" | "failed" | string;
+  mode: string;
+  trust_level: string;
+  checkpoint_ref?: string | null;
+};
+
+export type DocxEditPlanResponse = {
+  plan: DocxEditPlan;
+  operations: DocxEditOperation[];
+  review_inbox?: unknown[];
+  downgrade_log?: unknown[];
+};
+
+export type DocxEditProposalInput = {
+  op_type: DocxOpType | string;
+  target_locator?: string;
+  payload?: Record<string, unknown>;
+  justification?: string;
+  justification_source?: "assistant" | "document";
+  motivating_excerpt?: string;
+};
+
+export function createDocxEditPlan(
+  input: {
+    manuscript: string;
+    source_file: string;
+    mode?: "passive" | "copilot" | "full_access";
+    project_id?: string | null;
+    proposals: DocxEditProposalInput[];
+  },
+  client: ApiClient = api,
+): Promise<DocxEditPlanResponse> {
+  return client.post("/api/writing/docx/edit-plan", input);
+}
+
+export function getDocxEditPlan(planId: string, client: ApiClient = api): Promise<DocxEditPlanResponse> {
+  return client.get(`/api/writing/docx/edit-plan/${encodeURIComponent(planId)}`);
+}
+
+export function reviewDocxOperation(
+  planId: string,
+  operationId: string,
+  decision: DocxReviewStatus,
+  client: ApiClient = api,
+): Promise<{ operation: DocxEditOperation }> {
+  return client.post(
+    `/api/writing/docx/edit-plan/${encodeURIComponent(planId)}/operations/${encodeURIComponent(operationId)}/review`,
+    { decision },
+  );
+}
+
+export function applyDocxEditPlan(planId: string, client: ApiClient = api): Promise<DocxEditPlanResponse> {
+  return client.post(`/api/writing/docx/edit-plan/${encodeURIComponent(planId)}/apply`);
+}
+
+export function rollbackDocxEditPlan(planId: string, client: ApiClient = api): Promise<DocxEditPlanResponse> {
+  return client.post(`/api/writing/docx/edit-plan/${encodeURIComponent(planId)}/rollback`);
+}

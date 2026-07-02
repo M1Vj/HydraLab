@@ -570,6 +570,58 @@ class DocxArtifact(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class DocxEditPlan(SQLModel, table=True):
+    """A reviewable set of typed OpenXML structural edits for one working DOCX.
+
+    The plan owns the target working DOCX (under ``writing/manuscripts/``), the
+    pre-apply checkpoint reference and the plan-level lifecycle status so apply
+    and rollback are auditable (HL-WRITE-33/36). Operations reference it by
+    ``plan_id``. Rows are SQLite-canonical and survive force-quit (HL-WRITE-32).
+    """
+
+    __tablename__ = "docx_edit_plans"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    manuscript: str = Field(default="", index=True)
+    target_relpath: str = Field(default="")
+    status: str = Field(default="draft")  # draft | applied | rolled_back | failed
+    mode: str = Field(default="passive")  # passive | copilot | full_access
+    checkpoint_ref: Optional[str] = Field(default=None)
+    trust_level: str = Field(default="trusted")  # trusted | untrusted-external
+    summary: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class DocxEditOperation(SQLModel, table=True):
+    """One typed, inspectable OpenXML structural edit (HL-WRITE-31/32).
+
+    Never an opaque whole-file rewrite: each row is a single structural op with a
+    stable ``target_locator``, human before/after summaries, a JSON payload, and
+    the review/validation/trust state that gates whether it may ever be applied.
+    """
+
+    __tablename__ = "docx_edit_operations"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    plan_id: str = Field(foreign_key="docx_edit_plans.id", index=True)
+    op_type: str = Field(default="other")  # replace_text|insert_paragraph|apply_style|update_table|update_citation|comment|delete|other
+    target_locator: str = Field(default="")
+    location_label: str = Field(default="")
+    before_summary: str = Field(default="")
+    after_summary: str = Field(default="")
+    payload: str = Field(default="{}")  # json
+    risk_label: str = Field(default="low")  # low | medium | high
+    review_status: str = Field(default="pending")  # pending | approved | rejected
+    validation_status: str = Field(default="unvalidated")  # unvalidated | valid | invalid
+    applied: bool = Field(default=False)
+    rollback_ref: Optional[str] = Field(default=None)
+    trust_level: str = Field(default="trusted", index=True)  # trusted | untrusted-external
+    justification: str = Field(default="")
+    motivating_excerpt: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class MigrationIdMap(SQLModel, table=True):
     __tablename__ = "migration_id_maps"
     id: str = Field(default_factory=uuid_text, primary_key=True)

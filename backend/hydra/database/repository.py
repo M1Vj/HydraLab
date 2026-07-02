@@ -32,6 +32,8 @@ from hydra.database.models import (
     BrowserEvent,
     Chat,
     DocxArtifact,
+    DocxEditOperation,
+    DocxEditPlan,
     KgEdge,
     LexicalIndexEntry,
     McpArtifact,
@@ -1189,6 +1191,138 @@ class Repository:
         q = select(DocxArtifact).where(DocxArtifact.kind == "availability").order_by(DocxArtifact.created_at.desc())
         res = await self.session.exec(q)
         return self._to_dict(res.first())
+
+    # --- DOCX edit plans / operations (branch 02-08, HL-WRITE-31/32/33/36) ----
+    def _docx_op_to_dict(self, op: DocxEditOperation) -> dict[str, Any]:
+        d = self._to_dict(op)
+        d["payload"] = _safe_json(d.get("payload"), {})
+        return d
+
+    async def create_docx_edit_plan(
+        self,
+        *,
+        manuscript: str,
+        target_relpath: str,
+        mode: str = "passive",
+        trust_level: str = "trusted",
+        project_id: Optional[str] = None,
+        summary: str = "",
+    ) -> dict[str, Any]:
+        plan = DocxEditPlan(
+            manuscript=manuscript,
+            target_relpath=target_relpath,
+            mode=mode,
+            trust_level=trust_level,
+            project_id=project_id,
+            summary=summary,
+        )
+        self.session.add(plan)
+        await self.session.commit()
+        await self.session.refresh(plan)
+        return self._to_dict(plan)
+
+    async def add_docx_edit_operation(
+        self,
+        *,
+        plan_id: str,
+        op_type: str,
+        target_locator: str,
+        before_summary: str = "",
+        after_summary: str = "",
+        payload: Any = None,
+        risk_label: str = "low",
+        location_label: str = "",
+        trust_level: str = "trusted",
+        justification: str = "",
+        motivating_excerpt: str = "",
+    ) -> dict[str, Any]:
+        op = DocxEditOperation(
+            plan_id=plan_id,
+            op_type=op_type,
+            target_locator=target_locator,
+            location_label=location_label,
+            before_summary=before_summary,
+            after_summary=after_summary,
+            payload=payload if isinstance(payload, str) else json.dumps(payload or {}, sort_keys=True),
+            risk_label=risk_label,
+            trust_level=trust_level,
+            justification=justification,
+            motivating_excerpt=motivating_excerpt,
+        )
+        self.session.add(op)
+        await self.session.commit()
+        await self.session.refresh(op)
+        return self._docx_op_to_dict(op)
+
+    async def get_docx_edit_plan(self, plan_id: str) -> Optional[dict[str, Any]]:
+        return self._to_dict(await self.session.get(DocxEditPlan, plan_id))
+
+    async def list_docx_edit_operations(self, plan_id: str) -> list[dict[str, Any]]:
+        q = select(DocxEditOperation).where(DocxEditOperation.plan_id == plan_id).order_by(DocxEditOperation.created_at.asc())
+        res = await self.session.exec(q)
+        return [self._docx_op_to_dict(op) for op in res.all()]
+
+    async def get_docx_edit_operation(self, op_id: str) -> Optional[dict[str, Any]]:
+        op = await self.session.get(DocxEditOperation, op_id)
+        return self._docx_op_to_dict(op) if op else None
+
+    async def review_docx_operation(self, op_id: str, decision: str) -> Optional[dict[str, Any]]:
+        if decision not in {"approved", "rejected", "pending"}:
+            raise ValueError("decision must be approved, rejected or pending")
+        op = await self.session.get(DocxEditOperation, op_id)
+        if op is None:
+            return None
+        op.review_status = decision
+        op.updated_at = datetime.now(timezone.utc)
+        self.session.add(op)
+        await self.session.commit()
+        await self.session.refresh(op)
+        return self._docx_op_to_dict(op)
+
+    async def record_docx_operation_result(
+        self, op_id: str, *, validation_status: str, applied: bool, rollback_ref: Optional[str]
+    ) -> None:
+        op = await self.session.get(DocxEditOperation, op_id)
+        if op is None:
+            return
+        op.validation_status = validation_status
+        op.applied = applied
+        op.rollback_ref = rollback_ref
+        op.updated_at = datetime.now(timezone.utc)
+        self.session.add(op)
+        await self.session.commit()
+
+    async def update_docx_plan_status(
+        self, plan_id: str, *, status: str, checkpoint_ref: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        plan = await self.session.get(DocxEditPlan, plan_id)
+        if plan is None:
+            return None
+        plan.status = status
+        if checkpoint_ref is not None:
+            plan.checkpoint_ref = checkpoint_ref
+        plan.updated_at = datetime.now(timezone.utc)
+        self.session.add(plan)
+        await self.session.commit()
+        await self.session.refresh(plan)
+        return self._to_dict(plan)
+
+    async def rollback_docx_plan(self, plan_id: str) -> Optional[dict[str, Any]]:
+        """Clear applied state for a plan's operations and mark it rolled_back."""
+        plan = await self.session.get(DocxEditPlan, plan_id)
+        if plan is None:
+            return None
+        res = await self.session.exec(select(DocxEditOperation).where(DocxEditOperation.plan_id == plan_id))
+        for op in res.all():
+            op.applied = False
+            op.updated_at = datetime.now(timezone.utc)
+            self.session.add(op)
+        plan.status = "rolled_back"
+        plan.updated_at = datetime.now(timezone.utc)
+        self.session.add(plan)
+        await self.session.commit()
+        await self.session.refresh(plan)
+        return self._to_dict(plan)
 
     async def upsert_browser_event(self, event_data: dict[str, Any]) -> dict[str, Any]:
         q = select(BrowserEvent).where(
