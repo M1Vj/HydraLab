@@ -528,6 +528,27 @@ class OrchestratorRunStartRequest(BaseModel):
     recipe_inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class SelfEvolutionChangeInput(BaseModel):
+    category: Literal["skill", "prompt", "setting", "app_code"] = "app_code"
+    target_path: str = Field(min_length=1, max_length=2000)
+    unified_diff: str = Field(default="", max_length=400_000)
+    new_content: str = Field(default="", max_length=400_000)
+    test_plan: list[str] = Field(default_factory=list, max_length=20)
+    origin: str = Field(default="user", max_length=120)
+    origin_trust: Literal["user", "untrusted-external"] = "user"
+    justification_trust: Literal["user", "untrusted-external"] = "user"
+
+
+class SelfEvolutionRunRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    run_id: str | None = Field(default=None, max_length=200)
+    changes: list[SelfEvolutionChangeInput] = Field(min_length=1, max_length=50)
+
+
+class SelfEvolutionDecisionRequest(BaseModel):
+    actor: str = Field(default="user", max_length=120)
+
+
 class AutonomyPolicyRequest(BaseModel):
     project_id: str = Field(default="default", max_length=200)
     autopilot_enabled: bool = False

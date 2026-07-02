@@ -106,6 +106,8 @@ from hydra.schemas import (
     IdeaPromoteRequest,
     ContextFileSaveRequest,
     MemoryCandidateRequest,
+    SelfEvolutionRunRequest,
+    SelfEvolutionDecisionRequest,
 )
 from hydra.database.models import Annotation, Claim, IngestionJob, Task
 from hydra.database.session import get_session, init_db, async_session_maker
@@ -194,6 +196,11 @@ from hydra.agents.runs import RunRepository
 from hydra.agents.approvals import ApprovalService, to_contract
 from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
 from hydra.autonomy.audit import AuditLedger
+from hydra.autonomy.checkpoints import CheckpointService
+from hydra.self_evolution.models import ProposedChange
+from hydra.self_evolution.service import SelfEvolutionError, SelfEvolutionService, public_change
+from hydra.self_evolution.verification import ConsoleVerificationRunner
+from hydra.database.models import AgentAuditLedgerEntry, SelfEvolutionChange
 from hydra.autonomy.loop import AutopilotLoop
 from hydra.autonomy.policy import (
     AutonomyPolicy,
@@ -1262,6 +1269,107 @@ def create_app() -> FastAPI:
         await IdentityProvider(session).revoke(project_id=request.project_id, collaborator_id=collaborator_id)
         disconnected = await _COLLAB_SYNC_TRANSPORT.disconnect_revoked(session)
         return {"collaborator_id": collaborator_id, "revoked": True, "disconnected": disconnected}
+
+    # ------------------------------------------- self-evolution (branch 03-05)
+    def _build_self_evolution_service(session: AsyncSession) -> SelfEvolutionService:
+        project_root = hydra_project_root()
+        return SelfEvolutionService(
+            session,
+            project_root=project_root,
+            checkpoints=CheckpointService(session, project_root=project_root, git=GitService(project_root)),
+            audit=AuditLedger(session),
+            verifier=ConsoleVerificationRunner(project_root, console=ConsoleService(project_root, offline=_offline_posture())),
+        )
+
+    @app.get("/api/self-evolution/changes")
+    async def list_self_evolution_changes(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        rows = await service.list_changes(project_id=project_id)
+        return {"changes": [public_change(row) for row in rows]}
+
+    @app.post("/api/self-evolution/runs")
+    async def start_self_evolution_run(
+        request: SelfEvolutionRunRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        proposed = [
+            ProposedChange(
+                category=change.category,
+                target_path=change.target_path,
+                unified_diff=change.unified_diff,
+                new_content=change.new_content,
+                test_plan=list(change.test_plan),
+                origin=change.origin,
+                origin_trust=change.origin_trust,
+                justification_trust=change.justification_trust,
+            )
+            for change in request.changes
+        ]
+        try:
+            # A self-evolution run fires only on a user-originated trigger.
+            rows = await service.propose(
+                project_id=request.project_id, run_id=request.run_id, changes=proposed, trigger="user"
+            )
+        except SelfEvolutionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"changes": [public_change(row) for row in rows]}
+
+    @app.post("/api/self-evolution/changes/{change_id}/approve")
+    async def approve_self_evolution_change(
+        change_id: str,
+        request: SelfEvolutionDecisionRequest | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        actor = request.actor if request else "user"
+        try:
+            row = await service.approve(change_id, actor=actor)
+        except SelfEvolutionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"change": public_change(row)}
+
+    @app.post("/api/self-evolution/changes/{change_id}/deny")
+    async def deny_self_evolution_change(
+        change_id: str,
+        request: SelfEvolutionDecisionRequest | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        actor = request.actor if request else "user"
+        try:
+            row = await service.deny(change_id, actor=actor)
+        except SelfEvolutionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"change": public_change(row)}
+
+    @app.get("/api/self-evolution/audit")
+    async def list_self_evolution_audit(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        rows = (
+            await session.exec(
+                select(AgentAuditLedgerEntry)
+                .where(AgentAuditLedgerEntry.project_id == project_id)
+                .where(AgentAuditLedgerEntry.action.startswith("self_evolution."))
+                .order_by(AgentAuditLedgerEntry.created_at.desc())
+            )
+        ).all()
+        return {
+            "entries": [
+                {
+                    "id": row.id,
+                    "action": row.action,
+                    "actor": row.actor,
+                    "risk_level": row.risk_level,
+                    "target": row.target,
+                    "approval_state": row.approval_state,
+                    "created_at": row.created_at.timestamp(),
+                }
+                for row in rows
+            ]
+        }
 
     @app.websocket("/api/collaboration/ws/{project_id}/{document_id:path}")
     async def collaboration_websocket(websocket: WebSocket, project_id: str, document_id: str) -> None:
