@@ -4,11 +4,16 @@ import { createApiClient } from "../../lib/api";
 import {
   BROWSER_MODES,
   browserActionLogState,
+  browserRunState,
   groupBrowserTabs,
   listBrowserActions,
   listBrowserActionLog,
+  listAutonomousBrowserRuns,
+  startAutonomousBrowserRun,
+  stopAutonomousBrowserRun,
   setBrowserHostPermission,
   type BrowserActionLogEntry,
+  type BrowserRunRecord,
   type BrowserTab,
 } from "./browserController";
 
@@ -37,6 +42,16 @@ describe("browser action log states", () => {
     expect(browserActionLogState({ loading: false, error: new Error("boom"), permissionDenied: false, actions: [] }).state).toBe("failure");
     expect(browserActionLogState({ loading: false, error: null, permissionDenied: true, actions: [] }).state).toBe("permission-denied");
     expect(browserActionLogState({ loading: false, error: null, permissionDenied: false, actions: [logEntry()] }).state).toBe("ready");
+  });
+});
+
+describe("autonomous browser run state", () => {
+  test("renders empty/loading/failure/permission-denied/ready states", () => {
+    expect(browserRunState({ loading: true, error: null, permissionDenied: false, runs: [] }).state).toBe("loading");
+    expect(browserRunState({ loading: false, error: null, permissionDenied: false, runs: [] }).state).toBe("empty");
+    expect(browserRunState({ loading: false, error: new Error("boom"), permissionDenied: false, runs: [] }).state).toBe("failure");
+    expect(browserRunState({ loading: false, error: null, permissionDenied: true, runs: [] }).state).toBe("permission-denied");
+    expect(browserRunState({ loading: false, error: null, permissionDenied: false, runs: [runRecord()] }).state).toBe("ready");
   });
 });
 
@@ -85,6 +100,38 @@ describe("browser controller requests", () => {
     const result = await listBrowserActionLog("default", client);
     expect(result.actions[0].approval_result).toBe("approved");
   });
+
+  test("starts and stops autonomous browser research runs", async () => {
+    const calls: Array<{ url: string; body?: unknown }> = [];
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      if (String(input).endsWith("/cancel")) return jsonResponse({ run: runRecord({ status: "cancelled" }) });
+      return jsonResponse({ run: runRecord({ status: "paused" }), host_prompt: { host: "openreview.net" } });
+    };
+    const client = createApiClient("/api", 100);
+    const started = await startAutonomousBrowserRun(
+      { project_id: "default", task_id: "task-transformers", task_label: "Transformer Survey", start_urls: ["https://openreview.net/forum?id=abc"] },
+      client,
+    );
+    const stopped = await stopAutonomousBrowserRun("run-1", client);
+
+    expect(calls[0].url).toContain("/api/browser/autonomous-runs");
+    expect(calls[0].body).toEqual({
+      project_id: "default",
+      task_id: "task-transformers",
+      task_label: "Transformer Survey",
+      start_urls: ["https://openreview.net/forum?id=abc"],
+    });
+    expect(started.run.status).toBe("paused");
+    expect(stopped.run.status).toBe("cancelled");
+  });
+
+  test("lists autonomous browser research runs", async () => {
+    globalThis.fetch = async () => jsonResponse({ runs: [runRecord()] });
+    const client = createApiClient("/api", 100);
+    const result = await listAutonomousBrowserRuns("default", client);
+    expect(result.runs[0].recipe).toBe("autonomous-browser-research");
+  });
 });
 
 function logEntry(overrides: Partial<BrowserActionLogEntry> = {}): BrowserActionLogEntry {
@@ -96,6 +143,21 @@ function logEntry(overrides: Partial<BrowserActionLogEntry> = {}): BrowserAction
     mode: "copilot",
     approval_result: "approved",
     timestamp: "2026-07-02T08:00:00+00:00",
+    ...overrides,
+  };
+}
+
+function runRecord(overrides: Partial<BrowserRunRecord> = {}): BrowserRunRecord {
+  return {
+    id: "run-1",
+    project_id: "default",
+    recipe: "autonomous-browser-research",
+    mode: "copilot",
+    status: "running",
+    paused: false,
+    tokens_used: 0,
+    created_at: 1783008000,
+    artifacts: [],
     ...overrides,
   };
 }

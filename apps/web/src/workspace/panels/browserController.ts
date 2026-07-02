@@ -41,6 +41,38 @@ export type BrowserActionLogView = {
   message: string;
 };
 
+export type BrowserRunRecord = {
+  id: string;
+  project_id: string;
+  recipe: "autonomous-browser-research" | string;
+  mode: "passive" | "copilot" | "full_access" | string;
+  status: "queued" | "running" | "paused" | "succeeded" | "failed" | "cancelled" | "blocked" | string;
+  paused: boolean;
+  tokens_used: number;
+  created_at: number;
+  artifacts: Array<Record<string, unknown>>;
+};
+
+export type BrowserRunStartRequest = {
+  project_id: string;
+  task_id: string;
+  task_label: string;
+  start_urls: string[];
+};
+
+export type BrowserRunStartResponse = {
+  run: BrowserRunRecord;
+  state: string;
+  host_prompt?: { host: string; choices?: string[] } | null;
+  budget_prompt?: string[] | null;
+  rate_limit_state?: string | null;
+};
+
+export type BrowserRunView = {
+  state: "empty" | "loading" | "failure" | "permission-denied" | "ready";
+  message: string;
+};
+
 export const BROWSER_MODES: BrowserMode[] = [
   { id: "passive", label: "Passive", enabled: true },
   { id: "copilot", label: "Co-pilot", enabled: true },
@@ -57,6 +89,19 @@ export function browserActionLogState(input: {
   if (input.error) return { state: "failure", message: input.error.message };
   if (input.actions.length === 0) return { state: "empty", message: "No approved browser actions have run yet." };
   return { state: "ready", message: "Browser action log ready." };
+}
+
+export function browserRunState(input: {
+  loading: boolean;
+  error: Error | null;
+  permissionDenied: boolean;
+  runs: BrowserRunRecord[];
+}): BrowserRunView {
+  if (input.loading) return { state: "loading", message: "Loading browser runs." };
+  if (input.permissionDenied) return { state: "permission-denied", message: "Autonomous browser runs are not available for this project." };
+  if (input.error) return { state: "failure", message: input.error.message };
+  if (input.runs.length === 0) return { state: "empty", message: "No autonomous browser research runs yet." };
+  return { state: "ready", message: "Autonomous browser runs ready." };
 }
 
 export function groupBrowserTabs(tabs: BrowserTab[]): BrowserTabGroup[] {
@@ -76,6 +121,21 @@ export function listBrowserActions(host: string, client: ApiClient = api): Promi
 
 export function listBrowserActionLog(projectId: string, client: ApiClient = api): Promise<{ actions: BrowserActionLogEntry[] }> {
   return client.get<{ actions: BrowserActionLogEntry[] }>(`/api/browser/action-log?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function listAutonomousBrowserRuns(projectId: string, client: ApiClient = api): Promise<{ runs: BrowserRunRecord[] }> {
+  return client.get<{ runs: BrowserRunRecord[] }>(`/api/browser/autonomous-runs?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function startAutonomousBrowserRun(
+  request: BrowserRunStartRequest,
+  client: ApiClient = api,
+): Promise<BrowserRunStartResponse> {
+  return client.post<BrowserRunStartResponse>("/api/browser/autonomous-runs", request);
+}
+
+export function stopAutonomousBrowserRun(runId: string, client: ApiClient = api): Promise<{ run: BrowserRunRecord }> {
+  return client.post<{ run: BrowserRunRecord }>(`/api/browser/autonomous-runs/${encodeURIComponent(runId)}/cancel`, {});
 }
 
 export function setBrowserHostPermission(

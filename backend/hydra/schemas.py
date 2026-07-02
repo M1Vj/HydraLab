@@ -33,6 +33,21 @@ class BrowserCopilotActionRequest(BaseModel):
     user_triggered: bool = False
 
 
+class AutonomousBrowserRunStartRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    task_id: str = Field(min_length=1, max_length=200)
+    task_label: str = Field(min_length=1, max_length=200)
+    start_urls: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("start_urls")
+    @classmethod
+    def validate_start_urls(cls, value: list[str]) -> list[str]:
+        for url in value:
+            if "://" not in url:
+                raise ValueError("url must include a scheme")
+        return value
+
+
 class SourceDiscoveryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=400)
     project_id: str | None = Field(default=None, max_length=200)
