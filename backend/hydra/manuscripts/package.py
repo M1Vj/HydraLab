@@ -234,7 +234,11 @@ class ManuscriptPackageService:
             return set()
         if (approval.project_id or None) not in (None, project_id):
             return set()
-        if (approval.target_ref or None) not in (None, target_ref):
+        # Strict target binding (fail-closed): an approval must name THIS
+        # manuscript/operation. A null/blank target_ref is not a wildcard — it
+        # authorises no acks — so an untargeted approval can never release acks
+        # for an arbitrary manuscript (HL privacy audit L1).
+        if (approval.target_ref or None) != target_ref:
             return set()
         try:
             payload = json.loads(approval.payload_json or "{}")
