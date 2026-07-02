@@ -17,7 +17,7 @@ from hydra.agents.policy import FULL_ACCESS
 from hydra.app import create_app
 from hydra.collaboration.audit import COLLABORATION_AUDIT_APPEND_ONLY_TRIGGERS, CollaborativeAuditTrail
 from hydra.collaboration.exclusion import DocumentCandidate, SyncExclusionFilter
-from hydra.collaboration.identity import IdentityProvider
+from hydra.collaboration.identity import CollaborationPermissionError, IdentityProvider
 from hydra.collaboration.session import CollaborationSession, CollaborativeEdit
 from hydra.collaboration.transport import InProcessSyncTransport, SelfHostedSyncTransport, SyncAuthenticationError
 from hydra.database.models import (
@@ -150,6 +150,37 @@ async def test_hl_core_83_revoked_collaborator_disconnects_and_cannot_reconnect(
             project_id="transformer-survey",
             document_id="notes/lit-review.md",
             auth_token=auth.session_token,
+            origin="http://localhost:5173",
+        )
+
+
+@pytest.mark.asyncio
+async def test_session_token_is_project_scoped_across_projects(session: AsyncSession):
+    """A session token minted for one project cannot authenticate against another.
+
+    Each invite mints a fresh collaborator identity whose only permission row is
+    in its own project, and authenticate_session_token filters by project_id, so
+    a token from project A finds no permission under project B."""
+    identity = IdentityProvider(session)
+    await identity.set_project_settings(project_id="project-a", enabled=True, sync_server_url="wss://lab.local:8443")
+    await identity.set_project_settings(project_id="project-b", enabled=True, sync_server_url="wss://lab.local:8443")
+    invite_a = await identity.invite(project_id="project-a", display_name="Ada", permission="edit")
+    auth_a = await identity.authenticate(project_id="project-a", invite_token=invite_a.invite_token)
+
+    # Identity layer: the token authenticates for A but not for B.
+    scoped = await identity.authenticate_session_token(project_id="project-a", session_token=auth_a.session_token)
+    assert scoped.collaborator_id == auth_a.collaborator_id
+    with pytest.raises(CollaborationPermissionError):
+        await identity.authenticate_session_token(project_id="project-b", session_token=auth_a.session_token)
+
+    # Transport boundary: connecting to project B's document with A's token is refused.
+    transport = InProcessSyncTransport()
+    with pytest.raises(SyncAuthenticationError):
+        await transport.connect(
+            session,
+            project_id="project-b",
+            document_id="notes/lit-review.md",
+            auth_token=auth_a.session_token,
             origin="http://localhost:5173",
         )
 
