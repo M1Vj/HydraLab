@@ -1,4 +1,25 @@
+import DOMPurify from "dompurify";
+
 export type EditorMode = "live" | "source" | "split";
+
+// Allowlist for the preview HTML. The renderer already escapes all user text and
+// only emits this fixed tag/attribute set, so DOMPurify is defense-in-depth for
+// the dangerouslySetInnerHTML sink (e.g. assistant- or collaboration-authored
+// Markdown). In a non-DOM environment (tests/SSR) sanitize is skipped — the
+// escape-first output is safe on its own there.
+const PREVIEW_ALLOWED_TAGS = [
+  "h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr", "ul", "ol", "li",
+  "blockquote", "pre", "code", "strong", "em", "a", "span", "mark", "div",
+];
+const PREVIEW_ALLOWED_ATTR = [
+  "class", "href", "rel", "target", "data-state", "data-note-id",
+  "data-source-id", "data-highlight", "data-id", "data-callout",
+];
+
+function sanitizePreview(html: string): string {
+  if (typeof window === "undefined" || typeof DOMPurify.sanitize !== "function") return html;
+  return DOMPurify.sanitize(html, { ALLOWED_TAGS: PREVIEW_ALLOWED_TAGS, ALLOWED_ATTR: PREVIEW_ALLOWED_ATTR });
+}
 
 export type CitationOption = {
   key: string;
@@ -109,43 +130,176 @@ export function decorateMarkdown(markdown: string, context: MarkdownContext): Ma
   return decorations.sort((left, right) => left.from - right.from || left.to - right.to);
 }
 
+// Render Markdown to safe HTML for the live preview. Block structure (headings,
+// lists, blockquotes, fenced code, rules, paragraphs) plus inline formatting
+// (bold/italic/code/links) is rendered, while HydraLab's own decorations
+// (wikilinks [[..]], citations [@..], claim/evidence highlights, callouts) are
+// preserved. Everything is HTML-escaped before formatting so the preview can be
+// injected with dangerouslySetInnerHTML without an XSS vector.
 export function renderMarkdownPreview(markdown: string, context: MarkdownContext): string {
-  const inlineDecorations = decorateMarkdown(markdown, context).filter((item) => item.kind !== "callout");
-  const highlights = [...(context.highlights ?? [])].sort((left, right) => left.from - right.from || left.to - right.to);
-  const ranges = [...inlineDecorations, ...highlights.map((highlight) => ({ ...highlight, kind: "highlight" as const }))]
-    .filter((range) => range.from >= 0 && range.to > range.from && range.to <= markdown.length)
+  const lines = markdown.split("\n");
+  const lineOffsets: number[] = [];
+  {
+    let running = 0;
+    for (const line of lines) {
+      lineOffsets.push(running);
+      running += line.length + 1; // +1 for the split "\n"
+    }
+  }
+
+  const blocks: string[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+
+    // Fenced code block: verbatim, no formatting or decoration.
+    const fence = /^```(.*)$/.exec(line);
+    if (fence) {
+      const lang = fence[1].trim();
+      const body: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index])) {
+        body.push(lines[index]);
+        index += 1;
+      }
+      index += 1; // consume closing fence (if present)
+      const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
+      blocks.push(`<pre class="md-code"><code${langClass}>${escapeHtml(body.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    if (line.trim() === "") {
+      index += 1;
+      continue;
+    }
+
+    // Callout (kept from the prior behavior).
+    const callout = /^>\s*\[!([A-Za-z0-9_-]+)\](?:\s+(.+))?/.exec(line);
+    if (callout) {
+      const type = callout[1].toLowerCase();
+      const title = callout[2]?.trim() || callout[1];
+      blocks.push(`<div class="md-callout md-callout-${type}" data-callout="${type}"><strong>${escapeHtml(title)}</strong></div>`);
+      index += 1;
+      continue;
+    }
+
+    // Heading.
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      const textOffset = lineOffsets[index] + (line.length - heading[2].length);
+      blocks.push(`<h${level}>${renderInline(heading[2], textOffset, context)}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    // Horizontal rule.
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      blocks.push("<hr />");
+      index += 1;
+      continue;
+    }
+
+    // Blockquote (non-callout), possibly multi-line.
+    if (/^>\s?/.test(line) && !/^>\s*\[!/.test(line)) {
+      const parts: string[] = [];
+      while (index < lines.length && /^>\s?/.test(lines[index]) && !/^>\s*\[!/.test(lines[index])) {
+        const match = /^>\s?(.*)$/.exec(lines[index]);
+        const content = match ? match[1] : "";
+        const contentOffset = lineOffsets[index] + (lines[index].length - content.length);
+        parts.push(renderInline(content, contentOffset, context));
+        index += 1;
+      }
+      blocks.push(`<blockquote>${parts.join("<br />")}</blockquote>`);
+      continue;
+    }
+
+    // Lists (unordered or ordered), consecutive items of the same kind.
+    const ordered = /^\s*\d+\.\s+/.test(line);
+    const unordered = /^\s*[-*+]\s+/.test(line);
+    if (ordered || unordered) {
+      const items: string[] = [];
+      const itemPattern = ordered ? /^\s*\d+\.\s+(.*)$/ : /^\s*[-*+]\s+(.*)$/;
+      while (index < lines.length && itemPattern.test(lines[index])) {
+        const match = itemPattern.exec(lines[index]);
+        const content = match ? match[1] : "";
+        const contentOffset = lineOffsets[index] + (lines[index].length - content.length);
+        items.push(`<li>${renderInline(content, contentOffset, context)}</li>`);
+        index += 1;
+      }
+      const tag = ordered ? "ol" : "ul";
+      blocks.push(`<${tag}>${items.join("")}</${tag}>`);
+      continue;
+    }
+
+    // Paragraph: accumulate consecutive plain lines.
+    const paragraph: string[] = [];
+    while (index < lines.length && isParagraphLine(lines[index])) {
+      paragraph.push(renderInline(lines[index], lineOffsets[index], context));
+      index += 1;
+    }
+    blocks.push(`<p>${paragraph.join("<br />")}</p>`);
+  }
+
+  return sanitizePreview(blocks.join("\n"));
+}
+
+function isParagraphLine(line: string): boolean {
+  if (line.trim() === "") return false;
+  return !(
+    /^```/.test(line) ||
+    /^#{1,6}\s+/.test(line) ||
+    /^>\s?/.test(line) ||
+    /^\s*[-*+]\s+/.test(line) ||
+    /^\s*\d+\.\s+/.test(line) ||
+    /^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
+  );
+}
+
+// Render one line/segment of inline content: splice in the offset-based
+// decorations (wikilinks/citations/highlights) and apply inline Markdown
+// formatting to the plain text between them.
+function renderInline(text: string, docOffset: number, context: MarkdownContext): string {
+  const localDecorations = decorateMarkdown(text, context).filter((item) => item.kind !== "callout");
+  const localHighlights = (context.highlights ?? [])
+    .filter((highlight) => highlight.from >= docOffset && highlight.to <= docOffset + text.length && highlight.to > highlight.from)
+    .map((highlight) => ({ ...highlight, kind: "highlight" as const, from: highlight.from - docOffset, to: highlight.to - docOffset }));
+  const ranges = [...localDecorations, ...localHighlights]
+    .filter((range) => range.from >= 0 && range.to > range.from && range.to <= text.length)
     .sort((left, right) => left.from - right.from || left.to - right.to);
+
   let cursor = 0;
   let html = "";
   for (const range of ranges) {
     if (range.from < cursor) continue;
-    html += escapeHtml(markdown.slice(cursor, range.from));
-    const raw = markdown.slice(range.from, range.to);
+    html += formatInline(escapeHtml(text.slice(cursor, range.from)));
+    const raw = escapeHtml(text.slice(range.from, range.to));
     if (range.kind === "wikilink") {
-      const state = range.resolved ? "resolved" : "dangling";
-      html += `<span class="md-wikilink" data-state="${state}" data-note-id="${escapeHtml(range.targetId ?? "")}">${escapeHtml(raw)}</span>`;
+      html += `<span class="md-wikilink" data-state="${range.resolved ? "resolved" : "dangling"}" data-note-id="${escapeHtml(range.targetId ?? "")}">${raw}</span>`;
     } else if (range.kind === "citation") {
-      const state = range.resolved ? "resolved" : "dangling";
-      html += `<span class="md-citation" data-state="${state}" data-source-id="${escapeHtml(range.sourceId ?? "")}">${escapeHtml(raw)}</span>`;
+      html += `<span class="md-citation" data-state="${range.resolved ? "resolved" : "dangling"}" data-source-id="${escapeHtml(range.sourceId ?? "")}">${raw}</span>`;
     } else {
-      html += `<mark class="md-${range.type}-highlight" data-highlight="${range.type}" data-id="${escapeHtml(range.id)}">${escapeHtml(raw)}</mark>`;
+      html += `<mark class="md-${range.type}-highlight" data-highlight="${range.type}" data-id="${escapeHtml(range.id)}">${raw}</mark>`;
     }
     cursor = range.to;
   }
-  html += escapeHtml(markdown.slice(cursor));
+  html += formatInline(escapeHtml(text.slice(cursor)));
+  return html;
+}
 
-  const lines = html.split("\n");
-  const sourceLines = markdown.split("\n");
-  return lines
-    .map((line, index) => {
-      const callout = /^&gt;\s*\[!([A-Za-z0-9_-]+)\](?:\s+(.+))?/.exec(line);
-      if (!callout) {
-        return line || "<br>";
-      }
-      const title = callout[2]?.trim() || callout[1];
-      return `<div class="md-callout md-callout-${callout[1].toLowerCase()}" data-callout="${callout[1].toLowerCase()}"><strong>${title}</strong><span class="sr-only">${escapeHtml(sourceLines[index] ?? "")}</span></div>`;
-    })
-    .join("\n");
+// Inline Markdown on ALREADY-ESCAPED plain text (no HTML tags present in the
+// input, so the regexes cannot span or corrupt existing markup).
+function formatInline(escaped: string): string {
+  return escaped
+    .replace(/`([^`]+)`/g, (_match, code) => `<code>${code}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+    .replace(/(^|[^_\w])_([^_\n]+)_(?![_\w])/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, url) => {
+      const safe = /^(https?:|mailto:|#|\/)/i.test(url) ? url : "#";
+      return `<a href="${safe}" rel="noreferrer noopener" target="_blank">${label}</a>`;
+    });
 }
 
 export function applyInlineSuggestion(content: string, suggestion: InlineSuggestion, action: "accept" | "reject" | "ignore"): string {

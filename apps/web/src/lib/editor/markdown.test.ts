@@ -52,6 +52,56 @@ describe("Markdown editor behavior", () => {
     expect(html).toContain("data-highlight=\"evidence\"");
   });
 
+  test("renders block markdown to real HTML (headings, lists, code, rule)", () => {
+    const html = renderMarkdownPreview(
+      "# Title\n\nA paragraph.\n\n- one\n- two\n\n```\ncode line\n```\n\n---\n\n> quoted",
+      { notes: [], citations: [] },
+    );
+    expect(html).toContain("<h1>Title</h1>");
+    expect(html).toContain("<p>A paragraph.</p>");
+    expect(html).toContain("<ul><li>one</li><li>two</li></ul>");
+    expect(html).toContain("<pre class=\"md-code\"><code>code line</code></pre>");
+    expect(html).toContain("<hr />");
+    expect(html).toContain("<blockquote>quoted</blockquote>");
+  });
+
+  test("renders inline markdown (bold, italic, code, links)", () => {
+    const html = renderMarkdownPreview("This is **bold**, *italic*, `mono` and a [link](https://x.test).", {
+      notes: [],
+      citations: [],
+    });
+    expect(html).toContain("<strong>bold</strong>");
+    expect(html).toContain("<em>italic</em>");
+    expect(html).toContain("<code>mono</code>");
+    expect(html).toContain("<a href=\"https://x.test\"");
+  });
+
+  test("orders lists and preserves wikilinks/citations inside rendered blocks", () => {
+    const html = renderMarkdownPreview("1. see [[Intro]]\n2. cite [@smith]", {
+      notes: [{ id: "n1", title: "Intro" }],
+      citations: [{ key: "smith", sourceId: "s1", title: "Smith 2020" }],
+    });
+    expect(html).toContain("<ol>");
+    expect(html).toContain("class=\"md-wikilink\" data-state=\"resolved\"");
+    expect(html).toContain("class=\"md-citation\" data-state=\"resolved\"");
+  });
+
+  test("escapes raw HTML so the preview cannot inject markup (XSS)", () => {
+    const html = renderMarkdownPreview("<img src=x onerror=alert(1)> and <script>alert(2)</script>", {
+      notes: [],
+      citations: [],
+    });
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+
+  test("neutralizes dangerous link schemes", () => {
+    const html = renderMarkdownPreview("[click](javascript:alert(1))", { notes: [], citations: [] });
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain("href=\"#\"");
+  });
+
   test("@HL-WRITE-09 applies suggestions only on explicit accept", () => {
     const suggestion = { id: "s1", from: 0, to: 5, replacement: "Hello" };
 
