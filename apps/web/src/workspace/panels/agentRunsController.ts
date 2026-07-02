@@ -15,9 +15,27 @@ export const CANONICAL_STAGE_IDS = [
   "cache",
   "loop_control",
 ] as const;
+export const BUILTIN_RECIPE_IDS = ["paper-critique", "related-work"] as const;
 
 export type StageId = (typeof CANONICAL_STAGE_IDS)[number];
+export type BuiltinRecipeId = (typeof BUILTIN_RECIPE_IDS)[number];
 export type StageToggles = Record<StageId, boolean>;
+
+export type RecipeDescriptor = {
+  id: BuiltinRecipeId | string;
+  name: string;
+  stages: string[];
+  input_schema?: Record<string, unknown>;
+  approval_gates?: string[];
+  output_artifact_type?: string;
+};
+
+export type RecipeLaunchInputs = {
+  recipe_id: BuiltinRecipeId | string;
+  draft_or_source: { title: string; text: string };
+  target_venue_style: string;
+  source_scope: string[];
+};
 
 export function defaultStageToggles(): StageToggles {
   return Object.fromEntries(CANONICAL_STAGE_IDS.map((id) => [id, true])) as StageToggles;
@@ -35,10 +53,24 @@ export function toggleStage(current: Partial<Record<string, boolean>>, stage: St
   return normalizeStageToggles({ ...current, [stage]: enabled });
 }
 
-export function buildStartRunPayload(projectId: string, toggles: Partial<Record<string, boolean>>) {
+export function buildStartRunPayload(
+  projectId: string,
+  toggles: Partial<Record<string, boolean>>,
+  recipe?: RecipeLaunchInputs,
+) {
   return {
     project_id: projectId,
     enabled_stages: normalizeStageToggles(toggles),
+    ...(recipe
+      ? {
+          recipe_id: recipe.recipe_id,
+          recipe_inputs: {
+            draft_or_source: recipe.draft_or_source,
+            target_venue_style: recipe.target_venue_style,
+            source_scope: recipe.source_scope,
+          },
+        }
+      : {}),
   };
 }
 
@@ -46,12 +78,17 @@ export function fetchOrchestratorStages(client: ApiClient = api): Promise<Orches
   return client.get<{ stages: OrchestratorStage[] }>("/api/orchestrator/stages").then((payload) => payload.stages);
 }
 
+export function fetchRecipes(client: ApiClient = api): Promise<RecipeDescriptor[]> {
+  return client.get<{ recipes: RecipeDescriptor[] }>("/api/orchestrator/recipes").then((payload) => payload.recipes);
+}
+
 export function startOrchestratorRun(
   projectId: string,
   toggles: Partial<Record<string, boolean>>,
+  recipe?: RecipeLaunchInputs,
   client: ApiClient = api,
 ): Promise<OrchestratorRunResponse> {
-  return client.post<OrchestratorRunResponse>("/api/orchestrator/runs", buildStartRunPayload(projectId, toggles));
+  return client.post<OrchestratorRunResponse>("/api/orchestrator/runs", buildStartRunPayload(projectId, toggles, recipe));
 }
 
 export function fetchOrchestratorRun(runId: string, client: ApiClient = api): Promise<OrchestratorRunResponse> {

@@ -6,11 +6,14 @@ import { FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import {
   CANONICAL_STAGE_IDS,
   defaultStageToggles,
+  fetchRecipes,
   fetchOrchestratorStages,
   stageStatus,
   startOrchestratorRun,
   summarizeRunState,
   toggleStage,
+  type BuiltinRecipeId,
+  type RecipeDescriptor,
   type StageId,
   type StageToggles,
 } from "./agentRunsController";
@@ -25,6 +28,12 @@ function statusIcon(status: string) {
 
 export function AgentRunsPanel({ announce }: PanelComponentProps) {
   const [stages, setStages] = useState<OrchestratorStage[]>([]);
+  const [recipes, setRecipes] = useState<RecipeDescriptor[]>([]);
+  const [selectedRecipe, setSelectedRecipe] = useState<BuiltinRecipeId | string>("paper-critique");
+  const [draftTitle, setDraftTitle] = useState("Sparse Attention for Long Documents");
+  const [draftText, setDraftText] = useState("");
+  const [targetVenueStyle, setTargetVenueStyle] = useState("ACL");
+  const [sourceScope, setSourceScope] = useState("");
   const [toggles, setToggles] = useState<StageToggles>(() => defaultStageToggles());
   const [run, setRun] = useState<OrchestratorRunResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -39,8 +48,9 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
     setLoading(true);
     setError(null);
     try {
-      const loaded = await fetchOrchestratorStages();
+      const [loaded, loadedRecipes] = await Promise.all([fetchOrchestratorStages(), fetchRecipes()]);
       setStages(loaded);
+      setRecipes(loadedRecipes);
       setToggles((current) => {
         const next = { ...defaultStageToggles(), ...current };
         for (const stage of loaded) {
@@ -59,8 +69,18 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
     setRunning(true);
     setError(null);
     try {
-      const started = await startOrchestratorRun(PROJECT_ID, toggles);
+      const recipe = recipes.find((item) => item.id === selectedRecipe);
+      const recipeStages = recipe?.stages?.length
+        ? Object.fromEntries(CANONICAL_STAGE_IDS.map((id) => [id, recipe.stages.includes(id)]))
+        : toggles;
+      const started = await startOrchestratorRun(PROJECT_ID, recipeStages, {
+        recipe_id: selectedRecipe,
+        draft_or_source: { title: draftTitle, text: draftText },
+        target_venue_style: targetVenueStyle,
+        source_scope: sourceScope.split(",").map((item) => item.trim()).filter(Boolean),
+      });
       setRun(started);
+      dispatchRelatedWorkSuggestion(started.artifacts);
       announce(`Run ${summarizeRunState(started.run.status, started.run.state).toLowerCase()}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught : new Error(String(caught)));
@@ -88,8 +108,8 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
       <div className="agent-runs-panel">
         <header className="agent-runs-header">
           <div>
-            <h2>Bounded run</h2>
-            <p>One fixed Phase-2 stage pass</p>
+            <h2>Recipe run</h2>
+            <p>Bounded Phase-2 pass with approval gates</p>
           </div>
           <button type="button" className="primary-action compact" onClick={() => void startRun()} disabled={running}>
             {running ? <RefreshCcw size={14} aria-hidden /> : <Play size={14} aria-hidden />}
@@ -102,6 +122,56 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
           <strong>{banner}</strong>
           {run && <span>{run.run.mode} - {run.trace.steps.length} events</span>}
         </div>
+
+        <section className="agent-recipe-launch" aria-label="Recipe launcher">
+          <label>
+            Recipe{" "}
+            <select value={selectedRecipe} onChange={(event) => setSelectedRecipe(event.target.value)}>
+              {(recipes.length ? recipes : [{ id: "paper-critique", name: "Paper Critique", stages: [] }]).map((recipe) => (
+                <option key={recipe.id} value={recipe.id}>
+                  {recipe.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Draft or source{" "}
+            <input
+              type="text"
+              value={draftTitle}
+              onChange={(event) => setDraftTitle(event.target.value)}
+              aria-label="Draft or source title"
+            />
+          </label>
+          <label>
+            Target venue/style{" "}
+            <input
+              type="text"
+              value={targetVenueStyle}
+              onChange={(event) => setTargetVenueStyle(event.target.value)}
+              aria-label="Target venue style"
+            />
+          </label>
+          <label>
+            Source scope{" "}
+            <input
+              type="text"
+              value={sourceScope}
+              onChange={(event) => setSourceScope(event.target.value)}
+              placeholder="source ids, comma separated"
+              aria-label="Source scope"
+            />
+          </label>
+          <label>
+            Draft text{" "}
+            <textarea
+              value={draftText}
+              onChange={(event) => setDraftText(event.target.value)}
+              aria-label="Draft text"
+              rows={4}
+            />
+          </label>
+        </section>
 
         <section className="agent-stage-toggle-list" aria-label="Stage toggles">
           {(stages.length ? stages : CANONICAL_STAGE_IDS.map((id) => ({ id, label: id.replace("_", " "), enabled: true }))).map((stage) => {
@@ -140,6 +210,22 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
         </section>
       </div>
     </PanelScaffold>
+  );
+}
+
+function dispatchRelatedWorkSuggestion(artifacts: AgentRunArtifact[]) {
+  const relatedWork = artifacts.find((artifact) => artifact.kind === "related-work-draft") as AgentRunArtifact & {
+    draft?: { paragraphs?: Array<{ text?: string; trace_links?: unknown[] }> };
+  };
+  const paragraph = relatedWork?.draft?.paragraphs?.[0];
+  if (!paragraph?.text) return;
+  window.dispatchEvent(
+    new CustomEvent("hydra:related-work-suggestion", {
+      detail: {
+        text: paragraph.text,
+        trace_links: paragraph.trace_links ?? [],
+      },
+    }),
   );
 }
 

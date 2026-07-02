@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Check, Download, FileUp, RotateCcw, Settings2, ShieldAlert, Wand2, X } from "lucide-react";
 import { HydraMarkdownEditor } from "../../components/editor/HydraMarkdownEditor";
+import type { InlineSuggestion } from "../../lib/editor/markdown";
 import {
   API_BASE_URL,
   HydraApiError,
@@ -42,6 +43,11 @@ import {
   summarizeReviewProgress,
 } from "./docxEditPlan";
 
+type RelatedWorkSuggestionDetail = {
+  text?: string;
+  trace_links?: unknown[];
+};
+
 export function WritingPanel({ announce }: PanelComponentProps) {
   const [manuscripts, setManuscripts] = useState<string[]>([]);
   const [active, setActive] = useState<string | null>(null);
@@ -53,6 +59,7 @@ export function WritingPanel({ announce }: PanelComponentProps) {
   const [error, setError] = useState<Error | null>(null);
 
   const [source, setSource] = useState("\\documentclass{article}\n\\begin{document}\nDraft\n\\end{document}\n");
+  const [relatedWorkSuggestion, setRelatedWorkSuggestion] = useState<InlineSuggestion | null>(null);
   const [imported, setImported] = useState<DocxImportResponse | null>(null);
   const [docxNotice, setDocxNotice] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -70,6 +77,21 @@ export function WritingPanel({ announce }: PanelComponentProps) {
   useEffect(() => {
     if (active) void loadFormat(active);
   }, [active]);
+
+  useEffect(() => {
+    if (relatedWorkSuggestion && source.includes("hydralab-trace")) {
+      setRelatedWorkSuggestion(null);
+    }
+  }, [relatedWorkSuggestion, source]);
+
+  useEffect(() => {
+    function onRelatedWorkSuggestion(event: Event) {
+      const detail = (event as CustomEvent<RelatedWorkSuggestionDetail>).detail;
+      stageRelatedWorkSuggestion(detail);
+    }
+    window.addEventListener("hydra:related-work-suggestion", onRelatedWorkSuggestion);
+    return () => window.removeEventListener("hydra:related-work-suggestion", onRelatedWorkSuggestion);
+  }, [source]);
 
   async function bootstrap() {
     setLoading(true);
@@ -189,6 +211,27 @@ export function WritingPanel({ announce }: PanelComponentProps) {
     }
   }
 
+  function stageRelatedWorkSuggestion(detail?: RelatedWorkSuggestionDetail) {
+    const traceLinks = detail?.trace_links ?? [
+      {
+        source_id: "saved-source",
+        citation_id: "saved-citation",
+        locator: { section: "Related Work" },
+      },
+    ];
+    const text = detail?.text ?? "Saved literature grounds this related-work synthesis. [@saved-citation]";
+    const insertion =
+      `\n\n## Related Work\n\n${text}\n` +
+      `<!-- hydralab-trace:${JSON.stringify(traceLinks)} -->\n`;
+    setRelatedWorkSuggestion({
+      id: "related-work-draft",
+      from: source.length,
+      to: source.length,
+      replacement: insertion,
+    });
+    announce("Related-work draft staged for inline review");
+  }
+
   const converterState = useMemo(() => docxActionState(docx), [docx]);
   const compileState = useMemo(() => latexCompileState(latex), [latex]);
   const planState = useMemo(
@@ -272,9 +315,16 @@ export function WritingPanel({ announce }: PanelComponentProps) {
             value={source}
             notes={[]}
             citations={[]}
+            suggestions={relatedWorkSuggestion ? [relatedWorkSuggestion] : []}
             onChange={setSource}
             onSave={() => announce("LaTeX source updated (in-memory draft)")}
           />
+          <div className="docx-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" onClick={() => stageRelatedWorkSuggestion()} disabled={Boolean(relatedWorkSuggestion)}>
+              <Wand2 size={14} aria-hidden /> Stage related work
+            </button>
+            {relatedWorkSuggestion && <span className="status-pill">inline accept/reject required</span>}
+          </div>
           {compileState.kind === "setup" ? (
             <div className="panel-state not-wired" role="status">
               <Wand2 size={16} aria-hidden /> <strong>Compile unavailable</strong>
