@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -16,6 +17,23 @@ from hydra.database.models import AgentRun
 from hydra.orchestrator.run import RunConfig, RunExecutionResult, RunStateMachine
 
 RunnerFactory = Callable[[RunRepository, RunConfig, RunBudget], RunStateMachine]
+
+
+def _elapsed_seconds(run: AgentRun | None, fallback_monotonic: float) -> float:
+    """Wall-clock elapsed for the budget gate.
+
+    Measured against the run's persisted ``started_at`` so pausing and resuming
+    cannot reset the clock — a resumed run keeps accumulating against its
+    original start instead of restarting from zero each ``_run`` call. Falls
+    back to a process-local monotonic clock only before the run row exists.
+    SQLite may hand back a naive datetime, so an absent tzinfo is treated as UTC.
+    """
+    if run is not None and run.started_at is not None:
+        started_at = run.started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
+    return time.monotonic() - fallback_monotonic
 
 @dataclass
 class AutopilotLoop:
@@ -66,6 +84,7 @@ class AutopilotLoop:
             run_budget_tokens=self.policy.budget_limits.tokens,
             wall_clock_seconds=self.policy.budget_limits.wall_clock_seconds,
         )
+        # Fallback clock used only until the run row (with started_at) exists.
         started = time.monotonic()
         last: RunExecutionResult | None = None
 
@@ -85,7 +104,7 @@ class AutopilotLoop:
                 self.stop_reason = self.stop_reason or "cancelled by user"
                 break
             tokens_used = current.tokens_used if current is not None else 0
-            if budget_exceeded(tokens_used=tokens_used, elapsed_seconds=time.monotonic() - started, budget=budget):
+            if budget_exceeded(tokens_used=tokens_used, elapsed_seconds=_elapsed_seconds(current, started), budget=budget):
                 self.stop_reason = "budget exceeded"
                 if run_id:
                     await repo.block_on_budget(run_id)

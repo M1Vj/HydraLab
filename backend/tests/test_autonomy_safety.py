@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -588,6 +589,47 @@ async def test_m1_token_budget_stops_loop(session):
     await loop.start(project_id="default")
     assert loop.stop_reason == "budget exceeded"
     assert loop.loop_count < tight.max_loop_count
+
+@pytest.mark.asyncio
+async def test_m1_wall_clock_budget_is_cumulative_across_resume(session):
+    """Wall-clock is measured from the run's persisted started_at, so pausing and
+    resuming cannot reset the clock to zero and evade the time budget."""
+    repo = RunRepository(session)
+    run = await repo.create_run(project_id="default", mode=FULL_ACCESS, recipe="autopilot-loop")
+    # The run originally started well past its wall-clock ceiling ago, then paused.
+    run.started_at = datetime.now(timezone.utc) - timedelta(seconds=500)
+    run.paused = True
+    session.add(run)
+    await session.commit()
+
+    resumed = {"n": 0}
+
+    async def fake_resume(*, run_id, project_id, mode):
+        resumed["n"] += 1
+        await RunRepository(session).complete_run(run_id)
+        return RunExecutionResult(run_id=run_id, state="completed")
+
+    class FakeRunner:
+        resume = staticmethod(fake_resume)
+        start = staticmethod(fake_resume)
+
+    tight = AutonomyPolicy(
+        mode=FULL_ACCESS,
+        budget_limits=BudgetLimits(tokens=999_999, wall_clock_seconds=60),
+        max_loop_count=5,
+        stop_conditions=["max_loop_count"],
+        autopilot_enabled=True,
+    )
+    loop = AutopilotLoop(
+        session,
+        tight,
+        RunConfig.all_enabled(),
+        runner_factory=lambda repo, config, budget: FakeRunner(),  # type: ignore[return-value]
+    )
+    await loop.resume(run_id=run.id, project_id="default")
+    # Blocked before running a single iteration; a reset clock would have run it.
+    assert loop.stop_reason == "budget exceeded"
+    assert resumed["n"] == 0
 
 @pytest.mark.asyncio
 async def test_hl_mode_36_loop_stops_at_max_loop_count(session):
