@@ -210,7 +210,15 @@ export function tab(panelId: PanelId, config: PanelConfig = {}): IJsonTabNode {
 export function panelTitle(panelId: PanelId, config: PanelConfig = {}): string {
   if (panelId === "markdown-editor" && typeof config.title === "string") return config.title;
   if (panelId === "pdf-reader" && typeof config.title === "string") return config.title;
-  if (panelId === "browser" && typeof config.url === "string") return new URL(config.url).hostname;
+  if (panelId === "browser" && typeof config.url === "string") {
+    // A malformed url must not throw here (this runs while building the layout
+    // tab): fall back to the raw string / default title instead of crashing.
+    try {
+      return new URL(config.url).hostname;
+    } catch {
+      return config.url || panelChrome[panelId].title;
+    }
+  }
   return panelChrome[panelId].title;
 }
 

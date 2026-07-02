@@ -11,6 +11,7 @@ import { CommandRegistry } from "./commands";
 import { WorkspaceDataProvider, useWorkspaceData } from "./data";
 import { activeJsonLayout } from "./layout";
 import { createPanelRegistry, panelChrome, tab, tabStableKey, type PanelConfig, type PanelId, type PanelLocation } from "./panelRegistry";
+import { PanelErrorBoundary } from "./PanelErrorBoundary";
 import { useWorkspaceStore, type ActiveProject, type RecentProject } from "./store";
 import { ExplorerPanel } from "./panels/ExplorerPanel";
 import { SourceDiscoveryPanel } from "./panels/SourceDiscoveryPanel";
@@ -234,7 +235,11 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
             const panelId = node.getComponent() as PanelId;
             const panel = panelRegistry[panelId];
             const Component = panel.component;
-            return <Component panelId={panelId} config={node.getConfig()} openPanel={openPanel} closeActivePanel={closeActivePanel} announce={announce} />;
+            return (
+              <PanelErrorBoundary panelTitle={panelChrome[panelId]?.title ?? panelId}>
+                <Component panelId={panelId} config={node.getConfig()} openPanel={openPanel} closeActivePanel={closeActivePanel} announce={announce} />
+              </PanelErrorBoundary>
+            );
           }}
           onRenderTab={(node, renderValues) => {
             const panelId = node.getComponent() as PanelId;
