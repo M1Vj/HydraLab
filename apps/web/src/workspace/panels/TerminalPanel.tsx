@@ -57,8 +57,14 @@ export function TerminalPanel({ announce }: PanelComponentProps) {
       return;
     }
     print(`$ ${trimmed}`);
-    const result = await api.post<ConsoleRunResult>("/api/console/run", { command: trimmed, trigger: "user", approve });
-    handleResult(trimmed, result);
+    try {
+      const result = await api.post<ConsoleRunResult>("/api/console/run", { command: trimmed, trigger: "user", approve });
+      handleResult(trimmed, result);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      print(`Error: ${message}`);
+      announce(`Command failed: ${message}`);
+    }
   }
 
   function handleResult(cmd: string, result: ConsoleRunResult) {

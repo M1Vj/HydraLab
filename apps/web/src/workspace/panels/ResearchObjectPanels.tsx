@@ -319,9 +319,13 @@ export function GitPanel({ announce }: PanelComponentProps) {
   }
 
   async function commit(message: string) {
-    await api.post("/api/git/commit", { message });
-    announce("Committed changes");
-    void load();
+    try {
+      await api.post("/api/git/commit", { message });
+      announce("Committed changes");
+      void load();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+    }
   }
 
   if (loading) return <LoadingState title="Loading Git" />;

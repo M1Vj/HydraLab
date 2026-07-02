@@ -31,9 +31,13 @@ export function TasksPanel({ announce }: PanelComponentProps) {
   }
 
   async function createTask() {
-    const created = await api.post<TaskRecord>("/api/tasks", { title: "Untitled task", column: "to_do" });
-    setTasks((current) => [...current, created]);
-    objects.reload();
+    try {
+      const created = await api.post<TaskRecord>("/api/tasks", { title: "Untitled task", column: "to_do" });
+      setTasks((current) => [...current, created]);
+      objects.reload();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+    }
   }
 
   async function moveTask(task: TaskRecord, column: string) {
@@ -50,17 +54,25 @@ export function TasksPanel({ announce }: PanelComponentProps) {
   }
 
   async function acceptDraft(task: TaskRecord) {
-    const updated = await api.post<TaskRecord>(`/api/tasks/${encodeURIComponent(task.id)}/accept`);
-    setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    announce(`Accepted task ${task.title}`);
-    review.reload();
+    try {
+      const updated = await api.post<TaskRecord>(`/api/tasks/${encodeURIComponent(task.id)}/accept`);
+      setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      announce(`Accepted task ${task.title}`);
+      review.reload();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+    }
   }
 
   async function dismissDraft(task: TaskRecord) {
-    const updated = await api.post<TaskRecord>(`/api/tasks/${encodeURIComponent(task.id)}/dismiss`);
-    setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-    announce(`Dismissed task ${task.title}`);
-    review.reload();
+    try {
+      const updated = await api.post<TaskRecord>(`/api/tasks/${encodeURIComponent(task.id)}/dismiss`);
+      setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+      announce(`Dismissed task ${task.title}`);
+      review.reload();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+    }
   }
 
   const active = useMemo(() => filterByTag(activeTasks(tasks), tagFilter), [tasks, tagFilter]);
