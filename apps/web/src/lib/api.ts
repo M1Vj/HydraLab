@@ -412,6 +412,39 @@ export type AgentTraceStep = {
 export type AgentRunTrace = {
   run: { id: string; project_id: string; mode: string; status: string; paused: boolean };
   trace: { run_id: string; steps: AgentTraceStep[] };
+  artifacts?: AgentRunArtifact[];
+};
+
+export type AgentRunArtifact = {
+  id: string;
+  kind: string;
+  ref?: string;
+  summary?: string;
+  stage?: string;
+  method?: string;
+  ranking?: Array<{ id: string; title?: string; score: number }>;
+};
+
+export type OrchestratorStage = {
+  id: string;
+  label: string;
+  enabled: boolean;
+};
+
+export type OrchestratorRunSummary = {
+  id: string;
+  project_id: string;
+  mode: string;
+  status: string;
+  state?: string;
+  paused: boolean;
+  tokens_used?: number;
+  created_at?: number;
+};
+
+export type OrchestratorRunResponse = AgentRunTrace & {
+  run: AgentRunTrace["run"] & { state?: string };
+  artifacts: AgentRunArtifact[];
 };
 
 export type ContextFileInfo = {

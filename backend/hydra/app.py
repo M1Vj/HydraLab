@@ -85,6 +85,7 @@ from hydra.schemas import (
     SkillEnabledRequest,
     SkillEditRequest,
     ApprovalResolveRequest,
+    OrchestratorRunStartRequest,
     ContextFileSaveRequest,
     MemoryCandidateRequest,
 )
@@ -156,9 +157,12 @@ from hydra.skills.registry import (
     set_skill_enabled,
 )
 from hydra.agents.policy import InvalidModeError, VALID_MODES, normalize_mode
+from hydra.agents.runs import RunBudget as AgentRunBudget
 from hydra.agents.runs import RunRepository
 from hydra.agents.approvals import ApprovalService, to_contract
 from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
+from hydra.orchestrator.run import OrchestratorConfigError, RunConfig, RunStateMachine
+from hydra.orchestrator.stages import StageEnum
 from hydra.services.project_context import (
     ContextFileMemory,
     ensure_hydra_md,
@@ -680,7 +684,77 @@ def create_app() -> FastAPI:
         restore_skill(_skill_state_dir(), skill_id)
         return _load_skills().get(skill_id).to_api()
 
-    # ----------------------------------------------------- agent runs / approvals
+    # ----------------------------------------------------- orchestrator / agent runs
+    @app.get("/api/orchestrator/stages")
+    async def list_orchestrator_stages() -> dict[str, object]:
+        return {
+            "stages": [
+                {"id": stage.value, "label": stage.value.replace("_", " ").title(), "enabled": True}
+                for stage in StageEnum
+            ]
+        }
+
+    @app.get("/api/orchestrator/runs")
+    async def list_orchestrator_runs(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        rows = (
+            await session.exec(
+                select(AgentRun)
+                .where(AgentRun.project_id == project_id, AgentRun.recipe == "bounded-stage-pass")
+                .order_by(AgentRun.created_at.desc())
+            )
+        ).all()
+        return {
+            "runs": [
+                {
+                    "id": run.id,
+                    "project_id": run.project_id,
+                    "mode": run.mode,
+                    "status": run.status,
+                    "paused": run.paused,
+                    "tokens_used": run.tokens_used,
+                    "created_at": run.created_at.timestamp(),
+                }
+                for run in rows
+            ]
+        }
+
+    @app.post("/api/orchestrator/runs")
+    async def start_orchestrator_run(
+        request: OrchestratorRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        try:
+            config = RunConfig.resolve(
+                stage_overrides=request.enabled_stages or {stage.value: True for stage in StageEnum},
+                scoring_method=request.scoring_method,
+            )
+        except OrchestratorConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await RunStateMachine(
+            RunRepository(session),
+            config,
+            budget=AgentRunBudget(
+                run_budget_tokens=int(privacy["run_budget"]),
+                wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+            ),
+        ).start(project_id=request.project_id, mode=policy.default_mode or privacy["default_mode"])
+        run = await session.get(AgentRun, result.run_id)
+        trace = await RunRepository(session).get_trace(result.run_id)
+        return {
+            "run": {
+                "id": result.run_id,
+                "project_id": request.project_id,
+                "mode": run.mode if run else policy.default_mode,
+                "status": run.status if run else result.state,
+                "state": result.state,
+                "paused": bool(run.paused) if run else False,
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads((run.artifacts if run else "[]") or "[]"),
+        }
+
     @app.get("/api/agent/runs/{run_id}")
     async def get_agent_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         runs = RunRepository(session)
@@ -691,6 +765,7 @@ def create_app() -> FastAPI:
         return {
             "run": {"id": run.id, "project_id": run.project_id, "mode": run.mode, "status": run.status, "paused": run.paused},
             "trace": trace.public_dict(),
+            "artifacts": json.loads(run.artifacts or "[]"),
         }
 
     @app.post("/api/agent/runs/{run_id}/pause")

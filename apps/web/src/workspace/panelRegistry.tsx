@@ -17,6 +17,7 @@ import {
   Settings,
   SquareTerminal,
   Terminal,
+  Workflow,
 } from "lucide-react";
 
 export type PanelId =
@@ -25,6 +26,7 @@ export type PanelId =
   | "review-inbox"
   | "git"
   | "research-chat"
+  | "agent-runs"
   | "markdown-editor"
   | "pdf-reader"
   | "browser"
@@ -76,6 +78,7 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
   "review-inbox": { id: "review-inbox", title: "Review Inbox", icon: Inbox, defaultLocation: "border-left", singleton: true, allowMultiple: false },
   git: { id: "git", title: "Git", icon: GitBranch, defaultLocation: "border-left", singleton: true, allowMultiple: false },
   "research-chat": { id: "research-chat", title: "Research Chat", icon: BotMessageSquare, defaultLocation: "center", singleton: true, allowMultiple: false },
+  "agent-runs": { id: "agent-runs", title: "Agent Runs", icon: Workflow, defaultLocation: "center", singleton: true, allowMultiple: false },
   "markdown-editor": { id: "markdown-editor", title: "Markdown Editor", icon: FileText, defaultLocation: "center", singleton: false, allowMultiple: true },
   "pdf-reader": { id: "pdf-reader", title: "PDF Reader", icon: ScrollText, defaultLocation: "center", singleton: false, allowMultiple: true },
   browser: { id: "browser", title: "Browser", icon: Globe2, defaultLocation: "center", singleton: false, allowMultiple: true },
@@ -150,7 +153,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 76,
           selected: 0,
           enableMaximize: true,
-          children: [tab("research-chat"), tab("markdown-editor"), tab("writing"), tab("pdf-reader"), tab("browser")],
+          children: [tab("research-chat"), tab("agent-runs"), tab("markdown-editor"), tab("writing"), tab("pdf-reader"), tab("browser")],
         },
         {
           type: "tabset",
