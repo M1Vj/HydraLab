@@ -456,8 +456,16 @@ class Repository:
         await self.session.refresh(source)
         return self._to_dict(source)
 
-    async def list_sources(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
+    async def list_sources(
+        self, project_id: Optional[str] = None, *, include_trashed: bool = False
+    ) -> list[dict[str, Any]]:
+        # User-facing reads exclude trashed (soft-deleted) sources by default —
+        # search_sources already did, but list_sources fed the Explorer/objects
+        # list with deleted rows still visible. The merge/dedupe engine opts back
+        # in with include_trashed=True since it manages trashed rows itself.
         q = select(Source)
+        if not include_trashed:
+            q = q.where(Source.trashed == False)  # noqa: E712
         if project_id is not None:
             q = q.where(_project_scope(Source.project_id, project_id))
         q = q.order_by(Source.created_at.desc())
@@ -2140,7 +2148,7 @@ class Repository:
 
     # --- Deterministic key dedupe (HL-CITE-03) ------------------------------
     async def dedupe_by_citation_key(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
-        sources = await self.list_sources()
+        sources = await self.list_sources(include_trashed=True)
         live = [s for s in sources if not s.get("trashed") and not s.get("merged_into_source_id")]
         if project_id:
             live = [s for s in live if s.get("project_id") in (None, project_id)]
@@ -2176,7 +2184,7 @@ class Repository:
 
     # --- Confidence-based duplicate detection (HL-CITE-04, HL-CITE-12) -------
     async def detect_duplicates(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
-        sources = await self.list_sources()
+        sources = await self.list_sources(include_trashed=True)
         if project_id:
             sources = [s for s in sources if s.get("project_id") in (None, project_id)]
         verdicts = find_duplicates(sources)

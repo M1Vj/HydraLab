@@ -96,6 +96,20 @@ async def test_unscoped_reads_still_return_all_project_rows(session):
 
 
 @pytest.mark.asyncio
+async def test_list_sources_excludes_trashed_by_default(session):
+    repo = Repository(session)
+    live = await repo.upsert_source({"id": "src-live", "title": "Live", "project_id": "default"})
+    trashed = await repo.upsert_source({"id": "src-trashed", "title": "Trashed", "project_id": "default"})
+    await repo.trash_source(trashed["id"], confirmed=True)
+
+    default_ids = [row["id"] for row in await repo.list_sources(project_id="default")]
+    assert default_ids == [live["id"]]
+
+    with_trashed = {row["id"] for row in await repo.list_sources(project_id="default", include_trashed=True)}
+    assert with_trashed == {live["id"], trashed["id"]}
+
+
+@pytest.mark.asyncio
 async def test_add_note_without_project_id_is_written_to_default_project(session):
     repo = Repository(session)
     note = await repo.add_note("default note", "default body")
