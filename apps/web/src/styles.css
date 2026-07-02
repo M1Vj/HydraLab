@@ -2180,3 +2180,186 @@ kbd {
   color: inherit;
   cursor: pointer;
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase-3 adaptive mobile/tablet surface (branch 03-09).             */
+/* Desktop workbench styles above are untouched; these only apply     */
+/* inside .mobile-shell, which only mounts on a touch-primary surface */
+/* with the phase3_mobile_surface_enabled flag ON.                    */
+/* ------------------------------------------------------------------ */
+.mobile-shell {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--bg-base);
+  color: var(--text-main);
+}
+
+.mobile-topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-panel);
+}
+
+.mobile-brand {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.mobile-project-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-back {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+}
+
+.mobile-stage {
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-view {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Reused panels render their own chrome; give them room and comfortable touch targets. */
+.mobile-view .workspace-panel,
+.mobile-view .pdf-reader-module {
+  height: 100%;
+}
+
+.mobile-view button,
+.mobile-view .link-button {
+  min-height: 36px;
+}
+
+/* Chat/PDF grids collapse to a single column on the mobile stage. */
+.mobile-view .chat-layout,
+.mobile-view .pdf-reader-grid {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Adaptive navigation ------------------------------------------------ */
+.mobile-nav {
+  display: flex;
+  background: var(--bg-activity);
+  border-top: 1px solid var(--border-color);
+}
+
+.mobile-nav-tabs {
+  flex-direction: row;
+  justify-content: space-around;
+  padding: 4px max(6px, env(safe-area-inset-left)) calc(4px + env(safe-area-inset-bottom));
+}
+
+/* Tablet uses a side rail rather than a bottom bar. */
+.mobile-shell-tablet {
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.mobile-shell-tablet .mobile-topbar {
+  grid-column: 1 / -1;
+}
+
+.mobile-nav-rail {
+  flex-direction: column;
+  border-top: 0;
+  border-right: 1px solid var(--border-color);
+  padding: 8px 6px;
+  gap: 6px;
+}
+
+.mobile-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 44px;
+  min-height: 44px;
+  flex: 1 1 0;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.mobile-nav-rail .mobile-nav-item {
+  flex: 0 0 auto;
+}
+
+.mobile-nav-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.mobile-nav-item.active {
+  color: var(--text-active);
+  background: var(--accent-soft);
+}
+
+.mobile-nav-label {
+  font-size: 0.68rem;
+  line-height: 1;
+}
+
+.mobile-nav-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Unsupported-on-this-surface state --------------------------------- */
+.mobile-unsupported {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 32px 24px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.mobile-unsupported h2 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text-main);
+}
+
+.mobile-unsupported p {
+  margin: 0;
+  max-width: 34ch;
+}
+
+.mobile-unsupported-hint {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+/* Reduced-motion: the global rule above already disables transitions/animations;
+   this keeps mobile-added motion within the 200ms bound even when motion is allowed. */
+@media (prefers-reduced-motion: reduce) {
+  .mobile-nav-item {
+    transition: none !important;
+  }
+}
