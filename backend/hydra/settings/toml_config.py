@@ -64,8 +64,20 @@ def default_settings() -> dict[str, Any]:
         "ignored_paths": [".git", ".env", ".hydralab/cache", ".hydralab/temp"],
         "queue": {"max_parallel_jobs": 1, "retry_limit": 3},
     }
-    data["review_inbox"] = {"enabled_item_types": ["broken-link", "conflict", "reindex"]}
-    data["assistant"] = {"mode": "passive", "provider_routing_profile": "manual"}
+    data["review_inbox"] = {"enabled_item_types": ["broken-link", "conflict", "reindex", "memory-candidate"]}
+    data["assistant"] = {
+        "mode": "passive",
+        "default_mode": "passive",
+        "provider_routing_profile": "manual",
+        "run_budget": 60000,
+        "wall_clock_seconds": 120,
+        "max_parallel_calls": 2,
+        "browser_working_set_tokens": 8000,
+    }
+    data["memory"] = {
+        "condense_threshold_kb": 32,
+        "auto_promote_low_risk": False,
+    }
     data["providers"] = {"routing_policy": "manual", "accounts": {}}
     data["privacy"] = {
         "offline_only": False,
