@@ -139,6 +139,34 @@ def migrate_settings(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+_SECRET_KEY_NAMES = ("api_key", "token", "secret", "password", "apikey")
+_SECRET_REF_PREFIXES = ("keychain:", "env:")
+
+
+def _reject_raw_secrets(node: Any, *, path: str) -> None:
+    """Recursively reject any secret-named key whose value is a raw string.
+
+    A secret-shaped value is allowed ONLY when it is a reference (``keychain:`` or
+    ``env:``) — a per-account check, so a config that pairs one account's
+    ``secret_ref`` with another account's raw ``api_key`` is still rejected. Keys
+    literally named ``*_ref`` are treated as reference holders and skipped.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            key_l = str(key).lower()
+            is_ref_holder = key_l.endswith("_ref")
+            if (not is_ref_holder) and any(word in key_l for word in _SECRET_KEY_NAMES):
+                if isinstance(value, str) and not value.startswith(_SECRET_REF_PREFIXES):
+                    raise SettingsValidationError(
+                        f"{path}.{key} may store a secret reference only "
+                        f"(keychain:/env:), not a raw value"
+                    )
+            _reject_raw_secrets(value, path=f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            _reject_raw_secrets(item, path=f"{path}[{index}]")
+
+
 def validate_settings(data: dict[str, Any]) -> None:
     missing = [section for section in REQUIRED_SETTINGS_SECTIONS if section not in data]
     if missing:
@@ -148,10 +176,7 @@ def validate_settings(data: dict[str, Any]) -> None:
         if not isinstance(data[section], dict):
             raise SettingsValidationError(f"[{section}] must be a TOML table")
     providers = data.get("providers", {})
-    serialized = repr(providers).lower()
-    for secret_word in ("api_key", "token", "secret"):
-        if secret_word in serialized and "secret_ref" not in serialized:
-            raise SettingsValidationError("[providers] may store secret references only")
+    _reject_raw_secrets(providers, path="[providers]")
     # HL-MODE-01 — reject any Agent Access Mode value outside the canonical set.
     assistant = data.get("assistant", {})
     for key in ("mode", "default_mode"):

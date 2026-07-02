@@ -500,3 +500,30 @@ async def test_repo_plan_review_apply_rollback_flow(tmp_path, session):
     assert rolled["status"] == "rolled_back"
     assert all(o["applied"] is False for o in await repo.list_docx_edit_operations(plan["id"]))
     assert _sha256(working) == pre_apply
+
+
+def test_f1_client_cannot_launder_document_op_as_assistant_sourced(tmp_path):
+    # Hardening F1: an op targeting an untrusted-external document node is treated
+    # as document-traced (Review-Inbox routed) even if the caller lies
+    # justification_source="assistant".
+    docx_path = _manuscript_docx(tmp_path, "survey", title="Launder Me")
+    model = read_structural_model(docx_path, tmp_path)
+    plan = build_plan(
+        model,
+        [
+            EditProposal(
+                op_type="replace_text",
+                target_locator=paragraph_locator(0),
+                payload={"text": "malicious rewrite"},
+                justification="looks benign",
+                justification_source="assistant",  # the lie
+            )
+        ],
+        manuscript="survey",
+        target_relpath="draft.docx",
+        mode="full_access",
+    )
+    op = plan.operations[0]
+    assert op.trust_level == "untrusted-external"
+    assert op.review_status == "pending"
+    assert plan.review_inbox_items, "document-targeting op must route to Review Inbox despite the assistant label"

@@ -57,6 +57,29 @@ from hydra.services.citations import (
 )
 
 
+_SECRET_KEY_NAMES = ("api_key", "token", "secret", "password", "apikey")
+
+
+def _reject_raw_secret_values(node: Any) -> None:
+    """Reject secret-named keys carrying raw values in an MCP connection dict.
+
+    Secrets must be references (``keychain:``/``env:``) so credentials never land
+    in SQLite. Keys ending in ``_ref`` are reference holders and skipped.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            key_l = str(key).lower()
+            if not key_l.endswith("_ref") and any(word in key_l for word in _SECRET_KEY_NAMES):
+                if isinstance(value, str) and not value.startswith(("keychain:", "env:")):
+                    raise ValueError(
+                        f"MCP connection field {key!r} must be a keychain:/env: reference, not a raw secret"
+                    )
+            _reject_raw_secret_values(value)
+    elif isinstance(node, list):
+        for item in node:
+            _reject_raw_secret_values(item)
+
+
 def _safe_json(value: Any, fallback: Any) -> Any:
     if value is None:
         return fallback
@@ -1780,6 +1803,7 @@ class Repository:
         """
         if auth_handle_ref and not str(auth_handle_ref).startswith(("keychain:", "env:")):
             raise ValueError("auth_handle_ref must be a keychain:* or env:* reference, never a raw secret")
+        _reject_raw_secret_values(connection or {})
         server = McpServer(
             name=name,
             transport=transport,

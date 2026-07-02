@@ -153,7 +153,13 @@ def build_plan(
         before_summary = _snippet(node.text) if node else ""
         location_label = node.location_label if node else proposal.target_locator
 
-        traces_to_document = proposal.justification_source == "document"
+        # Trust is derived from BOTH the caller-declared justification source AND
+        # the reader's own trust tag on the targeted node. A client cannot launder
+        # a document-derived edit as "assistant"-sourced: any op targeting an
+        # untrusted-external document node is always treated as document-traced
+        # (routed to the Review Inbox, full-access-downgrade logged).
+        node_untrusted = node is not None and getattr(node, "trust_level", None) == TRUST_UNTRUSTED_EXTERNAL
+        traces_to_document = proposal.justification_source == "document" or node_untrusted
         trust_level = TRUST_UNTRUSTED_EXTERNAL if traces_to_document else TRUST_TRUSTED
 
         operation = PlannedOperation(

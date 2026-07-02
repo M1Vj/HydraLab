@@ -30,7 +30,7 @@ class BrowserCopilotActionRequest(BaseModel):
     mode: Literal["copilot"] = "copilot"
     task_group_id: str | None = Field(default=None, max_length=200)
     task_group_label: str = Field(default="", max_length=200)
-    user_triggered: bool = True
+    user_triggered: bool = False
 
 
 class SourceDiscoveryRequest(BaseModel):

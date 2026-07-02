@@ -144,6 +144,43 @@ def test_hl_mode_01_settings_reject_out_of_set_default_mode():
     validate_settings(data)
 
 
+def test_f3_protected_context_file_requires_approval_even_trusted_full_access():
+    # Hardening F3: a trusted, low-risk write to a protected context file must NOT
+    # auto-apply under enabled Full Access — it always requires approval.
+    for target in ("MEMORY.md", "notes/USER.md", "SOUL.md", "HYDRA.md"):
+        decision = evaluate_write(
+            WriteRequest(
+                mode="full_access",
+                action_kind="context_file_write",
+                target_ref=target,
+                risk_level="low",
+                trust_origin="user",
+                justification_trust="user",
+                full_access_enabled=True,
+            )
+        )
+        assert decision.outcome == "approval_required", target
+        assert not decision.applied
+
+
+def test_f4_settings_reject_raw_secret_even_when_another_account_uses_ref():
+    # Hardening F4: per-account validation — a raw api_key on one account is
+    # rejected even if a sibling account uses a proper secret_ref.
+    data = default_settings()
+    data["providers"]["accounts"] = {
+        "good": {"secret_ref": "keychain:hydralab/openai"},
+        "bad": {"api_key": "sk-raw-leaked-value"},
+    }
+    with pytest.raises(SettingsValidationError):
+        validate_settings(data)
+    # All-reference config validates.
+    data["providers"]["accounts"] = {
+        "good": {"secret_ref": "keychain:hydralab/openai"},
+        "also": {"api_key": "keychain:hydralab/anthropic"},
+    }
+    validate_settings(data)
+
+
 # --------------------------------------------------------------------------- MODE-02
 @pytest.mark.asyncio
 async def test_hl_mode_02_rejecting_copilot_edit_leaves_workspace_unchanged(session):

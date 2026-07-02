@@ -165,15 +165,16 @@ def evaluate_write(request: WriteRequest) -> PolicyDecision:
             review_inbox=True,
         )
 
-    # DEC-11 — a context file protected from auto-write only lands via approval.
+    # DEC-11 — a protected context file (SOUL/USER/MEMORY/HYDRA) NEVER auto-writes,
+    # regardless of provenance or mode. Untrusted provenance already returned above;
+    # this forces approval even for a trusted, low-risk write under enabled Full
+    # Access, matching the "protected files only land via approval" contract.
     if request.action_kind == "context_file_write" and _targets_protected_context_file(request):
-        if _is_untrusted(request.trust_origin) or _is_untrusted(request.justification_trust):
-            return PolicyDecision(
-                outcome=Outcome.REVIEW_INBOX.value,
-                reason="untrusted content cannot auto-write a protected context file",
-                logged=True,
-                review_inbox=True,
-            )
+        return PolicyDecision(
+            outcome=Outcome.APPROVAL_REQUIRED.value,
+            reason="protected context file requires explicit approval in every mode",
+            logged=True,
+        )
 
     # HL-MODE-05 — Full Access never auto-edits skill capability/permission/
     # privacy/consent/provider-routing settings; these downgrade to approval.
