@@ -499,6 +499,14 @@ class AutopilotRunStartRequest(BaseModel):
     inputs: list[Any] = Field(default_factory=list)
     enabled_stages: dict[str, bool] = Field(default_factory=dict)
     scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "pairwise"
+    advanced_config: dict[str, Any] | None = None
+    advanced_preset_id: str = Field(default="balanced", max_length=80)
+    advanced_config_trust_origin: str = Field(default="user", max_length=80)
+
+
+class AdvancedRunConfigValidateRequest(BaseModel):
+    preset_id: str = Field(default="balanced", max_length=80)
+    overrides: dict[str, Any] = Field(default_factory=dict)
 
 
 class AutopilotCancelRequest(BaseModel):

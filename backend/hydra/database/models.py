@@ -364,6 +364,20 @@ class AgentRunStep(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class AgentRunCandidate(SQLModel, table=True):
+    """Persisted population/candidate artifact for Phase-3 Autopilot runs."""
+
+    __tablename__ = "agent_run_candidates"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(foreign_key="agent_runs.id", index=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    candidate_id: str = Field(index=True)
+    candidate_artifact_json: str = Field(default="{}")
+    ranking_score: float = Field(default=0.0)
+    ranking_method: str = Field(default="pairwise", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class AgentApproval(SQLModel, table=True):
     """A per-item Co-pilot approval / Full-Access downgrade record (HL-MODE-02).
 

@@ -29,6 +29,8 @@ class RunConfig:
     enabled_stages: dict[StageEnum, bool]
     scoring_method: str = "pairwise"
     stage_toggles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    advanced_config: dict[str, Any] = field(default_factory=dict)
+    block_on_loop_ceiling: bool = False
 
     @classmethod
     def resolve(
@@ -39,6 +41,8 @@ class RunConfig:
         scoring_method: str = "pairwise",
         loop_count: int = 1,
         stage_toggles: dict[str, dict[str, Any]] | None = None,
+        advanced_config: dict[str, Any] | None = None,
+        block_on_loop_ceiling: bool = False,
     ) -> "RunConfig":
         if loop_count > 1:
             raise OrchestratorConfigError("loop_count > 1 is Phase-3 Autopilot scope and is rejected")
@@ -54,6 +58,8 @@ class RunConfig:
             enabled_stages=enabled,
             scoring_method=scoring_method,
             stage_toggles=dict(toggles),
+            advanced_config=dict(advanced_config or {}),
+            block_on_loop_ceiling=block_on_loop_ceiling,
         )
 
     @classmethod
@@ -153,7 +159,7 @@ class RunStateMachine:
                 await self.repository.complete_run(run_id, status=RunStatus.FAILED.value)
                 return RunExecutionResult(run_id=run_id, state="failed", completed_stages=completed)
 
-            await self._persist_result(run_id, result)
+            await self._persist_result(run_id, project_id, result)
             completed.append(stage)
 
             if self.cancel_after_stage == stage:
@@ -190,7 +196,7 @@ class RunStateMachine:
             gate_result = await self.action_gate.govern(action, apply_fn=getattr(action, "apply_fn", None))
             result.governed.append(gate_result)
 
-    async def _persist_result(self, run_id: str, result: StageResult) -> None:
+    async def _persist_result(self, run_id: str, project_id: str, result: StageResult) -> None:
         await self.repository.append_step(
             run_id,
             kind=f"stage.{result.stage.value}",
@@ -209,6 +215,39 @@ class RunStateMachine:
             run.artifacts = json.dumps(current, sort_keys=True)
             self.repository.session.add(run)
             await self.repository.session.commit()
+        if result.stage == StageEnum.COMPARE and result.payload.get("method"):
+            await self._persist_compare_audit(run_id, project_id, str(result.payload["method"]))
+            await self._persist_ranked_candidates(run_id, project_id, result)
+
+    async def _persist_compare_audit(self, run_id: str, project_id: str, method: str) -> None:
+        from hydra.autonomy.audit import AuditLedger
+
+        await AuditLedger(self.repository.session).append(
+            project_id=project_id,
+            run_id=run_id,
+            actor="orchestrator",
+            action="compare.ranking_method",
+            risk_level="low",
+            target=method,
+            approval_state="recorded",
+        )
+
+    async def _persist_ranked_candidates(self, run_id: str, project_id: str, result: StageResult) -> None:
+        from hydra.orchestrator.advanced import CandidateStore
+
+        ranking: list[dict[str, Any]] = []
+        for artifact in result.artifacts:
+            if artifact.get("kind") == "ranking":
+                ranking = list(artifact.get("ranking") or [])
+                break
+        if not ranking:
+            return
+        await CandidateStore(self.repository.session).store_ranked_candidates(
+            run_id=run_id,
+            project_id=project_id,
+            ranking_method=str(result.payload["method"]),
+            candidates=ranking,
+        )
 
     async def _budget_blocked(self, run_id: str, started: float) -> bool:
         trace = await self.repository.get_trace(run_id)
