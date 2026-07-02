@@ -20,7 +20,7 @@ from hydra.database import models  # noqa: F401
 
 
 revision: str = "202607021500"
-down_revision: Union[str, Sequence[str], None] = "202607021000"
+down_revision: Union[str, Sequence[str], None] = "202607021400"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

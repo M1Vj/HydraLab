@@ -20,7 +20,7 @@ from sqlalchemy import inspect
 
 
 revision: str = "202607021400"
-down_revision: Union[str, Sequence[str], None] = "202607021000"
+down_revision: Union[str, Sequence[str], None] = "202607021300"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
