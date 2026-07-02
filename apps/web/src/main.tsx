@@ -18,7 +18,9 @@ import {
   ListTodo,
   MessageSquareText,
   Plus,
+  RefreshCcw,
   RotateCcw,
+  Save,
   Search,
   Settings,
   SplitSquareHorizontal,
@@ -49,9 +51,10 @@ import {
 } from "./lib/hydra";
 import { Dialog, DropdownMenu, Switch, Tooltip } from "./components/ui/primitives";
 import { SettingsModule } from "./components/modules/SettingsModule";
+import { SourceDiscoveryPanel } from "./components/modules/SourcesModule";
 
 type Surface = "welcome" | "workbench";
-type PanelStateKind = "empty" | "loading" | "failure" | "permission-denied";
+type PanelStateKind = "empty" | "loading" | "partial" | "failure" | "offline-permission" | "permission-denied";
 
 const recentProjects = [
   {
@@ -325,7 +328,7 @@ function WorkbenchApp() {
       </aside>
       <main className="workspace-main">
         <div className="editor-tabs" role="tablist" aria-label="Open panels">
-          {["saved-chat", "browser", "markdown-editor", "citation-evidence", "tasks"].map((tab) => (
+          {["saved-chat", "browser", "source-discovery", "markdown-editor", "citation-evidence", "tasks"].map((tab) => (
             <button
               key={tab}
               className={`editor-tab ${activeTab === tab ? "active" : ""}`}
@@ -544,7 +547,9 @@ function PanelHeader({ title, state, onState }: { title: string; state: PanelSta
       <select value={state} onChange={(event) => onState(event.target.value as PanelStateKind)} aria-label="Panel state">
         <option value="empty">empty</option>
         <option value="loading">loading</option>
+        <option value="partial">partial</option>
         <option value="failure">failure</option>
+        <option value="offline-permission">offline-permission</option>
         <option value="permission-denied">permission-denied</option>
       </select>
     </header>
@@ -572,6 +577,7 @@ function PanelContent({
   onRestoreSource: () => void;
   onOpenReview: () => void;
 }) {
+  if (panel.id === "source-discovery") return <SourceDiscoveryPanel />;
   if (state !== "empty") return <PanelStateView panel={panel} state={state} />;
   if (panel.id === "explorer") {
     return (
@@ -596,6 +602,24 @@ function PanelStateView({ panel, state }: { panel: PanelDefinition; state: Panel
       <div className="panel-body">
         <div className="skeleton" aria-busy="true" aria-label={panel.states.loading.message} />
         <div className="skeleton short" />
+      </div>
+    );
+  }
+  if (state === "partial") {
+    return (
+      <div className="inline-state permission" role="status">
+        <strong>{panel.title} has partial results</strong>
+        <span>Some providers returned results while others errored or hit rate limits.</span>
+        <button>Review provider states</button>
+      </div>
+    );
+  }
+  if (state === "offline-permission") {
+    return (
+      <div className="inline-state permission" role="status">
+        <strong>{panel.title} is offline/cache-only</strong>
+        <span>Live provider calls are blocked, but local cached metadata may still appear.</span>
+        <button>Open Settings</button>
       </div>
     );
   }
@@ -754,6 +778,30 @@ function ObjectPanel({
           <button>Open URL</button>
           <button>Use Chrome extension</button>
           <button>Save to HydraLab</button>
+        </div>
+      </article>
+    );
+  }
+  if (panelId === "source-discovery") {
+    return (
+      <article className="object-panel">
+        <header>
+          <FileSearch size={16} />
+          <strong>Source detail</strong>
+          <span className="status-pill indexed">metadata current</span>
+        </header>
+        <div className="evidence-card">
+          <strong>Attention Is All You Need</strong>
+          <span>OpenAlex + Crossref provenance · query: Attention Is All You Need · confidence 94%</span>
+          <span>Cache age: fresh. Provider text remains untrusted-external until user-curated save.</span>
+          <div className="row-actions">
+            <button>
+              <RefreshCcw size={13} /> Refresh metadata
+            </button>
+            <button>
+              <Save size={13} /> Save to source library
+            </button>
+          </div>
         </div>
       </article>
     );

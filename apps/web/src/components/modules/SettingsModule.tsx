@@ -3,19 +3,24 @@ import { useMemo, useState } from "react";
 
 import {
   DEFAULT_BROWSER_CAPTURE_SETTINGS,
+  DEFAULT_SOURCE_DISCOVERY_SETTINGS,
   browserHistoryPermissionRequest,
   browserProviderEligibility,
   hostPermissionPromptChoices,
   nextBrowserBridgeConnection,
+  sourceDiscoveryNetworkPosture,
   type BrowserCaptureSettings,
+  type SourceDiscoverySettings,
 } from "../../lib/hydra";
 import { Switch } from "../ui/primitives";
 
 export function SettingsModule() {
   const [settings, setSettings] = useState<BrowserCaptureSettings>(DEFAULT_BROWSER_CAPTURE_SETTINGS);
+  const [discoverySettings, setDiscoverySettings] = useState<SourceDiscoverySettings>(DEFAULT_SOURCE_DISCOVERY_SETTINGS);
   const [connection, setConnection] = useState(settings.connectionStatus);
   const historyRequest = useMemo(() => browserHistoryPermissionRequest("Find prior browsing for this assistant request"), []);
   const provider = browserProviderEligibility(settings);
+  const discoveryPosture = sourceDiscoveryNetworkPosture(discoverySettings);
   const hostChoices = hostPermissionPromptChoices("openreview.net");
 
   function setFlag<K extends keyof BrowserCaptureSettings>(key: K, value: BrowserCaptureSettings[K]) {
@@ -59,6 +64,37 @@ export function SettingsModule() {
           <span>Provider eligibility</span>
           <strong>{provider.pageTextProviderEligible ? "enabled" : "off"}</strong>
         </div>
+      </section>
+
+      <section className="settings-group">
+        <header>
+          <SlidersHorizontal size={15} />
+          <strong>Source discovery</strong>
+        </header>
+        <Switch
+          checked={discoverySettings.offlineOnly}
+          onChange={(checked) => setDiscoverySettings((current) => ({ ...current, offlineOnly: checked }))}
+          label="Offline-only mode"
+        />
+        <Switch
+          checked={discoverySettings.scholarlyApisEnabled}
+          onChange={(checked) => setDiscoverySettings((current) => ({ ...current, scholarlyApisEnabled: checked }))}
+          label="Allow scholarly metadata APIs"
+        />
+        <Switch
+          checked={discoverySettings.automaticPdfDownload}
+          onChange={(checked) => setDiscoverySettings((current) => ({ ...current, automaticPdfDownload: checked }))}
+          label="Automatic open-PDF download"
+        />
+        <div className="settings-status-grid">
+          <span>Discovery posture</span>
+          <strong>{discoveryPosture.state}</strong>
+          <span>Provider calls</span>
+          <strong>{discoveryPosture.providerCallsAllowed ? "allowed" : "cache-only"}</strong>
+        </div>
+        <p className="helper-text">
+          Auto PDF mode uses allowlisted domains, the 25 MB large-file threshold, storage checks and pause/cancel controls. Paywall, CAPTCHA and credential bypass are not supported.
+        </p>
       </section>
 
       <section className="settings-group">
@@ -130,4 +166,3 @@ export function SettingsModule() {
     </div>
   );
 }
-

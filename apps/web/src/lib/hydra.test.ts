@@ -6,8 +6,11 @@ import {
   createWorkbenchProject,
   DEFAULT_PANEL_DEFINITIONS,
   DEFAULT_BROWSER_CAPTURE_SETTINGS,
+  DEFAULT_SOURCE_DISCOVERY_SETTINGS,
   browserHistoryPermissionRequest,
   browserProviderEligibility,
+  cacheAgeLabel,
+  discoveryResultFields,
   folderIndexStatus,
   groupTasksByColumn,
   hostPermissionPromptChoices,
@@ -16,7 +19,10 @@ import {
   openProjectInWindow,
   restoreSession,
   resolveInAppBrowserSurface,
+  resolveDiscoveryPanelState,
   shouldShowMainCaptureIndicator,
+  sourceDiscoveryNetworkPosture,
+  pdfDownloadCopy,
   softDeleteObject,
   sourceLabel,
   statusCopy,
@@ -241,5 +247,61 @@ describe("Hydra UI helpers", () => {
     expect(second.nextDelayMs).toBeGreaterThan(first.nextDelayMs);
     expect(capped.nextDelayMs).toBeLessThanOrEqual(10000);
     expect(nextBrowserBridgeConnection(capped, "max-attempts")).toMatchObject({ status: "backend-stopped" });
+  });
+
+  test("@HL-DISC-05 renders ranked source rows with required metadata fields", () => {
+    const fields = discoveryResultFields({
+      id: "disc_attention",
+      title: "Attention Is All You Need",
+      authors: ["Ashish Vaswani", "Noam Shazeer"],
+      year: 2017,
+      venue: "NeurIPS",
+      doi: "10.48550/arXiv.1706.03762",
+      pdfAvailable: true,
+      provider: "openalex",
+      expectedSizeBytes: 4 * 1024 * 1024,
+      confidence: 0.94,
+    });
+
+    expect(fields).toEqual({
+      title: "Attention Is All You Need",
+      authors: "Ashish Vaswani, Noam Shazeer",
+      year: "2017",
+      venue: "NeurIPS",
+      doi: "10.48550/arXiv.1706.03762",
+      pdf: "PDF available",
+      provider: "openalex",
+      expectedSize: "4 MB",
+    });
+  });
+
+  test("@HL-DISC-11 resolves empty, loading, partial, failure and offline discovery states", () => {
+    expect(resolveDiscoveryPanelState({ query: "", providerStatuses: [], results: [], offlineOnly: false, scholarlyApisEnabled: true })).toBe("empty");
+    expect(resolveDiscoveryPanelState({ query: "attention", providerStatuses: [{ provider: "openalex", state: "loading" }], results: [], offlineOnly: false, scholarlyApisEnabled: true })).toBe("loading");
+    expect(resolveDiscoveryPanelState({ query: "attention", providerStatuses: [{ provider: "crossref", state: "ready" }, { provider: "semantic_scholar", state: "error" }], results: [{ id: "1", title: "A", authors: [], venue: "", pdfAvailable: false, provider: "crossref", confidence: 0.7 }], offlineOnly: false, scholarlyApisEnabled: true })).toBe("partial");
+    expect(resolveDiscoveryPanelState({ query: "attention", providerStatuses: [{ provider: "openalex", state: "error" }], results: [], offlineOnly: false, scholarlyApisEnabled: true })).toBe("failure");
+    expect(resolveDiscoveryPanelState({ query: "attention", providerStatuses: [], results: [], offlineOnly: true, scholarlyApisEnabled: false })).toBe("offline-permission");
+  });
+
+  test("@HL-BROWSE-04 offline-only has a separate scholarly API air-gap toggle", () => {
+    expect(sourceDiscoveryNetworkPosture(DEFAULT_SOURCE_DISCOVERY_SETTINGS)).toMatchObject({ state: "online", providerCallsAllowed: true });
+    expect(sourceDiscoveryNetworkPosture({ ...DEFAULT_SOURCE_DISCOVERY_SETTINGS, offlineOnly: true })).toMatchObject({
+      state: "offline-provider-blocked",
+      providerCallsAllowed: true,
+    });
+    expect(sourceDiscoveryNetworkPosture({ ...DEFAULT_SOURCE_DISCOVERY_SETTINGS, offlineOnly: true, scholarlyApisEnabled: false })).toMatchObject({
+      state: "air-gapped",
+      providerCallsAllowed: false,
+    });
+  });
+
+  test("@HL-DISC-08 @HL-DISC-09 shows cache age and explicit PDF policy copy", () => {
+    expect(cacheAgeLabel(90)).toBe("1m old");
+    expect(pdfDownloadCopy({ pdfAvailable: true, automaticPdfDownload: false, thresholdBytes: 25 * 1024 * 1024 })).toBe(
+      "PDF waits for explicit save/download",
+    );
+    expect(pdfDownloadCopy({ pdfAvailable: true, automaticPdfDownload: true, expectedSizeBytes: 30 * 1024 * 1024, thresholdBytes: 25 * 1024 * 1024 })).toBe(
+      "PDF over size limit; manual download only",
+    );
   });
 });

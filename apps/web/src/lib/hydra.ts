@@ -152,6 +152,44 @@ export type BrowserBridgeConnection = {
   rereadPortFile?: boolean;
 };
 
+export type DiscoveryProviderStatus = {
+  provider: string;
+  state: "idle" | "loading" | "ready" | "cache-hit" | "error" | "provider rate-limited" | "offline";
+  count?: number;
+  cacheAgeSeconds?: number;
+};
+
+export type DiscoveryResultRow = {
+  id: string;
+  title: string;
+  authors: string[];
+  year?: number | null;
+  venue: string;
+  doi?: string | null;
+  pdfAvailable: boolean;
+  provider: string;
+  expectedSizeBytes?: number | null;
+  confidence: number;
+  duplicateState?: "unique" | "exact-merged" | "fuzzy-review" | "possible-duplicate";
+  cacheAgeSeconds?: number;
+};
+
+export type SourceDiscoverySettings = {
+  offlineOnly: boolean;
+  scholarlyApisEnabled: boolean;
+  automaticPdfDownload: boolean;
+  allowedPdfDomains: string[];
+  largeFileThresholdBytes: number;
+};
+
+export const DEFAULT_SOURCE_DISCOVERY_SETTINGS: SourceDiscoverySettings = {
+  offlineOnly: false,
+  scholarlyApisEnabled: true,
+  automaticPdfDownload: false,
+  allowedPdfDomains: ["arxiv.org", "openalex.org", "core.ac.uk"],
+  largeFileThresholdBytes: 25 * 1024 * 1024,
+};
+
 export type WorkbenchProject = {
   id: string;
   name: string;
@@ -331,6 +369,91 @@ export function nextBrowserBridgeConnection(current: BrowserBridgeConnection, ev
     nextDelayMs: Math.min(10000, 250 * 2 ** (attempt - 1)),
     rereadPortFile: true,
   };
+}
+
+export function resolveDiscoveryPanelState(input: {
+  query: string;
+  providerStatuses: DiscoveryProviderStatus[];
+  results: DiscoveryResultRow[];
+  offlineOnly: boolean;
+  scholarlyApisEnabled: boolean;
+}): "empty" | "loading" | "partial" | "failure" | "offline-permission" | "ready" {
+  if (!input.query.trim()) return "empty";
+  if (input.offlineOnly || !input.scholarlyApisEnabled) return "offline-permission";
+  if (input.providerStatuses.some((status) => status.state === "loading")) return "loading";
+  const failures = input.providerStatuses.filter((status) => ["error", "provider rate-limited"].includes(status.state));
+  if (failures.length > 0 && input.results.length > 0) return "partial";
+  if (failures.length > 0 && failures.length === input.providerStatuses.length) return "failure";
+  return input.results.length > 0 ? "ready" : "empty";
+}
+
+export function discoveryResultFields(row: DiscoveryResultRow) {
+  return {
+    title: row.title,
+    authors: row.authors.join(", ") || "Unknown authors",
+    year: row.year ? String(row.year) : "n.d.",
+    venue: row.venue || "Unknown venue",
+    doi: row.doi || "No DOI",
+    pdf: row.pdfAvailable ? "PDF available" : "No open PDF",
+    provider: row.provider,
+    expectedSize: row.expectedSizeBytes ? formatBytes(row.expectedSizeBytes) : "Size unknown",
+  };
+}
+
+export function cacheAgeLabel(seconds?: number): string {
+  if (seconds === undefined) return "fresh";
+  if (seconds < 60) return `${seconds}s old`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m old`;
+  return `${Math.floor(seconds / 3600)}h old`;
+}
+
+export function sourceDiscoveryNetworkPosture(settings: SourceDiscoverySettings) {
+  if (settings.offlineOnly && !settings.scholarlyApisEnabled) {
+    return {
+      state: "air-gapped" as const,
+      providerCallsAllowed: false,
+      message: "Offline-only and scholarly APIs are both disabled.",
+    };
+  }
+  if (settings.offlineOnly) {
+    return {
+      state: "offline-provider-blocked" as const,
+      providerCallsAllowed: true,
+      message: "Model-provider sends are blocked; scholarly metadata APIs remain separately allowed.",
+    };
+  }
+  if (!settings.scholarlyApisEnabled) {
+    return {
+      state: "metadata-apis-disabled" as const,
+      providerCallsAllowed: false,
+      message: "Scholarly metadata APIs are disabled; cache search only.",
+    };
+  }
+  return {
+    state: "online" as const,
+    providerCallsAllowed: true,
+    message: "Scholarly metadata APIs may be queried under rate limits.",
+  };
+}
+
+export function pdfDownloadCopy(input: {
+  pdfAvailable: boolean;
+  expectedSizeBytes?: number | null;
+  automaticPdfDownload: boolean;
+  thresholdBytes: number;
+}) {
+  if (!input.pdfAvailable) return "No open-access PDF reported";
+  if (!input.automaticPdfDownload) return "PDF waits for explicit save/download";
+  if (input.expectedSizeBytes && input.expectedSizeBytes > input.thresholdBytes) {
+    return "PDF over size limit; manual download only";
+  }
+  return "PDF can auto-download from allowed domains";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
 }
 
 export function buildCommandPaletteResults(commands: Command[], objects: QuickOpenObject[], query: string) {
