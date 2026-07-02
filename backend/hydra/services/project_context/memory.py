@@ -367,7 +367,7 @@ class ContextFileMemory:
         result = []
         for row in rows:
             if project_id and row.project_id not in (None, project_id) and row.file != PROJECT_CONTEXT_FILE:
-                pass
+                continue  # row belongs to a different project — never leak it across projects
             result.append(
                 {
                     "id": row.id,

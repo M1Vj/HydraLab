@@ -25,10 +25,32 @@ from typing import Any
 from .adapters import ConverterAdapter, ConverterAvailability, ImportedDocx, default_adapters
 from .security import DocxPackageError
 
+
+class DocxPathError(ValueError):
+    """Raised when a manuscript/source/output name would escape its sandbox."""
+
+
+def _resolve_within(base: Path, *parts: str) -> Path:
+    """Resolve ``base/parts`` and guarantee the result stays inside ``base``.
+
+    Attacker-controlled manuscript/source/output names arrive over HTTP; an
+    absolute segment or ``..`` traversal must never read or write outside the
+    permitted directory (HL-WRITE-20 path containment).
+    """
+    base_resolved = base.resolve()
+    candidate = (base_resolved / Path(*parts)).resolve()
+    if not candidate.is_relative_to(base_resolved):
+        raise DocxPathError(f"path escapes permitted directory: {'/'.join(str(p) for p in parts)}")
+    return candidate
+
 # Raw-secret shapes redacted from any exported manuscript (reuse of the hardened
 # export secret-scrub posture — no secrets in output).
 _SECRET_PATTERNS = [
-    re.compile(r"\b(sk|ai|xoxb|xoxp)-[A-Za-z0-9_-]{8,}\b"),
+    # No bare ``ai-`` shape: it false-matches ordinary prose ("ai-generated",
+    # "ai-assisted") and would corrupt an exported manuscript in an AI-research
+    # app. Matches the hardened export engine in services/export/bundle.py.
+    re.compile(r"\b(sk|rk)-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\bxox[bpars]-[A-Za-z0-9-]{10,}"),
     re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\b(AKIA|ASIA)[A-Z0-9]{12,}\b"),
@@ -134,7 +156,10 @@ class DocxService:
             return ExportResult(status="unavailable", converter=availability, error_detail=availability.setup_error)
 
         project_root = Path(project_root)
-        source_path = project_root / "writing" / "manuscripts" / manuscript / source_relpath
+        try:
+            source_path = _resolve_within(project_root / "writing" / "manuscripts", manuscript, source_relpath)
+        except DocxPathError as exc:
+            return ExportResult(status="failed", converter=availability, error_detail=str(exc))
         if not source_path.exists():
             return ExportResult(status="failed", converter=availability, error_detail=f"source not found: {source_relpath}")
 
@@ -142,12 +167,17 @@ class DocxService:
         if bibliography:
             text = text.rstrip() + "\n\n# References\n\n" + "\n".join(bibliography) + "\n"
 
-        stem = output_name or (Path(source_relpath).stem + ".docx")
+        stem = Path(output_name).name if output_name else (Path(source_relpath).name and Path(source_relpath).stem + ".docx")
+        if not stem or stem in {".", ".."}:
+            return ExportResult(status="failed", converter=availability, error_detail="invalid output name")
         if not stem.endswith(".docx"):
             stem += ".docx"
-        out_dir = project_root / "outputs" / "manuscripts" / manuscript
+        try:
+            final_path = _resolve_within(project_root / "outputs" / "manuscripts", manuscript, stem)
+        except DocxPathError as exc:
+            return ExportResult(status="failed", converter=availability, error_detail=str(exc))
+        out_dir = final_path.parent
         out_dir.mkdir(parents=True, exist_ok=True)
-        final_path = out_dir / stem
 
         tmp_fd = tempfile.NamedTemporaryFile(prefix="hydralab-export-", suffix=".docx", delete=False)
         tmp_path = Path(tmp_fd.name)

@@ -289,6 +289,12 @@ def _classify(*, policy: SandboxPolicy, timed_out: bool, returncode: Optional[in
             return "killed:cpu"
         if sig in (signal.SIGKILL, getattr(signal, "SIGSEGV", -1)):
             return "killed:memory"
+    # A clean exit is a success regardless of stderr contents: the sandbox-kill
+    # heuristics below scan stderr substrings ("permission denied", "sandbox", …)
+    # which legitimately appear in a benign exit-0 job's diagnostic output. Only
+    # a non-zero / signalled exit may be classified as a kill.
+    if returncode == 0:
+        return "succeeded"
     low = stderr.lower()
     if "memoryerror" in low:
         return "killed:memory"

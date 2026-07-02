@@ -112,7 +112,7 @@ class DoclingAdapter:
         raw = path.read_text(encoding="utf-8", errors="ignore")
         if suffix in {".html", ".htm"}:
             warnings.append("html active content ignored")
-            raw = re.sub(r"(?is)<(script|style).*?</\\1>", "", raw)
+            raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)
             raw = re.sub(r"(?s)<[^>]+>", " ", raw)
         return raw.strip(), {"page_count": 1, "source_format": suffix.lstrip(".") or "text"}, warnings
 

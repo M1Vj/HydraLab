@@ -51,7 +51,9 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"),
     re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
     re.compile(r"\b(sk|rk)[-_][A-Za-z0-9_-]{8,}"),
-    re.compile(r"\b(ai|xoxb|xoxp)-[A-Za-z0-9_-]{8,}"),
+    # NOTE: no bare ``ai-`` shape — it false-matches ordinary prose ("ai-generated",
+    # "ai-assisted") and would corrupt/block manuscripts in an AI-research app.
+    re.compile(r"\bxox[bpars]-[A-Za-z0-9-]{10,}"),
     re.compile(r"\bghp_[A-Za-z0-9]{20,}"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"\bhf_[A-Za-z0-9]{16,}"),

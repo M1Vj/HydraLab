@@ -288,8 +288,12 @@ class SelfEvolutionService:
         return row
 
     def _write_target(self, row: SelfEvolutionChange) -> None:
-        target = (self.project_root / row.target_path).resolve()
-        if not str(target).startswith(str(self.project_root)):
+        root = self.project_root.resolve()
+        target = (root / row.target_path).resolve()
+        # is_relative_to (not str.startswith) so a sibling dir sharing the root's
+        # name prefix (e.g. ``../Hydra-evil/payload.py``) cannot escape — this is
+        # the last containment line before an autonomous code write hits disk.
+        if target != root and not target.is_relative_to(root):
             raise SelfEvolutionError("target path escapes the project root; refusing to write")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(row.new_content, encoding="utf-8")

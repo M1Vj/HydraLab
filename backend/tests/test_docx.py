@@ -191,6 +191,73 @@ def test_scrub_secrets_redacts_known_shapes():
     assert "AKIA" not in scrub_secrets("AKIA" + "A" * 16)
 
 
+def test_scrub_secrets_preserves_ai_research_prose():
+    # The bare ``ai-`` shape was removed: an AI-research manuscript must keep its
+    # ordinary hyphenated prose intact instead of being corrupted to [redacted].
+    prose = "This AI-generated summary of the ai-assisted pipeline is human-reviewed."
+    assert scrub_secrets(prose) == prose
+
+
+def test_export_preserves_ai_prose_in_output(tmp_path):
+    manuscript_dir = tmp_path / "writing" / "manuscripts" / "ai-paper"
+    manuscript_dir.mkdir(parents=True)
+    (manuscript_dir / "main.md").write_text(
+        "# Draft\n\nAn ai-generated draft with ai-assisted edits.\n", encoding="utf-8"
+    )
+
+    result = DocxService().export_manuscript(tmp_path, "ai-paper", "main.md", _fmt())
+    text = "\n".join(p.text for p in docx.Document(result.output_path).paragraphs)
+    assert "ai-generated" in text
+    assert "ai-assisted" in text
+    assert "redacted" not in text
+
+
+# --- HL-WRITE-20 path containment (attacker-controlled names) ----------------
+
+
+def test_export_rejects_source_relpath_traversal(tmp_path):
+    manuscript_dir = tmp_path / "writing" / "manuscripts" / "m"
+    manuscript_dir.mkdir(parents=True)
+    (manuscript_dir / "main.md").write_text("# Title\n", encoding="utf-8")
+    secret = tmp_path.parent / "traversal-secret.txt"
+    secret.write_text("TOP-SECRET", encoding="utf-8")
+
+    result = DocxService().export_manuscript(
+        tmp_path, "m", "../../../traversal-secret.txt", _fmt()
+    )
+
+    assert result.status == "failed"
+    assert "escape" in result.error_detail.lower()
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_export_rejects_manuscript_name_traversal(tmp_path):
+    (tmp_path / "writing" / "manuscripts").mkdir(parents=True)
+    result = DocxService().export_manuscript(
+        tmp_path, "../../../etc", "main.md", _fmt()
+    )
+    assert result.status == "failed"
+    assert "escape" in result.error_detail.lower()
+
+
+def test_export_output_name_cannot_escape_outputs_dir(tmp_path):
+    manuscript_dir = tmp_path / "writing" / "manuscripts" / "m"
+    manuscript_dir.mkdir(parents=True)
+    (manuscript_dir / "main.md").write_text("# Title\n\nBody\n", encoding="utf-8")
+    escape_target = tmp_path.parent / "evil.docx"
+    escape_target.unlink(missing_ok=True)
+
+    result = DocxService().export_manuscript(
+        tmp_path, "m", "main.md", _fmt(), output_name="../../../../evil.docx"
+    )
+
+    # The directory components are stripped: output lands safely inside outputs/.
+    assert result.status == "success"
+    out_path = Path(result.output_path)
+    assert out_path.parent == tmp_path / "outputs" / "manuscripts" / "m"
+    assert not escape_target.exists()
+
+
 # --- HL-EXPORT-10 -----------------------------------------------------------
 
 
