@@ -90,6 +90,21 @@ def test_hl_core_08_dead_pid_lock_is_reclaimed(tmp_path):
     runtime.release()
 
 
+def test_hl_core_08_failed_contender_release_does_not_remove_owner_lock(tmp_path):
+    owner = BackendRuntime(app_data_root=tmp_path, port=8765)
+    assert owner.acquire().acquired is True
+
+    contender = BackendRuntime(app_data_root=tmp_path, port=8765)
+    assert contender.acquire().acquired is False
+    contender.release()
+
+    assert owner.lock_path.exists()
+    still_blocked = BackendRuntime(app_data_root=tmp_path, port=8765).acquire()
+    assert still_blocked.acquired is False
+
+    owner.release()
+
+
 def test_hl_core_08_port_selection_falls_back_when_default_is_bound():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
         occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

@@ -113,13 +113,14 @@ class BackendRuntime:
         for path in tuple(self._port_files):
             if path.exists():
                 path.unlink()
-        if self._lock_file is not None:
+        held_lock = self._lock_file is not None
+        if held_lock:
             try:
                 fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
             finally:
                 self._lock_file.close()
                 self._lock_file = None
-        if self.lock_path.exists():
+        if held_lock and self.lock_path.exists():
             self.lock_path.unlink()
 
     def _read_lock(self) -> dict | None:
