@@ -13,6 +13,7 @@ CURRENT_SETTINGS_VERSION = 1
 HYDRALAB_VERSION = "0.1.0"
 # Exactly three canonical Agent Access Mode ids (DEC-5). No fourth peer mode.
 VALID_AGENT_ACCESS_MODES = ("passive", "copilot", "full_access")
+VALID_UPDATE_CHANNELS = ("stable", "preview", "dev")
 REQUIRED_SETTINGS_SECTIONS = [
     "schema",
     "general",
@@ -28,6 +29,7 @@ REQUIRED_SETTINGS_SECTIONS = [
     "citations",
     "writing",
     "git",
+    "updater",
     "exports",
     "privacy",
     "diagnostics",
@@ -88,6 +90,7 @@ def default_settings() -> dict[str, Any]:
         "auto_promote_low_risk": False,
     }
     data["providers"] = {"routing_policy": "manual", "accounts": {}}
+    data["updater"] = {"channel": "stable", "auto_check_enabled": True}
     data["privacy"] = {
         "offline_only": False,
         "scholarly_apis_enabled": True,
@@ -186,3 +189,11 @@ def validate_settings(data: dict[str, Any]) -> None:
             raise SettingsValidationError(
                 f"[assistant].{key} must be one of {allowed}; got {value!r}"
             )
+    updater = data.get("updater", {})
+    channel = updater.get("channel")
+    if channel is not None and str(channel) not in VALID_UPDATE_CHANNELS:
+        allowed = ", ".join(VALID_UPDATE_CHANNELS)
+        raise SettingsValidationError(f"[updater].channel must be one of {allowed}; got {channel!r}")
+    auto_check = updater.get("auto_check_enabled")
+    if auto_check is not None and not isinstance(auto_check, bool):
+        raise SettingsValidationError("[updater].auto_check_enabled must be a boolean")
