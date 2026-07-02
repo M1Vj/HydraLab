@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { ApiClient } from "../../lib/api";
 import {
   CANONICAL_STAGE_IDS,
+  buildLiteratureReviewPayload,
   buildStartRunPayload,
   fetchOrchestratorStages,
+  startLiteratureReviewRun,
   startOrchestratorRun,
   summarizeRunState,
   toggleStage,
@@ -84,6 +86,54 @@ describe("agent runs controller", () => {
 
     expect(captured.path).toBe("/api/orchestrator/runs");
     expect(captured.body).toEqual(buildStartRunPayload("default", { compare: false }));
+  });
+
+  test("buildLiteratureReviewPayload includes the bounded recipe input contract", () => {
+    const payload = buildLiteratureReviewPayload("default", {
+      question: " How does retrieval preserve provenance? ",
+      sourceScope: { kind: "all-project" },
+      depth: "standard",
+      semanticSearch: true,
+    });
+
+    expect(payload).toEqual({
+      project_id: "default",
+      question: "How does retrieval preserve provenance?",
+      source_scope: { kind: "all-project" },
+      depth: "standard",
+      semantic_search: true,
+    });
+    expect(JSON.stringify(payload)).not.toContain("loop_count");
+    expect(JSON.stringify(payload)).not.toContain("stop_condition");
+  });
+
+  test("startLiteratureReviewRun posts to the literature recipe endpoint", async () => {
+    const captured: { path: string; body: unknown } = { path: "", body: null };
+    const client = fakeClient((path, body) => {
+      captured.path = path;
+      captured.body = body;
+      return {
+        run: { id: "run-lit", status: "blocked", state: "awaiting_approval", project_id: "default", mode: "copilot", paused: false },
+        trace: { run_id: "run-lit", steps: [] },
+        artifacts: [],
+      };
+    });
+
+    await startLiteratureReviewRun("default", {
+      question: "What gaps remain?",
+      sourceScope: { kind: "source-ids", source_ids: ["src_1"] },
+      depth: "quick",
+      semanticSearch: false,
+    }, client);
+
+    expect(captured.path).toBe("/api/recipes/literature-review/runs");
+    expect(captured.body).toEqual({
+      project_id: "default",
+      question: "What gaps remain?",
+      source_scope: { kind: "source-ids", source_ids: ["src_1"] },
+      depth: "quick",
+      semantic_search: false,
+    });
   });
 
   test("summarizeRunState surfaces budget and offline stops", () => {
