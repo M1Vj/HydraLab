@@ -90,6 +90,8 @@ from hydra.schemas import (
     OrchestratorRunStartRequest,
     LiteratureReviewRunStartRequest,
     LiteratureReviewSaveRequestModel,
+    IdeaRunStartRequest,
+    IdeaPromoteRequest,
     ContextFileSaveRequest,
     MemoryCandidateRequest,
 )
@@ -184,6 +186,14 @@ from hydra.recipes.literature_review import (
 )
 from hydra.recipes.paper_critique import PAPER_CRITIQUE_RECIPE_ID, paper_critique_recipe, run_paper_critique_recipe
 from hydra.recipes.related_work import RELATED_WORK_RECIPE_ID, related_work_recipe, run_related_work_recipe
+from hydra.recipes.idea_generation import (
+    DEFAULT_STAGE_TOGGLES as IDEA_DEFAULT_STAGE_TOGGLES,
+    IDEA_SLASH_COMMANDS,
+    IdeaPromotionService,
+    IdeaRunInput,
+    run_idea_recipe,
+)
+from hydra.database.models import IdeaCandidate as IdeaCandidateModel
 from hydra.services.project_context import (
     ContextFileMemory,
     ensure_hydra_md,
@@ -1021,6 +1031,125 @@ def create_app() -> FastAPI:
             }
         result = await service.resolve(approval_id, decision=request.decision)
         return {"applied": result.applied, "status": result.status, "reason": result.reason}
+
+    # ------------------------------------------- idea recipe (02-06, HL-ASSIST-*)
+    def _idea_candidate_public(candidate: IdeaCandidateModel) -> dict[str, object]:
+        return {
+            "id": candidate.id,
+            "run_id": candidate.run_id,
+            "title": candidate.title,
+            "short_hypothesis": candidate.short_hypothesis,
+            "research_question": candidate.research_question,
+            "motivation": candidate.motivation,
+            "method_sketch": candidate.method_sketch,
+            "expected_contribution": candidate.expected_contribution,
+            "required_sources": json.loads(candidate.required_sources or "[]"),
+            "evidence_links": json.loads(candidate.evidence_links or "[]"),
+            "novelty_claim": candidate.novelty_claim,
+            "feasibility_notes": candidate.feasibility_notes,
+            "risks": candidate.risks,
+            "estimated_effort": candidate.estimated_effort,
+            "generated_by_stage": candidate.generated_by_stage,
+            "parent_candidate_id": candidate.parent_candidate_id,
+            "status": candidate.status,
+            "critique": json.loads(candidate.critique or "{}"),
+            "rubric_results": json.loads(candidate.rubric_results or "[]"),
+            "rank": candidate.rank,
+            "trust_origin": candidate.trust_origin,
+        }
+
+    @app.get("/api/recipes/idea/commands")
+    async def list_idea_commands() -> dict[str, object]:
+        return {"commands": list(IDEA_SLASH_COMMANDS), "default_stages": dict(IDEA_DEFAULT_STAGE_TOGGLES)}
+
+    @app.post("/api/recipes/idea/runs")
+    async def start_idea_run(
+        request: IdeaRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        result = await run_idea_recipe(
+            session,
+            project_id=request.project_id,
+            run_input=IdeaRunInput(
+                topic=request.topic,
+                source_scope=request.source_scope,
+                constraints=request.constraints,
+                novelty_target=request.novelty_target,
+            ),
+            mode=policy.default_mode or privacy["default_mode"],
+            stage_toggles=request.enabled_stages or None,
+            offline_only=bool(privacy["offline_only"]),
+            g3_enabled=bool(privacy["g3_enabled"]),
+            budget=AgentRunBudget(
+                run_budget_tokens=int(privacy["run_budget"]),
+                wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+            ),
+            scoring_method=request.scoring_method,
+        )
+        return await _idea_run_payload(session, result.run_id, state=result.state)
+
+    async def _idea_run_payload(session: AsyncSession, run_id: str, *, state: str | None = None) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="idea run not found")
+        trace = await RunRepository(session).get_trace(run_id)
+        candidates = (
+            await session.exec(
+                select(IdeaCandidateModel).where(IdeaCandidateModel.run_id == run_id)
+            )
+        ).all()
+        return {
+            "run": {
+                "id": run.id,
+                "project_id": run.project_id,
+                "mode": run.mode,
+                "status": run.status,
+                "state": state or run.status,
+                "paused": bool(run.paused),
+                "recipe": run.recipe,
+                "inputs": json.loads(run.inputs_ref or "[]"),
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads(run.artifacts or "[]"),
+            "candidates": [_idea_candidate_public(c) for c in candidates],
+        }
+
+    @app.get("/api/recipes/idea/runs/{run_id}")
+    async def get_idea_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return await _idea_run_payload(session, run_id)
+
+    @app.post("/api/recipes/idea/promote")
+    async def promote_idea_candidate(
+        request: IdeaPromoteRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        try:
+            return await IdeaPromotionService(session).propose(
+                candidate_id=request.candidate_id,
+                target_kind=request.target_kind,
+                project_id=request.project_id,
+                mode=policy.default_mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/recipes/idea/promotions/{review_item_id}/resolve")
+    async def resolve_idea_promotion(
+        review_item_id: str,
+        request: ApprovalResolveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        service = IdeaPromotionService(session)
+        decision = str(request.decision or "").strip().lower()
+        try:
+            if decision in {"approve", "approved", "accept", "accepted"}:
+                return await service.approve(review_item_id)
+            return await service.reject(review_item_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # ----------------------------------------------------------- MCP (02-02)
     def _mcp_transport_for(server: dict[str, Any]):

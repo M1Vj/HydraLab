@@ -1648,3 +1648,197 @@ kbd {
 .settings-hint {
   color: var(--text-muted);
 }
+
+/* Idea Board (branch 02-06) */
+.idea-board-panel {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding-bottom: 12px;
+}
+
+.idea-board-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.idea-board-header h2 {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.idea-board-header p,
+.idea-board-muted {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.idea-board-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  padding: 0 12px;
+}
+
+.idea-board-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.idea-board-form input,
+.idea-board-form select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--surface, transparent);
+  color: inherit;
+}
+
+.idea-stage-toggle-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 12px;
+}
+
+.idea-stage-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  text-transform: capitalize;
+}
+
+.idea-stage-toggle small {
+  color: var(--text-muted);
+}
+
+.idea-board-prefix {
+  margin: 0;
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.idea-run-stream,
+.idea-candidate-list {
+  padding: 0 12px;
+}
+
+.idea-run-stream ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.idea-trace-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  text-transform: capitalize;
+}
+
+.idea-trace-row.failed small {
+  color: var(--danger, #e5484d);
+}
+
+.idea-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.idea-candidate-card {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.idea-candidate-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.idea-candidate-card h4 {
+  margin: 0;
+  font-size: 0.9rem;
+  flex: 1;
+}
+
+.idea-rank {
+  font-weight: 700;
+  color: var(--accent, #5b8def);
+}
+
+.idea-status {
+  font-size: 0.72rem;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  text-transform: capitalize;
+}
+
+.idea-evidence {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.76rem;
+}
+
+.idea-rubric-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.idea-rubric-table th,
+.idea-rubric-table td {
+  border-bottom: 1px solid var(--border-color);
+  padding: 3px 6px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.idea-candidate-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.idea-candidate-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.78rem;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}

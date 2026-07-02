@@ -13,6 +13,7 @@ import { ExplorerPanel } from "./panels/ExplorerPanel";
 import { SourceDiscoveryPanel } from "./panels/SourceDiscoveryPanel";
 import { ResearchChatPanel } from "./panels/ResearchChatPanel";
 import { AgentRunsPanel } from "./panels/AgentRunsPanel";
+import { IdeaBoardPanel } from "./panels/IdeaBoardPanel";
 import { MarkdownEditorPanel } from "./panels/MarkdownEditorPanel";
 import { WritingPanel } from "./panels/WritingPanel";
 import { TasksPanel } from "./panels/TasksPanel";
@@ -62,6 +63,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         git: GitPanel,
         "research-chat": ResearchChatPanel,
         "agent-runs": AgentRunsPanel,
+        "idea-board": IdeaBoardPanel,
         "markdown-editor": MarkdownEditorPanel,
         writing: WritingPanel,
         "pdf-reader": PdfReaderPanel,

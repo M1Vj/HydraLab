@@ -455,6 +455,67 @@ export type OrchestratorRunResponse = AgentRunTrace & {
   artifacts: AgentRunArtifact[];
 };
 
+export type IdeaRubricResult = {
+  criterion: string;
+  value: number;
+  rationale: string;
+  stage_run_id: string;
+  source_refs: string[];
+};
+
+export type IdeaEvidenceLink = {
+  source_id: string;
+  evidence_id?: string;
+  kind?: string;
+};
+
+export type IdeaCandidate = {
+  id: string;
+  run_id: string;
+  title: string;
+  short_hypothesis: string;
+  research_question: string;
+  motivation: string;
+  method_sketch: string;
+  expected_contribution: string;
+  required_sources: string[];
+  evidence_links: IdeaEvidenceLink[];
+  novelty_claim: string;
+  feasibility_notes: string;
+  risks: string;
+  estimated_effort: string;
+  generated_by_stage: string;
+  parent_candidate_id?: string | null;
+  status: string;
+  critique: Record<string, string[]>;
+  rubric_results: IdeaRubricResult[];
+  rank?: number | null;
+  trust_origin: string;
+};
+
+export type IdeaRunResponse = {
+  run: {
+    id: string;
+    project_id: string;
+    mode: string;
+    status: string;
+    state?: string;
+    paused: boolean;
+    recipe?: string;
+    inputs?: Array<Record<string, string>>;
+  };
+  trace: { run_id: string; steps: AgentTraceStep[] };
+  artifacts: AgentRunArtifact[];
+  candidates: IdeaCandidate[];
+};
+
+export type IdeaPromotionResponse = {
+  review_item_id?: string | null;
+  status: string;
+  created_target_id?: string | null;
+  created_target_kind?: string;
+};
+
 export type ContextFileInfo = {
   name: string;
   path: string;
