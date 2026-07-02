@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hydra.app import create_app
-from hydra.research import normalize_arxiv_entry, normalize_openalex_work, normalize_unpaywall_work
+from hydra.research import _safe_parse_xml, normalize_arxiv_entry, normalize_openalex_work, normalize_unpaywall_work
 from hydra.settings.consent import ConsentGates
 from hydra.settings.indexing import resolve_indexing_policy
 from hydra.settings.secrets import InMemorySecretStore, ProviderSecretService
@@ -51,6 +51,25 @@ def test_normalizes_openalex_arxiv_and_unpaywall_sources():
     assert arxiv["kind"] == "preprint"
     assert unpaywall["id"] == "unpaywall_10_1038_example"
     assert unpaywall["url"] == "https://example.test/paper.pdf"
+
+
+def test_safe_parse_xml_rejects_entity_bomb_and_oversized_but_parses_atom():
+    billion_laughs = (
+        '<?xml version="1.0"?>\n'
+        '<!DOCTYPE lolz [<!ENTITY lol "lol">'
+        '<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">]>'
+        "<feed>&lol2;</feed>"
+    )
+    with pytest.raises(ValueError):
+        _safe_parse_xml(billion_laughs)
+
+    with pytest.raises(ValueError):
+        _safe_parse_xml("<feed>" + ("a" * 5_000_001) + "</feed>")
+
+    root = _safe_parse_xml(
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>ok</title></entry></feed>'
+    )
+    assert root.tag.endswith("feed")
 
 
 def test_evidence_records_claim_support_and_review_state(tmp_path, monkeypatch):
