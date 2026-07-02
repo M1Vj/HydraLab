@@ -41,6 +41,8 @@ This register is the operational home of the spec Section 37 dependency licensin
 | GROBID | Apache-2.0 | none | optional-non-bundled | Permissive — issue is WEIGHT, not license (Java/JVM service). | cleared | Optional external Docker/JVM service, deferred, behind labeled setup/disabled UI with graceful degradation (DEC-3). |
 | PDF.js | Apache-2.0 | none | bundled-dependency | Permissive; ships freely. | cleared | Phase 1 PDF renderer + custom annotation layer (Section 26.4). Pin major version (DEC-15). |
 | CodeMirror 6 | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Phase 1 Markdown/text editor foundation (Sections 13, 26.3). |
+| Yjs | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Branch 03-08 CRDT document model for opt-in Markdown collaboration. |
+| y-codemirror.next | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Branch 03-08 CodeMirror 6 binding for Yjs document sync and remote cursor awareness. |
 | Lezer / @lezer/highlight | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | CodeMirror syntax highlighting support used by the Markdown editor. |
 | Monaco Editor | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Reference-first for Phase 1; ship only if a raw-code/config/LaTeX surface adopts it. |
 | xterm.js | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Logs/safe-console renderer (Section 19). |

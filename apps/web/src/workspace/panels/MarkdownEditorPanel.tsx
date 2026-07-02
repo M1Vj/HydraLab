@@ -5,6 +5,14 @@ import { api, type CitationRecord, type NoteRecord, type ProjectObjectsResponse 
 import type { PanelComponentProps } from "../panelRegistry";
 import { useWorkspaceData } from "../data";
 import { EmptyState, FailureState, LoadingState, PanelScaffold } from "./PanelState";
+import { getCollaborationSettings, listCollaborators } from "./settingsController";
+
+type PanelSyncState = "offline" | "connecting" | "synced" | "syncing" | "conflict" | "revoked";
+type PanelCollaborationState = {
+  enabled: boolean;
+  syncState: PanelSyncState;
+  remoteUsers: Array<{ id: string; displayName: string; color?: string }>;
+};
 
 export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
   const { objects, review } = useWorkspaceData();
@@ -14,10 +22,19 @@ export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(Boolean(noteId || fileRef));
   const [error, setError] = useState<Error | null>(null);
+  const [collaboration, setCollaboration] = useState<PanelCollaborationState>({
+    enabled: false,
+    syncState: "offline",
+    remoteUsers: [],
+  });
 
   useEffect(() => {
     void loadNote();
   }, [noteId, fileRef]);
+
+  useEffect(() => {
+    void loadCollaboration();
+  }, [note?.id, note?.relative_path, fileRef]);
 
   async function loadNote() {
     if (!noteId && !fileRef) {
@@ -67,6 +84,27 @@ export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
     review.reload();
   }
 
+  async function loadCollaboration() {
+    const projectId = note?.project_id || "default";
+    try {
+      const settings = await getCollaborationSettings(projectId);
+      if (!settings.enabled) {
+        setCollaboration({ enabled: false, syncState: "offline", remoteUsers: [] });
+        return;
+      }
+      const collaborators = await listCollaborators(projectId);
+      setCollaboration({
+        enabled: true,
+        syncState: "connecting",
+        remoteUsers: collaborators.collaborators
+          .filter((collaborator) => !collaborator.revoked)
+          .map((collaborator) => ({ id: collaborator.collaborator_id, displayName: collaborator.display_name })),
+      });
+    } catch {
+      setCollaboration({ enabled: false, syncState: "offline", remoteUsers: [] });
+    }
+  }
+
   if (loading) return <LoadingState title="Opening note" />;
   if (error) return <FailureState error={error} onRetry={loadNote} />;
   if (!note) {
@@ -93,6 +131,13 @@ export function MarkdownEditorPanel({ config, announce }: PanelComponentProps) {
         value={content}
         notes={noteOptions(objects.data)}
         citations={citationOptions(objects.data)}
+        collaboration={{
+          enabled: collaboration.enabled,
+          documentId: note.relative_path || fileRef || note.id,
+          projectId: note.project_id || "default",
+          syncState: collaboration.syncState,
+          remoteUsers: collaboration.remoteUsers,
+        }}
         onChange={setContent}
         onSave={save}
       />
