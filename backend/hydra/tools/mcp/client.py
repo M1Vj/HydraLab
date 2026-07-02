@@ -9,8 +9,33 @@ caller supplies a resolved connection dict + an optional auth handle.
 """
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlparse
+
+
+def assert_loopback_url(url: str) -> None:
+    """Reject any MCP HTTP URL whose host is not loopback (SSRF containment).
+
+    HydraLab is offline-first: an HTTP MCP server runs on this machine, so the
+    host must be ``localhost`` or a loopback IP literal. A hostname that could
+    resolve off-box would let a tool call exfiltrate its params to a remote
+    server, so it is refused WITHOUT a DNS lookup (which would itself be a
+    rebinding vector). Raises ``ValueError`` for the caller to surface.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("MCP HTTP server URL must use http or https")
+    host = parsed.hostname or ""
+    if host == "localhost":
+        return
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise ValueError(f"MCP HTTP server must be loopback, got host {host!r}")
 
 
 class MCPError(Exception):
@@ -113,6 +138,10 @@ class HttpMCPTransport:
 
         if not self._url:
             raise MCPError("no MCP server URL configured")
+        try:
+            assert_loopback_url(self._url)
+        except ValueError as exc:
+            raise MCPError(str(exc)) from exc
         self._id += 1
         payload = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
         headers = {"content-type": "application/json"}

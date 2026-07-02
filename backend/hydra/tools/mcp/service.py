@@ -97,6 +97,15 @@ class MCPService:
         auth_handle_ref: Optional[str] = None,
         connector: Optional[str] = None,
     ) -> dict[str, Any]:
+        if transport == "http":
+            url = str((connection or {}).get("url") or "")
+            if url:
+                # SSRF containment: an HTTP MCP server must be loopback-only, so a
+                # non-loopback URL is rejected at registration (raises ValueError
+                # -> 400) rather than being persisted and dialed later.
+                from hydra.tools.mcp.client import assert_loopback_url
+
+                assert_loopback_url(url)
         return await self.repo.register_mcp_server(
             name=name,
             transport=transport,

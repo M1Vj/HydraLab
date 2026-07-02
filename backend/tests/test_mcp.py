@@ -74,6 +74,26 @@ def _server_tools() -> list[dict[str, Any]]:
     ]
 
 
+# --------------------------------------------------------------------------- SSRF containment
+@pytest.mark.asyncio
+async def test_http_mcp_server_registration_requires_loopback(repo):
+    service = MCPService(repo)
+    ok = await service.register_server(name="local", transport="http", connection={"url": "http://127.0.0.1:23119/rpc"})
+    assert ok["id"]
+    await service.register_server(name="local2", transport="http", connection={"url": "http://localhost:23119"})
+    for bad in ("http://169.254.169.254/latest/meta-data", "http://evil.example.com/rpc", "https://10.0.0.5", "ftp://127.0.0.1"):
+        with pytest.raises(ValueError):
+            await service.register_server(name="bad", transport="http", connection={"url": bad})
+
+
+def test_http_transport_refuses_non_loopback_egress():
+    from hydra.tools.mcp.client import HttpMCPTransport
+
+    transport = HttpMCPTransport(url="http://169.254.169.254/latest/meta-data")
+    with pytest.raises(MCPError):
+        transport.request("tools/list", {})
+
+
 # --------------------------------------------------------------------------- atomic step 1
 @pytest.mark.asyncio
 async def test_client_connects_fake_server_and_lists_tools():
