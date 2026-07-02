@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends, WebSocket
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlmodel import select
@@ -211,6 +212,7 @@ from hydra.orchestrator.advanced import (
     build_advanced_run_config,
     route_untrusted_advanced_preset,
 )
+from hydra.collaboration.exclusion import DocumentCandidate, SyncExclusionFilter
 from hydra.collaboration.identity import CollaborationPermissionError, IdentityProvider
 from hydra.collaboration.transport import InProcessSyncTransport, SelfHostedSyncTransport, SyncAuthenticationError
 from hydra.recipes.literature_review import (
@@ -272,6 +274,20 @@ BRIDGE_NONCE_TTL_SECONDS = 300
 _MEMORY_SECRET_STORE = InMemorySecretStore()
 _PROVIDER_CACHE = ProviderCache()
 _COLLAB_SYNC_TRANSPORT = InProcessSyncTransport()
+_COLLAB_EXCLUSION_FILTER = SyncExclusionFilter()
+# Idle poll interval so a collaborator revoked mid-session is disconnected within
+# the window (well under the 5s bound) instead of blocking on receive forever.
+_COLLAB_REVOKE_POLL_SECONDS = 1.0
+
+
+def _infer_collab_document_type(document_id: str) -> str:
+    """Map an allowlisted collaboration path to its editor document type."""
+    normalized = document_id.replace("\\", "/").lstrip("/")
+    if normalized.startswith("writing/manuscripts/"):
+        return "markdown-draft"
+    if normalized.startswith("notes/"):
+        return "note"
+    return "unsupported"
 
 
 def _assistant_privacy() -> dict[str, Any]:
@@ -1254,6 +1270,7 @@ def create_app() -> FastAPI:
         token = websocket.query_params.get("token")
         if authorization.startswith("Bearer "):
             token = authorization[len("Bearer "):]
+        document_type = _infer_collab_document_type(document_id)
         async with async_session_maker() as session:
             try:
                 connection = await _COLLAB_SYNC_TRANSPORT.connect(
@@ -1264,6 +1281,17 @@ def create_app() -> FastAPI:
                     origin=origin,
                 )
             except SyncAuthenticationError:
+                await websocket.close(code=1008)
+                return
+            # Decide document eligibility BEFORE accepting: an excluded target
+            # (.hydralab cache, outputs, protected context file, outside the
+            # notes/manuscripts allowlist, or an unsupported type) never receives
+            # a single byte over the live transport (HL-CORE-87).
+            eligibility = _COLLAB_EXCLUSION_FILTER.decide(
+                DocumentCandidate(path=document_id, document_type=document_type, content="")
+            )
+            if not eligibility.allowed:
+                connection.disconnect()
                 await websocket.close(code=1008)
                 return
             await websocket.accept()
@@ -1281,13 +1309,32 @@ def create_app() -> FastAPI:
             )
             try:
                 while connection.connected:
-                    message = await websocket.receive_text()
-                    # Document and presence channels stay distinct at the protocol
-                    # level; this self-hosted first pass echoes document updates
-                    # only after auth so unauthenticated clients receive zero bytes.
+                    try:
+                        message = await asyncio.wait_for(
+                            websocket.receive_text(), timeout=_COLLAB_REVOKE_POLL_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        # Poll tick: a revoke() elsewhere flips connection.connected,
+                        # so a revoked IDLE socket is closed on the next loop check
+                        # instead of hanging on receive indefinitely.
+                        continue
+                    # Re-run the exclusion filter on EVERY frame: even on an
+                    # allowlisted document, a payload carrying secret-like content
+                    # is dropped rather than relayed to collaborators.
+                    if _COLLAB_EXCLUSION_FILTER.serialize(
+                        DocumentCandidate(path=document_id, document_type=document_type, content=message)
+                    ) is None:
+                        continue
                     await websocket.send_text(message)
+            except WebSocketDisconnect:
+                pass
             finally:
                 connection.disconnect()
+                try:
+                    await websocket.close(code=1000)
+                except RuntimeError:
+                    # Socket already closed by the peer or the disconnect path.
+                    pass
 
     # ------------------------------------------- autonomy safety shell
     @app.get("/api/autonomy/policy")

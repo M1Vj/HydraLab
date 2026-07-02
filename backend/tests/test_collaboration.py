@@ -307,3 +307,87 @@ def test_hl_core_84_websocket_rejects_unauthenticated_client_without_bytes(tmp_p
             headers={"origin": "http://localhost:5173"},
         ) as websocket:
             websocket.receive_text()
+
+
+_WS_ORIGIN = {"origin": "http://localhost:5173"}
+
+
+def _enable_and_authenticate(client: TestClient, project_id: str) -> tuple[str, str]:
+    client.post(
+        "/api/collaboration/settings",
+        json={"project_id": project_id, "enabled": True, "sync_server_url": "wss://lab.local:8443"},
+    )
+    invite = client.post(
+        "/api/collaboration/invites",
+        json={"project_id": project_id, "display_name": "Dana Reyes", "permission": "edit"},
+    ).json()
+    auth = client.post(
+        "/api/collaboration/authenticate",
+        json={"project_id": project_id, "invite_token": invite["invite_token"]},
+    ).json()
+    return auth["session_token"], auth["collaborator_id"]
+
+
+def test_hl_core_87_websocket_rejects_excluded_document_even_when_authenticated(tmp_path, monkeypatch):
+    # A valid collaborator still receives zero bytes for a non-collaborative
+    # target (private cache path): eligibility is decided before accept.
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    token, _cid = _enable_and_authenticate(client, "transformer-survey")
+
+    with pytest.raises(Exception):
+        with client.websocket_connect(
+            f"/api/collaboration/ws/transformer-survey/.hydralab%2Fbrowser%2Fcache.md?token={token}",
+            headers=_WS_ORIGIN,
+        ) as websocket:
+            websocket.receive_json()
+
+    # A genuine collaboration document still connects and syncs presence.
+    with client.websocket_connect(
+        f"/api/collaboration/ws/transformer-survey/notes%2Flit-review.md?token={token}",
+        headers=_WS_ORIGIN,
+    ) as websocket:
+        presence = websocket.receive_json()
+        assert presence["type"] == "presence"
+        assert presence["sync_state"] == "synced"
+
+
+def test_hl_core_87_websocket_drops_secret_frames_but_relays_clean_updates(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    token, _cid = _enable_and_authenticate(client, "transformer-survey")
+
+    with client.websocket_connect(
+        f"/api/collaboration/ws/transformer-survey/notes%2Flit-review.md?token={token}",
+        headers=_WS_ORIGIN,
+    ) as websocket:
+        assert websocket.receive_json()["type"] == "presence"
+        websocket.send_text("# Shareable heading\n")
+        assert websocket.receive_text() == "# Shareable heading\n"
+        # A frame carrying a provider secret is dropped, never relayed. The next
+        # clean frame proves the secret frame produced no echo (order preserved).
+        websocket.send_text("api_key sk-live-EXAMPLE-should-not-relay")
+        websocket.send_text("clean follow-up\n")
+        assert websocket.receive_text() == "clean follow-up\n"
+
+
+def test_hl_core_83_websocket_revoked_idle_socket_is_closed_by_server(tmp_path, monkeypatch):
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    token, collaborator_id = _enable_and_authenticate(client, "transformer-survey")
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/api/collaboration/ws/transformer-survey/notes%2Flit-review.md?token={token}",
+            headers=_WS_ORIGIN,
+        ) as websocket:
+            assert websocket.receive_json()["type"] == "presence"
+            # Revoke while the socket is idle; the server poll loop must close it
+            # within the window rather than blocking on receive forever.
+            client.post(
+                f"/api/collaboration/collaborators/{collaborator_id}/revoke",
+                json={"project_id": "transformer-survey"},
+            )
+            websocket.receive_text()
