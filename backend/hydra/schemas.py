@@ -13,6 +13,26 @@ class SourceSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=400)
 
 
+class SourceDiscoveryRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=400)
+    project_id: str | None = Field(default=None, max_length=200)
+    offline_only: bool = False
+    scholarly_apis_enabled: bool = True
+    contact_email: str = Field(default="research@hydralab.local", max_length=320)
+
+
+class SourceSaveRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    query: str = Field(default="", max_length=400)
+    result: dict[str, object]
+    user_initiated: bool = False
+    source_origin: Literal["discovery", "browser"] = "discovery"
+    browser_context_event_id: str | None = Field(default=None, max_length=200)
+    save_pdf: bool = False
+    automatic_pdf_download: bool = False
+    allowed_pdf_domains: list[str] = Field(default_factory=list)
+
+
 class WritingReviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
 

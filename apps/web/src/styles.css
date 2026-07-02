@@ -555,6 +555,144 @@ summary:focus-visible {
   font-size: 11px;
 }
 
+.source-discovery-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.source-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.discovery-settings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.discovery-settings label,
+.settings-group label {
+  min-height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-raised);
+  padding: 4px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.discovery-state {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+  background: var(--bg-panel-raised);
+}
+
+.discovery-state strong {
+  font-size: 12px;
+}
+
+.discovery-state span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.discovery-state.partial,
+.discovery-state.offline-permission {
+  border-color: rgba(210, 153, 34, 0.55);
+}
+
+.discovery-state.failure {
+  border-color: rgba(248, 81, 73, 0.55);
+}
+
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.provider-state {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 3px 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-state.ready,
+.provider-state.cache-hit {
+  color: var(--success);
+  border-color: rgba(63, 185, 80, 0.35);
+}
+
+.provider-state.loading {
+  color: var(--accent);
+  border-color: rgba(47, 129, 247, 0.4);
+}
+
+.provider-state.error,
+.provider-state.provider-rate-limited,
+.provider-state.offline {
+  color: var(--warning);
+  border-color: rgba(210, 153, 34, 0.45);
+}
+
+.discovery-results {
+  display: grid;
+  gap: 8px;
+}
+
+.discovery-card {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.discovery-card header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.discovery-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin: 0;
+}
+
+.discovery-card dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.discovery-card dd {
+  margin: 0;
+  font-size: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .ui-overlay {
   position: fixed;
   inset: 0;
