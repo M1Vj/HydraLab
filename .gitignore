@@ -58,3 +58,7 @@ Hermes/
 
 # Orchestration state (oh-my-claudecode)
 .omc/
+
+# Transient audit / e2e artifacts
+.playwright-mcp/
+apps/web/test-results/
