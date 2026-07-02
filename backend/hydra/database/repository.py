@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Optional, List
 
+from sqlalchemy import func
 from sqlmodel import select, or_, and_, delete
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -58,6 +59,13 @@ from hydra.services.citations import (
 
 
 _SECRET_KEY_NAMES = ("api_key", "token", "secret", "password", "apikey")
+DEFAULT_PROJECT_ID = "default"
+
+
+def _project_scope(column, project_id: str):
+    # Legacy rows have project_id NULL; treat NULL as the default project so
+    # enabling isolation never hides pre-existing single-project data.
+    return func.coalesce(column, DEFAULT_PROJECT_ID) == project_id
 
 
 def _reject_raw_secret_values(node: Any) -> None:
@@ -427,7 +435,7 @@ class Repository:
             source = Source(
                 id=source_id,
                 workspace_id=workspace_id,
-                project_id=project_id,
+                project_id=project_id or DEFAULT_PROJECT_ID,
                 title=title,
                 authors=authors,
                 year=year,
@@ -448,12 +456,18 @@ class Repository:
         await self.session.refresh(source)
         return self._to_dict(source)
 
-    async def list_sources(self) -> list[dict[str, Any]]:
-        res = await self.session.exec(select(Source).order_by(Source.created_at.desc()))
+    async def list_sources(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
+        q = select(Source)
+        if project_id is not None:
+            q = q.where(_project_scope(Source.project_id, project_id))
+        q = q.order_by(Source.created_at.desc())
+        res = await self.session.exec(q)
         return self._to_dict_list(res.all())
 
-    async def search_sources(self, query: Optional[str] = None) -> list[dict[str, Any]]:
+    async def search_sources(self, query: Optional[str] = None, project_id: Optional[str] = None) -> list[dict[str, Any]]:
         q = select(Source).where(Source.trashed == False)  # noqa: E712
+        if project_id is not None:
+            q = q.where(_project_scope(Source.project_id, project_id))
         if query:
             q = q.where(or_(Source.title.like(f"%{query}%"), Source.url.like(f"%{query}%")))
         q = q.order_by(Source.updated_at.desc())
@@ -486,15 +500,19 @@ class Repository:
             citation_key=resolved_key or "",
             csl_json=resolved_csl or "{}",
             doi=doi,
-            project_id=project_id,
+            project_id=project_id or DEFAULT_PROJECT_ID,
         )
         self.session.add(cit)
         await self.session.commit()
         await self.session.refresh(cit)
         return self._to_dict(cit)
 
-    async def list_citations(self) -> list[dict[str, Any]]:
-        res = await self.session.exec(select(Citation).order_by(Citation.created_at.desc()))
+    async def list_citations(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
+        q = select(Citation)
+        if project_id is not None:
+            q = q.where(_project_scope(Citation.project_id, project_id))
+        q = q.order_by(Citation.created_at.desc())
+        res = await self.session.exec(q)
         return self._to_dict_list(res.all())
 
     # Claim CRUD
@@ -525,7 +543,7 @@ class Repository:
         claim = Claim(
             text=text,
             workspace_id=workspace_id,
-            project_id=project_id,
+            project_id=project_id or DEFAULT_PROJECT_ID,
             claim_type=claim_type,
             location_type=location_type,
             location_id=location_id,
@@ -544,10 +562,16 @@ class Repository:
         await self.session.refresh(claim)
         return self._to_dict(claim)
 
-    async def list_claims(self, workspace_id: Optional[str] = None) -> list[dict[str, Any]]:
+    async def list_claims(
+        self,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         q = select(Claim)
         if workspace_id:
             q = q.where(Claim.workspace_id == workspace_id)
+        if project_id is not None:
+            q = q.where(_project_scope(Claim.project_id, project_id))
         q = q.order_by(Claim.created_at.desc())
         res = await self.session.exec(q)
         return self._to_dict_list(res.all())
@@ -641,13 +665,20 @@ class Repository:
             return {"resolved": False, "reason": "not-found", "location_type": location_type, "location_id": location_id}
         return {"resolved": True, "location_type": location_type, "location_id": location_id, "target": self._to_dict(target)}
 
-    async def list_evidence(self) -> list[dict[str, Any]]:
+    async def list_evidence(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
         # Fetch evidence links joined with sources and claims
         q = select(EvidenceLink, Source.title.label("source_title"), Source.url.label("source_url"), Claim.text.label("claim_text")).join(
             Source, Source.id == EvidenceLink.source_id
         ).join(
             Claim, Claim.id == EvidenceLink.claim_id
-        ).order_by(EvidenceLink.created_at.desc())
+        )
+        if project_id is not None:
+            q = q.where(
+                EvidenceLink.claim_id.in_(
+                    select(Claim.id).where(_project_scope(Claim.project_id, project_id))
+                )
+            )
+        q = q.order_by(EvidenceLink.created_at.desc())
         
         res = await self.session.exec(q)
         evidence_list = []
@@ -661,8 +692,21 @@ class Repository:
         return evidence_list
 
     # Note CRUD with parse-on-write wiki-link sync
-    async def add_note(self, title: str, body: str, source_id: Optional[str] = None, workspace_id: Optional[str] = None) -> dict[str, Any]:
-        note = Note(title=title, body=body, source_id=source_id, workspace_id=workspace_id)
+    async def add_note(
+        self,
+        title: str,
+        body: str,
+        source_id: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        note = Note(
+            title=title,
+            body=body,
+            source_id=source_id,
+            workspace_id=workspace_id,
+            project_id=project_id or DEFAULT_PROJECT_ID,
+        )
         self.session.add(note)
         await self.session.commit()
         await self.session.refresh(note)
@@ -673,10 +717,17 @@ class Repository:
         note = await self.session.get(Note, note_id)
         return self._to_dict(note)
 
-    async def search_notes(self, query: Optional[str] = None, workspace_id: Optional[str] = None) -> list[dict[str, Any]]:
+    async def search_notes(
+        self,
+        query: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         q = select(Note)
         if workspace_id:
             q = q.where(Note.workspace_id == workspace_id)
+        if project_id is not None:
+            q = q.where(_project_scope(Note.project_id, project_id))
         if query:
             q = q.where(or_(Note.title.like(f"%{query}%"), Note.body.like(f"%{query}%")))
         q = q.order_by(Note.updated_at.desc())
@@ -946,7 +997,7 @@ class Repository:
             phase_indicator=phase_indicator,
             position=position,
             workspace_id=workspace_id,
-            project_id=project_id,
+            project_id=project_id or DEFAULT_PROJECT_ID,
             due=due,
             priority=priority,
             tags=json.dumps(tags or []),
@@ -1126,7 +1177,7 @@ class Repository:
         if workspace_id:
             q = q.where(Task.workspace_id == workspace_id)
         if project_id:
-            q = q.where(Task.project_id == project_id)
+            q = q.where(_project_scope(Task.project_id, project_id))
         if state and state != "all":
             q = q.where(Task.lifecycle_state == state)
         q = q.order_by(Task.position.asc(), Task.created_at.asc())
@@ -1433,13 +1484,13 @@ class Repository:
         return self._to_dict_list(res.all())
 
     # Export Workspace
-    async def export_workspace(self) -> dict[str, Any]:
+    async def export_workspace(self, project_id: Optional[str] = None) -> dict[str, Any]:
         return {
-            "sources": await self.list_sources(),
-            "notes": await self.search_notes(),
-            "tasks": await self.list_tasks(),
+            "sources": await self.list_sources(project_id=project_id),
+            "notes": await self.search_notes(project_id=project_id),
+            "tasks": await self.list_tasks(project_id=project_id),
             "events": await self.list_events(),
-            "evidence": await self.list_evidence(),
+            "evidence": await self.list_evidence(project_id=project_id),
             "settings": await self.list_settings(),
             "provider_settings": await self.list_provider_settings(),
         }
@@ -2054,9 +2105,14 @@ class Repository:
             imported.append(await self.upsert_source(self._source_from_csl(item, project_id)))
         return {"imported": imported, "count": len(imported), "format": fmt}
 
-    async def export_sources(self, fmt: str, source_ids: Optional[list[str]] = None) -> str:
+    async def export_sources(
+        self,
+        fmt: str,
+        source_ids: Optional[list[str]] = None,
+        project_id: Optional[str] = None,
+    ) -> str:
         fmt = fmt.lower()
-        sources = await self.list_sources()
+        sources = await self.list_sources(project_id=project_id)
         if source_ids is not None:
             wanted = set(source_ids)
             sources = [s for s in sources if s["id"] in wanted]

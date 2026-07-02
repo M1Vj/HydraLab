@@ -597,7 +597,7 @@ class DiscoveryCacheEntry(SQLModel, table=True):
 class IngestionJob(SQLModel, table=True):
     __tablename__ = "ingestion_jobs"
     id: str = Field(default_factory=uuid_text, primary_key=True)
-    source_id: str = Field(foreign_key="sources.id", index=True)
+    source_id: Optional[str] = Field(default=None, foreign_key="sources.id", index=True, nullable=True)
     source_path: str
     status: str = Field(default="queued", index=True)
     progress: int = Field(default=0)

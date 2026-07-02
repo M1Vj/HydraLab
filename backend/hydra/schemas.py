@@ -260,6 +260,7 @@ class ConsoleRunRequest(BaseModel):
 class CitationExportRequest(BaseModel):
     source_ids: list[str] = Field(default_factory=list)
     format: Literal["bibtex", "csl", "ris"] = "bibtex"
+    project_id: str = Field(default="default", max_length=200)
 
 
 class ProjectZipRequest(BaseModel):
@@ -301,6 +302,7 @@ class CitationRenderRequest(BaseModel):
     style: str | None = Field(default=None, max_length=80)
     manuscript: str | None = Field(default=None, max_length=200)
     html: bool = False
+    project_id: str = Field(default="default", max_length=200)
 
 
 class SourceImportRequest(BaseModel):

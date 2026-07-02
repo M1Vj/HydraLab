@@ -1,6 +1,12 @@
+import asyncio
+
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from hydra.app import create_app
+from hydra.database.models import Citation
+from hydra.database.session import get_session_maker
 
 
 def test_research_chat_returns_cited_answer_and_trace_event(tmp_path, monkeypatch):
@@ -87,9 +93,27 @@ def test_ingest_route_quarantines_fake_pdf_without_source_or_artifacts(tmp_path,
     try:
         assert conn.execute("select count(*) from sources").fetchone() == (0,)
         assert conn.execute("select count(*) from ingestion_artifacts").fetchone() == (0,)
-        assert conn.execute("select status from ingestion_jobs").fetchone() == ("quarantined",)
+        assert conn.execute("select source_id, status from ingestion_jobs").fetchone() == (
+            None,
+            "quarantined",
+        )
     finally:
         conn.close()
+
+
+def test_real_app_database_enforces_foreign_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    assert client.get("/api/events").status_code == 200
+
+    async def insert_orphan_citation():
+        async_session_maker = get_session_maker()
+        async with async_session_maker() as session:
+            session.add(Citation(source_id="missing-source", text="orphan"))
+            await session.commit()
+
+    with pytest.raises(IntegrityError):
+        asyncio.run(insert_orphan_citation())
 
 
 def test_ingest_route_valid_upload_creates_source_job_and_artifacts(tmp_path, monkeypatch):
