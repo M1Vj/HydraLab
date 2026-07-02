@@ -13,6 +13,26 @@ class SourceSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=400)
 
 
+class BrowserHostPermissionUpdateRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    host: str = Field(min_length=1, max_length=255)
+    state: Literal["ask", "allow_for_task", "always_allow_host", "blocked"]
+    task_group_id: str | None = Field(default=None, max_length=200)
+
+
+class BrowserCopilotActionRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    action: Literal["search", "save-source", "save-snapshot", "extract-metadata", "create-note"]
+    url: str = Field(min_length=1, max_length=2000)
+    title: str = Field(default="", max_length=400)
+    page_text: str = Field(default="", max_length=200000)
+    host: str = Field(default="", max_length=255)
+    mode: Literal["copilot"] = "copilot"
+    task_group_id: str | None = Field(default=None, max_length=200)
+    task_group_label: str = Field(default="", max_length=200)
+    user_triggered: bool = True
+
+
 class SourceDiscoveryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=400)
     project_id: str | None = Field(default=None, max_length=200)

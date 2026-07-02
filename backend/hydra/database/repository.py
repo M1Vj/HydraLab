@@ -429,6 +429,14 @@ class Repository:
         res = await self.session.exec(select(Source).order_by(Source.created_at.desc()))
         return self._to_dict_list(res.all())
 
+    async def search_sources(self, query: Optional[str] = None) -> list[dict[str, Any]]:
+        q = select(Source).where(Source.trashed == False)  # noqa: E712
+        if query:
+            q = q.where(or_(Source.title.like(f"%{query}%"), Source.url.like(f"%{query}%")))
+        q = q.order_by(Source.updated_at.desc())
+        res = await self.session.exec(q)
+        return self._to_dict_list(res.all())
+
     # Citation CRUD
     async def add_citation(
         self,

@@ -15,8 +15,8 @@ import { ResearchChatPanel } from "./panels/ResearchChatPanel";
 import { MarkdownEditorPanel } from "./panels/MarkdownEditorPanel";
 import { WritingPanel } from "./panels/WritingPanel";
 import { TasksPanel } from "./panels/TasksPanel";
+import { BrowserPanel } from "./panels/BrowserPanel";
 import {
-  BrowserPanel,
   CitationEvidencePanel,
   ExportPanel,
   GitPanel,

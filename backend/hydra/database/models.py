@@ -294,6 +294,31 @@ class BrowserEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class BrowserHostPermission(SQLModel, table=True):
+    __tablename__ = "browser_host_permissions"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    host: str = Field(index=True)
+    state: str = Field(default="ask")
+    task_group_id: Optional[str] = Field(default=None, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class BrowserActionLog(SQLModel, table=True):
+    __tablename__ = "browser_action_logs"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    action: str = Field(index=True)
+    host: str = Field(index=True)
+    mode: str = Field(default="copilot")
+    approval_result: str = Field(default="approved")
+    target_url: str = Field(default="")
+    task_group_id: Optional[str] = Field(default=None, index=True)
+    trust_level: str = Field(default="user-curated")
+    payload_json: str = Field(default="{}")
+    timestamp: datetime = Field(default_factory=utcnow)
+
+
 class AgentRun(SQLModel, table=True):
     __tablename__ = "agent_runs"
     id: str = Field(default_factory=uuid_text, primary_key=True)
