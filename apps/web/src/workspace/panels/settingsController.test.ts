@@ -4,6 +4,7 @@ import { createApiClient, HydraApiError } from "../../lib/api";
 import {
   authenticateCollaborator,
   booleanPreference,
+  fetchSelfEvolutionAudit,
   inviteCollaborator,
   looksLikeRawSecret,
   providerSecretStored,
@@ -103,6 +104,18 @@ describe("collaboration settings flow", () => {
 
     expect(capturedBody).toEqual({ project_id: "transformer-survey", enabled: true, sync_server_url: "wss://lab.local:8443" });
     expect(result.sync_server_kind).toBe("self-hosted");
+  });
+
+  test("self-evolution audit history hits the audit endpoint", async () => {
+    let capturedUrl = "";
+    globalThis.fetch = async (input) => {
+      capturedUrl = String(input);
+      return jsonResponse({ entries: [{ id: "a1", action: "self_evolution.applied", actor: "user", risk_level: "medium", target: "chg-1:prompt:-:skills/x.md", approval_state: "applied", created_at: 0 }] });
+    };
+    const client = createApiClient("/api", 100);
+    const result = await fetchSelfEvolutionAudit("default", client);
+    expect(capturedUrl).toBe("/api/self-evolution/audit?project_id=default");
+    expect(result.entries[0].action).toBe("self_evolution.applied");
   });
 
   test("invite, authenticate, and revoke use collaboration endpoints", async () => {
