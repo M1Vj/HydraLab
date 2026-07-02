@@ -161,6 +161,10 @@ def test_hl_mode_01_passive_only_mode(tmp_path, monkeypatch):
     # Full Access defaults OFF until explicitly enabled for the project.
     assert by_id["full_access"]["enabled"] is False
     assert modes["full_access_enabled"] is False
+    # Honesty: with no BYO provider key, replies come from the local mock
+    # placeholder, so the UI must be told the provider is not configured.
+    assert modes["provider_configured"] is False
+    assert modes["active_provider"] == "mock"
 
 
 # @HL-MODE-02 — the assistant streams a reply in Passive mode.

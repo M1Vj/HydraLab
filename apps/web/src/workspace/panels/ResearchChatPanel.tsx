@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { LockKeyhole, Pause, Paperclip, Play, Plus, Search, Send, ShieldQuestion, X } from "lucide-react";
+import { Info, LockKeyhole, Pause, Paperclip, Play, Plus, Search, Send, ShieldQuestion, X } from "lucide-react";
 import { api, type AgentApproval, type AssistantModes, type Chat, type ChatMessage, type ContextRef, type SendScopeResult } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
 import { fetchApprovals, fetchModes, modeLabel, resolveApproval } from "./agentController";
@@ -62,6 +62,12 @@ function AgentRunBar({ streaming, announce }: { streaming: boolean; announce: (m
   const active = modes.default_mode;
   return (
     <div className="agent-run-bar" aria-label="Agent run status">
+      {modes.provider_configured === false && !modes.offline_only && (
+        <div className="assistant-placeholder-notice" role="status">
+          <Info size={13} aria-hidden />
+          <span>No AI provider configured — replies are local placeholders. Add a provider key in Settings to get real answers.</span>
+        </div>
+      )}
       <div className="agent-mode-indicator" role="status">
         <span className="agent-mode-dot" aria-hidden />
         <span>Mode: <strong>{modeLabel(active)}</strong></span>

@@ -865,6 +865,9 @@ def create_app() -> FastAPI:
     async def assistant_modes(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         privacy = _assistant_privacy()
         policy = await _mode_policy(session, project_id)
+        providers = _resolve_providers(secret_store)
+        active_provider = next((getattr(p, "provider_id", "mock") for p in providers), "mock")
+        provider_configured = any(getattr(p, "provider_id", "mock") != "mock" for p in providers)
         return {
             "default_mode": policy.default_mode or privacy["default_mode"],
             "full_access_enabled": bool(policy.full_access_enabled),
@@ -875,6 +878,8 @@ def create_app() -> FastAPI:
             ],
             "offline_only": privacy["offline_only"],
             "g3_provider_send": privacy["g3_enabled"],
+            "provider_configured": provider_configured,
+            "active_provider": active_provider,
         }
 
     @app.post("/api/assistant/mode")

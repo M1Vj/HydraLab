@@ -419,6 +419,8 @@ export type AssistantModes = {
   modes: AssistantMode[];
   offline_only: boolean;
   g3_provider_send: boolean;
+  provider_configured?: boolean;
+  active_provider?: string;
 };
 
 export type SkillInfo = {

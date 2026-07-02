@@ -740,6 +740,23 @@ select:focus-visible,
   gap: 6px;
 }
 
+.assistant-placeholder-notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--tone-warn, #b7791f) 12%, transparent);
+  color: var(--text-active);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.assistant-placeholder-notice svg {
+  flex-shrink: 0;
+}
+
 .agent-runs-panel {
   height: 100%;
   min-height: 0;
