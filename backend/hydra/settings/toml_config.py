@@ -11,6 +11,8 @@ import tomli_w
 
 CURRENT_SETTINGS_VERSION = 1
 HYDRALAB_VERSION = "0.1.0"
+# Exactly three canonical Agent Access Mode ids (DEC-5). No fourth peer mode.
+VALID_AGENT_ACCESS_MODES = ("passive", "copilot", "full_access")
 REQUIRED_SETTINGS_SECTIONS = [
     "schema",
     "general",
@@ -150,3 +152,12 @@ def validate_settings(data: dict[str, Any]) -> None:
     for secret_word in ("api_key", "token", "secret"):
         if secret_word in serialized and "secret_ref" not in serialized:
             raise SettingsValidationError("[providers] may store secret references only")
+    # HL-MODE-01 — reject any Agent Access Mode value outside the canonical set.
+    assistant = data.get("assistant", {})
+    for key in ("mode", "default_mode"):
+        value = assistant.get(key)
+        if value is not None and str(value) not in VALID_AGENT_ACCESS_MODES:
+            allowed = ", ".join(VALID_AGENT_ACCESS_MODES)
+            raise SettingsValidationError(
+                f"[assistant].{key} must be one of {allowed}; got {value!r}"
+            )

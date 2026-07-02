@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,8 @@ class LoadedSkill:
     enabled_by_default: bool = False
     disabled_reason: str | None = None
     front_matter: dict[str, Any] = field(default_factory=dict)
+    body: str = ""
+    edited: bool = False
 
     def descriptor(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "description": self.description, "scope": self.scope}
@@ -69,6 +72,9 @@ class LoadedSkill:
             "tags": self.tags,
             "allowed_capabilities": self.allowed_capabilities,
             "disabled_reason": self.disabled_reason,
+            "body": self.body,
+            "edited": self.edited,
+            "restorable": self.scope == "builtin",
         }
 
 
@@ -102,11 +108,12 @@ def validate_skill(front_matter: dict[str, Any], body: str, *, expected_scope: s
     return None
 
 
-def _skill_from_file(path: Path, expected_scope: str) -> LoadedSkill:
-    text = path.read_text(encoding="utf-8")
+def _skill_from_text(
+    text: str, path: Path, expected_scope: str, *, fallback_stem: str | None = None, edited: bool = False
+) -> LoadedSkill:
     front_matter, body = parse_skill_file(text)
     reason = validate_skill(front_matter, body, expected_scope=expected_scope)
-    skill_id = str(front_matter.get("id") or path.stem)
+    skill_id = str(front_matter.get("id") or fallback_stem or path.stem)
     enabled_default = bool(front_matter.get("enabled_by_default", False))
     return LoadedSkill(
         id=skill_id,
@@ -123,7 +130,13 @@ def _skill_from_file(path: Path, expected_scope: str) -> LoadedSkill:
         enabled_by_default=enabled_default,
         disabled_reason=reason,
         front_matter=front_matter,
+        body=body,
+        edited=edited,
     )
+
+
+def _skill_from_file(path: Path, expected_scope: str) -> LoadedSkill:
+    return _skill_from_text(path.read_text(encoding="utf-8"), path, expected_scope)
 
 
 @dataclass
@@ -142,18 +155,53 @@ def builtin_skills_dir() -> Path:
     return Path(__file__).resolve().parent / "builtin"
 
 
+def _state_file(state_dir: Path) -> Path:
+    return Path(state_dir) / "skills_state.json"
+
+
+def load_skill_state(state_dir: Path | None) -> dict[str, dict[str, Any]]:
+    """Return persisted per-skill overrides: {id: {enabled?, text?}}."""
+    if not state_dir:
+        return {}
+    path = _state_file(state_dir)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_skill_state(state_dir: Path, state: dict[str, dict[str, Any]]) -> None:
+    path = _state_file(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _apply_state(skill: LoadedSkill, entry: dict[str, Any]) -> LoadedSkill:
+    if "enabled" in entry:
+        # A skill that fails validation can never be enabled (HL-ASSIST-03).
+        skill.enabled = bool(entry["enabled"]) and skill.disabled_reason is None
+    return skill
+
+
 def load_skill_registry(
     *,
     builtin_dir: Path | None = None,
     global_dir: Path | None = None,
     project_dir: Path | None = None,
+    state_dir: Path | None = None,
 ) -> SkillRegistry:
     """Load HydraLab-managed skill descriptors from builtin/global/project folders.
 
     Third-party plugin manifests are rejected (HL-ASSIST-11); only Markdown+YAML
-    skill files load.
+    skill files load. Persisted per-skill ``enabled`` toggles and body edits in
+    ``state_dir`` are applied on top so choices survive a project reopen
+    (HL-ASSIST-02, HL-ASSIST-05).
     """
     registry = SkillRegistry()
+    state = load_skill_state(state_dir)
     scope_dirs: list[tuple[str, Path | None]] = [
         ("builtin", builtin_dir or builtin_skills_dir()),
         ("global", global_dir),
@@ -168,5 +216,57 @@ def load_skill_registry(
                 continue
             if path.suffix not in {".md", ".markdown"}:
                 continue
-            registry.skills.append(_skill_from_file(path, scope))
+            skill = _skill_from_file(path, scope)
+            entry = state.get(skill.id)
+            if entry and entry.get("text"):
+                skill = _skill_from_text(
+                    str(entry["text"]), path, scope, fallback_stem=skill.id, edited=True
+                )
+            if entry:
+                skill = _apply_state(skill, entry)
+            registry.skills.append(skill)
     return registry
+
+
+def factory_text(skill_id: str, *, builtin_dir: Path | None = None) -> str | None:
+    """Return the on-disk factory text of a built-in skill, if present."""
+    directory = builtin_dir or builtin_skills_dir()
+    for path in sorted(Path(directory).glob("*")):
+        if path.suffix not in {".md", ".markdown"}:
+            continue
+        front_matter, _ = parse_skill_file(path.read_text(encoding="utf-8"))
+        if str(front_matter.get("id") or path.stem) == skill_id:
+            return path.read_text(encoding="utf-8")
+    return None
+
+
+def set_skill_enabled(state_dir: Path, skill: LoadedSkill, enabled: bool) -> None:
+    """Persist a per-skill enabled toggle. An invalid skill cannot be enabled."""
+    if enabled and skill.disabled_reason is not None:
+        raise ValueError(f"cannot enable invalid skill: {skill.disabled_reason}")
+    state = load_skill_state(state_dir)
+    entry = state.setdefault(skill.id, {})
+    entry["enabled"] = bool(enabled)
+    save_skill_state(state_dir, state)
+
+
+def edit_skill_text(state_dir: Path, skill_id: str, text: str) -> str | None:
+    """Persist an edited skill body/front matter. Returns a validation error or None."""
+    front_matter, body = parse_skill_file(text)
+    reason = validate_skill(front_matter, body)
+    state = load_skill_state(state_dir)
+    entry = state.setdefault(skill_id, {})
+    entry["text"] = text
+    save_skill_state(state_dir, state)
+    return reason
+
+
+def restore_skill(state_dir: Path, skill_id: str) -> None:
+    """Drop any user edit so the skill reverts to its factory text (HL-ASSIST-05)."""
+    state = load_skill_state(state_dir)
+    entry = state.get(skill_id)
+    if entry and "text" in entry:
+        del entry["text"]
+        if not entry:
+            del state[skill_id]
+        save_skill_state(state_dir, state)

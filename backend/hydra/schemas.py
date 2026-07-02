@@ -402,6 +402,28 @@ class MemoryCandidateRequest(BaseModel):
     source_ref: str = Field(default="", max_length=2000)
     trust_origin: str = Field(default="trusted", max_length=40)
 
+class AgentModeUpdateRequest(BaseModel):
+    mode: str = Field(max_length=40)
+    project_id: str = Field(default="default", max_length=200)
+
+
+class FullAccessUpdateRequest(BaseModel):
+    enabled: bool = False
+    project_id: str = Field(default="default", max_length=200)
+
+
+class SkillEnabledRequest(BaseModel):
+    enabled: bool = False
+
+
+class SkillEditRequest(BaseModel):
+    text: str = Field(max_length=200_000)
+
+
+class ApprovalResolveRequest(BaseModel):
+    decision: str = Field(max_length=40)
+
+
 class ChatMessageResponse(BaseModel):
     id: str
     conversation_id: str
