@@ -8,13 +8,7 @@ from typing import Any
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.agents.approvals import ApprovalService
-from hydra.agents.policy import (
-    FULL_ACCESS_EXCLUDED_ACTIONS,
-    Outcome,
-    PolicyDecision,
-    WriteRequest,
-    evaluate_write,
-)
+from hydra.agents.policy import FULL_ACCESS_EXCLUDED_ACTIONS, Outcome, PolicyDecision, WriteRequest, evaluate_write
 from hydra.database.repository import Repository
 from hydra.services.assistant.consent import SendScopeItem, resolve_send_scope
 
@@ -92,6 +86,8 @@ class DispatchGuard:
         hard_exclusion_requires_approval = (
             decision.outcome == Outcome.REVIEW_INBOX.value
             and action.action_kind in FULL_ACCESS_EXCLUDED_ACTIONS
+            and action.trust_origin != "untrusted-external"
+            and action.justification_trust != "untrusted-external"
         )
         if hard_exclusion_requires_approval:
             decision = PolicyDecision(
