@@ -180,6 +180,105 @@ class Repository:
         res = await self.session.exec(q)
         return self._to_dict_list(res.all())
 
+    # Chat CRUD (Section 31.4 — SQLite canonical, project-scoped named chats)
+    async def ensure_default_chat(self, project_id: str) -> dict[str, Any]:
+        q = select(Chat).where(and_(Chat.project_id == project_id, Chat.soft_deleted == False))  # noqa: E712
+        existing = (await self.session.exec(q.order_by(Chat.created_at.asc()))).first()
+        if existing:
+            return self._to_dict(existing)
+        chat = Chat(project_id=project_id, name="default")
+        self.session.add(chat)
+        await self.session.commit()
+        await self.session.refresh(chat)
+        return self._to_dict(chat)
+
+    async def create_chat(self, project_id: str, name: str) -> dict[str, Any]:
+        chat = Chat(project_id=project_id, name=name or "New chat")
+        self.session.add(chat)
+        await self.session.commit()
+        await self.session.refresh(chat)
+        return self._to_dict(chat)
+
+    async def list_chats(self, project_id: str, include_archived: bool = True) -> list[dict[str, Any]]:
+        q = select(Chat).where(and_(Chat.project_id == project_id, Chat.soft_deleted == False))  # noqa: E712
+        if not include_archived:
+            q = q.where(Chat.archived == False)  # noqa: E712
+        q = q.order_by(Chat.created_at.asc())
+        res = await self.session.exec(q)
+        return self._to_dict_list(res.all())
+
+    async def get_chat(self, chat_id: str) -> Optional[dict[str, Any]]:
+        return self._to_dict(await self.session.get(Chat, chat_id))
+
+    async def update_chat(self, chat_id: str, *, name: Optional[str] = None, archived: Optional[bool] = None) -> Optional[dict[str, Any]]:
+        chat = await self.session.get(Chat, chat_id)
+        if not chat:
+            return None
+        if name is not None:
+            chat.name = name
+        if archived is not None:
+            chat.archived = archived
+        chat.updated_at = datetime.now(timezone.utc)
+        self.session.add(chat)
+        await self.session.commit()
+        await self.session.refresh(chat)
+        return self._to_dict(chat)
+
+    async def search_chats(self, project_id: str, query: str) -> list[dict[str, Any]]:
+        # Archived chats remain searchable (HL-ASSIST-02).
+        q = select(Chat).where(and_(Chat.project_id == project_id, Chat.soft_deleted == False))  # noqa: E712
+        if query:
+            q = q.where(Chat.name.like(f"%{query}%"))
+        q = q.order_by(Chat.updated_at.desc())
+        res = await self.session.exec(q)
+        return self._to_dict_list(res.all())
+
+    async def add_chat_message(
+        self,
+        chat_id: str,
+        role: str,
+        content: str,
+        *,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        context_refs: Optional[list[dict[str, Any]]] = None,
+        trust_origin: str = "user",
+    ) -> dict[str, Any]:
+        msg = Message(
+            chat_id=chat_id,
+            role=role,
+            content=content,
+            model=model,
+            provider=provider,
+            context_refs=json.dumps(context_refs or [], sort_keys=True),
+            trust_origin=trust_origin,
+        )
+        self.session.add(msg)
+        await self.session.commit()
+        await self.session.refresh(msg)
+        return self._to_dict(msg)
+
+    async def append_chat_message_content(self, message_id: str, delta: str) -> None:
+        """Incremental persistence (HL-ASSIST-03): flush the streamed prefix each chunk."""
+        msg = await self.session.get(Message, message_id)
+        if not msg:
+            return
+        msg.content = (msg.content or "") + delta
+        self.session.add(msg)
+        await self.session.commit()
+
+    async def list_chat_messages(self, chat_id: str) -> list[dict[str, Any]]:
+        q = select(Message).where(Message.chat_id == chat_id).order_by(Message.created_at.asc())
+        res = await self.session.exec(q)
+        rows = self._to_dict_list(res.all())
+        for row in rows:
+            if isinstance(row.get("context_refs"), str):
+                try:
+                    row["context_refs"] = json.loads(row["context_refs"] or "[]")
+                except json.JSONDecodeError:
+                    row["context_refs"] = []
+        return rows
+
     # Source CRUD
     async def upsert_source(self, source_data: dict[str, Any]) -> dict[str, Any]:
         source_id = source_data.get("id") or f"src_{uuid.uuid4().hex[:12]}"

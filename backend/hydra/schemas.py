@@ -173,9 +173,51 @@ class ChatMessage(BaseModel):
     role: str = Field(pattern="^(user|assistant|system)$")
     content: str = Field(min_length=1)
 
+class ContextRef(BaseModel):
+    type: str = Field(min_length=1, max_length=40)
+    id_or_path: str = Field(default="", max_length=2000)
+    locator: dict[str, object] = Field(default_factory=dict)
+    label: str = Field(default="", max_length=400)
+    text: str = Field(default="", max_length=200000)
+
+
 class ChatCompletionRequest(BaseModel):
     conversation_id: str | None = None
+    chat_id: str | None = None
+    project_id: str = Field(default="default", max_length=200)
     message: str = Field(min_length=1)
+    context_refs: list[ContextRef] = Field(default_factory=list)
+
+
+class ChatCreateRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    name: str = Field(min_length=1, max_length=200)
+
+
+class ChatUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    archived: bool | None = None
+
+
+class ChatExportRequest(BaseModel):
+    message_ids: list[str] = Field(default_factory=list)
+
+
+class SendScopeRequest(BaseModel):
+    context_refs: list[ContextRef] = Field(default_factory=list)
+
+
+class ContextFileSaveRequest(BaseModel):
+    content: str = Field(max_length=2_000_000)
+
+
+class MemoryCandidateRequest(BaseModel):
+    fact: str = Field(min_length=1, max_length=4000)
+    destination: str = Field(default="MEMORY.md", max_length=80)
+    category: str = Field(default="organization_update", max_length=80)
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    source_ref: str = Field(default="", max_length=2000)
+    trust_origin: str = Field(default="trusted", max_length=40)
 
 class ChatMessageResponse(BaseModel):
     id: str
