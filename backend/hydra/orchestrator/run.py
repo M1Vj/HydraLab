@@ -79,11 +79,13 @@ class RunStateMachine:
         *,
         stages: dict[StageEnum, Stage] | None = None,
         budget: RunBudget | None = None,
+        cancel_after_stage: StageEnum | None = None,
     ) -> None:
         self.repository = repository
         self.config = config
         self.stages = {**default_stages(config.scoring_method), **(stages or {})}
         self.budget = budget or RunBudget()
+        self.cancel_after_stage = cancel_after_stage
         self.run_id = ""
 
     async def start(self, *, project_id: str, mode: str, recipe: str = "bounded-stage-pass") -> RunExecutionResult:
@@ -125,6 +127,10 @@ class RunStateMachine:
 
             await self._persist_result(run_id, result)
             completed.append(stage)
+
+            if self.cancel_after_stage == stage:
+                await self.repository.cancel_run(run_id)
+                return RunExecutionResult(run_id=run_id, state="cancelled", completed_stages=completed)
 
             if result.stop_state == "awaiting_approval":
                 await self.repository.complete_run(run_id, status=RunStatus.BLOCKED.value)
