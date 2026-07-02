@@ -6,6 +6,7 @@ import { useWorkspaceData } from "../data";
 import { FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import { booleanPreference, looksLikeRawSecret, providerSecretStored, saveProviderModel, saveProviderSecret, saveWorkspacePreferences } from "./settingsController";
 import { AgentAccessModeControl, MemoryContextSurface, SkillsSection } from "./AssistantSettings";
+import { McpSettingsSection } from "./McpSettings";
 
 const CONSENT_TOGGLES: Array<{ key: string; label: string; fallback: boolean }> = [
   { key: "restoreOnLaunch", label: "Session restore on launch", fallback: true },
@@ -185,6 +186,7 @@ export function SettingsPanel() {
         </section>
 
         <SkillsSection />
+        <McpSettingsSection />
         <MemoryContextSurface />
       </div>
     </PanelScaffold>

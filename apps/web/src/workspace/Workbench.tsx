@@ -12,11 +12,13 @@ import { useWorkspaceStore, type ActiveProject, type RecentProject } from "./sto
 import { ExplorerPanel } from "./panels/ExplorerPanel";
 import { SourceDiscoveryPanel } from "./panels/SourceDiscoveryPanel";
 import { ResearchChatPanel } from "./panels/ResearchChatPanel";
+import { AgentRunsPanel } from "./panels/AgentRunsPanel";
+import { IdeaBoardPanel } from "./panels/IdeaBoardPanel";
 import { MarkdownEditorPanel } from "./panels/MarkdownEditorPanel";
 import { WritingPanel } from "./panels/WritingPanel";
 import { TasksPanel } from "./panels/TasksPanel";
+import { BrowserPanel } from "./panels/BrowserPanel";
 import {
-  BrowserPanel,
   CitationEvidencePanel,
   ExportPanel,
   GitPanel,
@@ -60,6 +62,8 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         "review-inbox": ReviewInboxPanel,
         git: GitPanel,
         "research-chat": ResearchChatPanel,
+        "agent-runs": AgentRunsPanel,
+        "idea-board": IdeaBoardPanel,
         "markdown-editor": MarkdownEditorPanel,
         writing: WritingPanel,
         "pdf-reader": PdfReaderPanel,
@@ -214,7 +218,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
 }
 
 function ActivityBar({ openPanel, reviewCount }: { openPanel: (id: PanelId) => void; reviewCount: number }) {
-  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "settings"];
+  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "agent-runs", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "settings"];
   return (
     <nav className="activity-bar" aria-label="Activity Bar">
       {ids.map((id) => {

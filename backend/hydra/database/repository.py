@@ -32,8 +32,14 @@ from hydra.database.models import (
     BrowserEvent,
     Chat,
     DocxArtifact,
+    DocxEditOperation,
+    DocxEditPlan,
     KgEdge,
     LexicalIndexEntry,
+    McpArtifact,
+    McpServer,
+    McpTool,
+    McpToolCallEvent,
     ReviewItem,
     SourceMergeRecord,
     SourceTombstone,
@@ -49,6 +55,29 @@ from hydra.services.citations import (
     find_duplicates,
     ris_to_csl_json,
 )
+
+
+_SECRET_KEY_NAMES = ("api_key", "token", "secret", "password", "apikey")
+
+
+def _reject_raw_secret_values(node: Any) -> None:
+    """Reject secret-named keys carrying raw values in an MCP connection dict.
+
+    Secrets must be references (``keychain:``/``env:``) so credentials never land
+    in SQLite. Keys ending in ``_ref`` are reference holders and skipped.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            key_l = str(key).lower()
+            if not key_l.endswith("_ref") and any(word in key_l for word in _SECRET_KEY_NAMES):
+                if isinstance(value, str) and not value.startswith(("keychain:", "env:")):
+                    raise ValueError(
+                        f"MCP connection field {key!r} must be a keychain:/env: reference, not a raw secret"
+                    )
+            _reject_raw_secret_values(value)
+    elif isinstance(node, list):
+        for item in node:
+            _reject_raw_secret_values(item)
 
 
 def _safe_json(value: Any, fallback: Any) -> Any:
@@ -421,6 +450,14 @@ class Repository:
 
     async def list_sources(self) -> list[dict[str, Any]]:
         res = await self.session.exec(select(Source).order_by(Source.created_at.desc()))
+        return self._to_dict_list(res.all())
+
+    async def search_sources(self, query: Optional[str] = None) -> list[dict[str, Any]]:
+        q = select(Source).where(Source.trashed == False)  # noqa: E712
+        if query:
+            q = q.where(or_(Source.title.like(f"%{query}%"), Source.url.like(f"%{query}%")))
+        q = q.order_by(Source.updated_at.desc())
+        res = await self.session.exec(q)
         return self._to_dict_list(res.all())
 
     # Citation CRUD
@@ -1186,6 +1223,138 @@ class Repository:
         res = await self.session.exec(q)
         return self._to_dict(res.first())
 
+    # --- DOCX edit plans / operations (branch 02-08, HL-WRITE-31/32/33/36) ----
+    def _docx_op_to_dict(self, op: DocxEditOperation) -> dict[str, Any]:
+        d = self._to_dict(op)
+        d["payload"] = _safe_json(d.get("payload"), {})
+        return d
+
+    async def create_docx_edit_plan(
+        self,
+        *,
+        manuscript: str,
+        target_relpath: str,
+        mode: str = "passive",
+        trust_level: str = "trusted",
+        project_id: Optional[str] = None,
+        summary: str = "",
+    ) -> dict[str, Any]:
+        plan = DocxEditPlan(
+            manuscript=manuscript,
+            target_relpath=target_relpath,
+            mode=mode,
+            trust_level=trust_level,
+            project_id=project_id,
+            summary=summary,
+        )
+        self.session.add(plan)
+        await self.session.commit()
+        await self.session.refresh(plan)
+        return self._to_dict(plan)
+
+    async def add_docx_edit_operation(
+        self,
+        *,
+        plan_id: str,
+        op_type: str,
+        target_locator: str,
+        before_summary: str = "",
+        after_summary: str = "",
+        payload: Any = None,
+        risk_label: str = "low",
+        location_label: str = "",
+        trust_level: str = "trusted",
+        justification: str = "",
+        motivating_excerpt: str = "",
+    ) -> dict[str, Any]:
+        op = DocxEditOperation(
+            plan_id=plan_id,
+            op_type=op_type,
+            target_locator=target_locator,
+            location_label=location_label,
+            before_summary=before_summary,
+            after_summary=after_summary,
+            payload=payload if isinstance(payload, str) else json.dumps(payload or {}, sort_keys=True),
+            risk_label=risk_label,
+            trust_level=trust_level,
+            justification=justification,
+            motivating_excerpt=motivating_excerpt,
+        )
+        self.session.add(op)
+        await self.session.commit()
+        await self.session.refresh(op)
+        return self._docx_op_to_dict(op)
+
+    async def get_docx_edit_plan(self, plan_id: str) -> Optional[dict[str, Any]]:
+        return self._to_dict(await self.session.get(DocxEditPlan, plan_id))
+
+    async def list_docx_edit_operations(self, plan_id: str) -> list[dict[str, Any]]:
+        q = select(DocxEditOperation).where(DocxEditOperation.plan_id == plan_id).order_by(DocxEditOperation.created_at.asc())
+        res = await self.session.exec(q)
+        return [self._docx_op_to_dict(op) for op in res.all()]
+
+    async def get_docx_edit_operation(self, op_id: str) -> Optional[dict[str, Any]]:
+        op = await self.session.get(DocxEditOperation, op_id)
+        return self._docx_op_to_dict(op) if op else None
+
+    async def review_docx_operation(self, op_id: str, decision: str) -> Optional[dict[str, Any]]:
+        if decision not in {"approved", "rejected", "pending"}:
+            raise ValueError("decision must be approved, rejected or pending")
+        op = await self.session.get(DocxEditOperation, op_id)
+        if op is None:
+            return None
+        op.review_status = decision
+        op.updated_at = datetime.now(timezone.utc)
+        self.session.add(op)
+        await self.session.commit()
+        await self.session.refresh(op)
+        return self._docx_op_to_dict(op)
+
+    async def record_docx_operation_result(
+        self, op_id: str, *, validation_status: str, applied: bool, rollback_ref: Optional[str]
+    ) -> None:
+        op = await self.session.get(DocxEditOperation, op_id)
+        if op is None:
+            return
+        op.validation_status = validation_status
+        op.applied = applied
+        op.rollback_ref = rollback_ref
+        op.updated_at = datetime.now(timezone.utc)
+        self.session.add(op)
+        await self.session.commit()
+
+    async def update_docx_plan_status(
+        self, plan_id: str, *, status: str, checkpoint_ref: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        plan = await self.session.get(DocxEditPlan, plan_id)
+        if plan is None:
+            return None
+        plan.status = status
+        if checkpoint_ref is not None:
+            plan.checkpoint_ref = checkpoint_ref
+        plan.updated_at = datetime.now(timezone.utc)
+        self.session.add(plan)
+        await self.session.commit()
+        await self.session.refresh(plan)
+        return self._to_dict(plan)
+
+    async def rollback_docx_plan(self, plan_id: str) -> Optional[dict[str, Any]]:
+        """Clear applied state for a plan's operations and mark it rolled_back."""
+        plan = await self.session.get(DocxEditPlan, plan_id)
+        if plan is None:
+            return None
+        res = await self.session.exec(select(DocxEditOperation).where(DocxEditOperation.plan_id == plan_id))
+        for op in res.all():
+            op.applied = False
+            op.updated_at = datetime.now(timezone.utc)
+            self.session.add(op)
+        plan.status = "rolled_back"
+        plan.updated_at = datetime.now(timezone.utc)
+        self.session.add(plan)
+        await self.session.commit()
+        await self.session.refresh(plan)
+        return self._to_dict(plan)
+
     async def upsert_browser_event(self, event_data: dict[str, Any]) -> dict[str, Any]:
         q = select(BrowserEvent).where(
             and_(
@@ -1615,6 +1784,198 @@ class Repository:
         if item_type:
             query = query.where(ReviewItem.item_type == item_type)
         res = await self.session.exec(query)
+        return self._to_dict_list(res.all())
+
+    # --- MCP registry (feature 02-02, Section 25.7) -------------------------
+    async def register_mcp_server(
+        self,
+        *,
+        name: str,
+        transport: str = "stdio",
+        connection: Optional[dict[str, Any]] = None,
+        auth_handle_ref: Optional[str] = None,
+        connector: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Persist an MCP server disabled by default (HL-ASSIST-01).
+
+        ``auth_handle_ref`` MUST be a keychain reference; a raw secret is
+        rejected so credentials never land in SQLite.
+        """
+        if auth_handle_ref and not str(auth_handle_ref).startswith(("keychain:", "env:")):
+            raise ValueError("auth_handle_ref must be a keychain:* or env:* reference, never a raw secret")
+        _reject_raw_secret_values(connection or {})
+        server = McpServer(
+            name=name,
+            transport=transport,
+            connection_json=json.dumps(connection or {}, sort_keys=True),
+            auth_handle_ref=auth_handle_ref,
+            connector=connector,
+            enabled=False,
+            status="registered",
+        )
+        self.session.add(server)
+        await self.session.commit()
+        await self.session.refresh(server)
+        return self._to_dict(server)
+
+    async def get_mcp_server(self, server_id: str) -> Optional[dict[str, Any]]:
+        return self._to_dict(await self.session.get(McpServer, server_id))
+
+    async def list_mcp_servers(self) -> list[dict[str, Any]]:
+        res = await self.session.exec(select(McpServer).order_by(McpServer.created_at.asc()))
+        return self._to_dict_list(res.all())
+
+    async def set_mcp_server_enabled(self, server_id: str, enabled: bool) -> Optional[dict[str, Any]]:
+        server = await self.session.get(McpServer, server_id)
+        if server is None:
+            return None
+        server.enabled = enabled
+        server.updated_at = datetime.now(timezone.utc)
+        self.session.add(server)
+        await self.session.commit()
+        await self.session.refresh(server)
+        return self._to_dict(server)
+
+    async def set_mcp_server_status(self, server_id: str, status: str, connection_error: str = "") -> Optional[dict[str, Any]]:
+        server = await self.session.get(McpServer, server_id)
+        if server is None:
+            return None
+        server.status = status
+        server.connection_error = connection_error
+        server.updated_at = datetime.now(timezone.utc)
+        self.session.add(server)
+        await self.session.commit()
+        await self.session.refresh(server)
+        return self._to_dict(server)
+
+    async def upsert_mcp_tool(
+        self,
+        *,
+        server_id: str,
+        name: str,
+        description: str = "",
+        input_schema: Optional[dict[str, Any]] = None,
+        read_only: bool = False,
+    ) -> dict[str, Any]:
+        """Persist a discovered tool disabled + deny by default (HL-ASSIST-02).
+
+        Re-discovery updates the schema/description but NEVER silently
+        re-enables or re-allows a tool the researcher already configured.
+        """
+        existing = (
+            await self.session.exec(
+                select(McpTool).where(and_(McpTool.server_id == server_id, McpTool.name == name))
+            )
+        ).first()
+        if existing is not None:
+            existing.description = description
+            existing.input_schema_json = json.dumps(input_schema or {}, sort_keys=True)
+            existing.read_only = read_only
+            existing.updated_at = datetime.now(timezone.utc)
+            self.session.add(existing)
+            await self.session.commit()
+            await self.session.refresh(existing)
+            return self._to_dict(existing)
+        tool = McpTool(
+            server_id=server_id,
+            name=name,
+            description=description,
+            input_schema_json=json.dumps(input_schema or {}, sort_keys=True),
+            enabled=False,
+            permission="deny",
+            read_only=read_only,
+        )
+        self.session.add(tool)
+        await self.session.commit()
+        await self.session.refresh(tool)
+        return self._to_dict(tool)
+
+    async def get_mcp_tool(self, tool_id: str) -> Optional[dict[str, Any]]:
+        return self._to_dict(await self.session.get(McpTool, tool_id))
+
+    async def list_mcp_tools(self, server_id: Optional[str] = None, enabled_only: bool = False) -> list[dict[str, Any]]:
+        q = select(McpTool)
+        if server_id:
+            q = q.where(McpTool.server_id == server_id)
+        if enabled_only:
+            q = q.where(McpTool.enabled == True)  # noqa: E712
+        q = q.order_by(McpTool.name.asc())
+        res = await self.session.exec(q)
+        return self._to_dict_list(res.all())
+
+    async def set_mcp_tool_permission(
+        self, tool_id: str, *, enabled: Optional[bool] = None, permission: Optional[str] = None
+    ) -> Optional[dict[str, Any]]:
+        tool = await self.session.get(McpTool, tool_id)
+        if tool is None:
+            return None
+        if enabled is not None:
+            tool.enabled = enabled
+        if permission is not None:
+            if permission not in {"allow", "deny"}:
+                raise ValueError("permission must be 'allow' or 'deny'")
+            tool.permission = permission
+        tool.updated_at = datetime.now(timezone.utc)
+        self.session.add(tool)
+        await self.session.commit()
+        await self.session.refresh(tool)
+        return self._to_dict(tool)
+
+    async def record_mcp_call_event(
+        self,
+        *,
+        status: str,
+        tool_id: Optional[str] = None,
+        server_id: Optional[str] = None,
+        tool_name: str = "",
+        request_summary: str = "",
+        output_summary: str = "",
+        redaction: str = "none",
+        content_exclusions: Optional[list[dict[str, Any]]] = None,
+        detail: str = "",
+    ) -> dict[str, Any]:
+        event = McpToolCallEvent(
+            status=status,
+            tool_id=tool_id,
+            server_id=server_id,
+            tool_name=tool_name,
+            request_summary=request_summary,
+            output_summary=output_summary,
+            redaction=redaction,
+            content_exclusions_json=json.dumps(content_exclusions or [], sort_keys=True),
+            detail=detail,
+        )
+        self.session.add(event)
+        await self.session.commit()
+        await self.session.refresh(event)
+        return self._to_dict(event)
+
+    async def store_mcp_artifact(self, *, event_id: str, tool_id: Optional[str], content: str) -> dict[str, Any]:
+        artifact = McpArtifact(
+            event_id=event_id,
+            tool_id=tool_id,
+            trust_level="untrusted-external",
+            content=content,
+        )
+        self.session.add(artifact)
+        await self.session.commit()
+        await self.session.refresh(artifact)
+        return self._to_dict(artifact)
+
+    async def list_mcp_call_events(self, tool_id: Optional[str] = None) -> list[dict[str, Any]]:
+        q = select(McpToolCallEvent)
+        if tool_id:
+            q = q.where(McpToolCallEvent.tool_id == tool_id)
+        q = q.order_by(McpToolCallEvent.created_at.desc())
+        res = await self.session.exec(q)
+        return self._to_dict_list(res.all())
+
+    async def list_mcp_artifacts(self, event_id: Optional[str] = None) -> list[dict[str, Any]]:
+        q = select(McpArtifact)
+        if event_id:
+            q = q.where(McpArtifact.event_id == event_id)
+        q = q.order_by(McpArtifact.created_at.desc())
+        res = await self.session.exec(q)
         return self._to_dict_list(res.all())
 
     # --- Citation import/export (HL-CITE-01, HL-CITE-02) ---------------------

@@ -294,6 +294,31 @@ class BrowserEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class BrowserHostPermission(SQLModel, table=True):
+    __tablename__ = "browser_host_permissions"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    host: str = Field(index=True)
+    state: str = Field(default="ask")
+    task_group_id: Optional[str] = Field(default=None, index=True)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class BrowserActionLog(SQLModel, table=True):
+    __tablename__ = "browser_action_logs"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    action: str = Field(index=True)
+    host: str = Field(index=True)
+    mode: str = Field(default="copilot")
+    approval_result: str = Field(default="approved")
+    target_url: str = Field(default="")
+    task_group_id: Optional[str] = Field(default=None, index=True)
+    trust_level: str = Field(default="user-curated")
+    payload_json: str = Field(default="{}")
+    timestamp: datetime = Field(default_factory=utcnow)
+
+
 class AgentRun(SQLModel, table=True):
     __tablename__ = "agent_runs"
     id: str = Field(default_factory=uuid_text, primary_key=True)
@@ -303,6 +328,8 @@ class AgentRun(SQLModel, table=True):
     mode: str = Field(default="passive")
     inputs_ref: str = Field(default="[]")
     status: str = Field(default="queued")
+    paused: bool = Field(default=False)
+    tokens_used: int = Field(default=0)
     started_at: Optional[datetime] = Field(default=None)
     ended_at: Optional[datetime] = Field(default=None)
     artifacts: str = Field(default="[]")
@@ -310,6 +337,68 @@ class AgentRun(SQLModel, table=True):
     trust_decisions: str = Field(default="[]")
     soft_deleted: bool = Field(default=False)
     created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AgentRunStep(SQLModel, table=True):
+    """One incrementally-persisted step of a run trace (HL-ASSIST-04).
+
+    Steps are flushed one row at a time so a cancelled run keeps its completed
+    prefix intact; ``step_index`` preserves order independent of timestamps.
+    """
+
+    __tablename__ = "agent_run_steps"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(foreign_key="agent_runs.id", index=True)
+    step_index: int = Field(default=0)
+    kind: str = Field(default="")
+    status: str = Field(default="completed")
+    summary: str = Field(default="")
+    payload_json: str = Field(default="{}")
+    tokens: int = Field(default=0)
+    trust_origin: str = Field(default="user")
+    skill_id: Optional[str] = Field(default=None)
+    capability: Optional[str] = Field(default=None)
+    denied_capability: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class AgentApproval(SQLModel, table=True):
+    """A per-item Co-pilot approval / Full-Access downgrade record (HL-MODE-02).
+
+    Rejecting an approval mutates no workspace state; the apply callback only
+    runs on an ``approved`` decision. ``target_kind``/``target_ref`` intentionally
+    avoid the source-polymorphic ``*_type``/``*_id`` column-name convention.
+    """
+
+    __tablename__ = "agent_approvals"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: Optional[str] = Field(default=None, foreign_key="agent_runs.id", index=True, nullable=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    mode: str = Field(default="copilot")
+    action_kind: str = Field(default="")
+    target_kind: Optional[str] = Field(default=None)
+    target_ref: Optional[str] = Field(default=None)
+    summary: str = Field(default="")
+    payload_json: str = Field(default="{}")
+    status: str = Field(default="pending")
+    decision: Optional[str] = Field(default=None)
+    reason: str = Field(default="")
+    trust_origin: str = Field(default="user")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AgentModePolicy(SQLModel, table=True):
+    """Per-project Agent Access Mode + Full-Access opt-in (HL-MODE-01/03).
+
+    Full Access defaults OFF and requires explicit per-project enablement.
+    """
+
+    __tablename__ = "agent_mode_policies"
+    project_id: str = Field(primary_key=True)
+    default_mode: str = Field(default="passive")
+    full_access_enabled: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=utcnow)
 
 
@@ -506,12 +595,143 @@ class DocxArtifact(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class DocxEditPlan(SQLModel, table=True):
+    """A reviewable set of typed OpenXML structural edits for one working DOCX.
+
+    The plan owns the target working DOCX (under ``writing/manuscripts/``), the
+    pre-apply checkpoint reference and the plan-level lifecycle status so apply
+    and rollback are auditable (HL-WRITE-33/36). Operations reference it by
+    ``plan_id``. Rows are SQLite-canonical and survive force-quit (HL-WRITE-32).
+    """
+
+    __tablename__ = "docx_edit_plans"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    manuscript: str = Field(default="", index=True)
+    target_relpath: str = Field(default="")
+    status: str = Field(default="draft")  # draft | applied | rolled_back | failed
+    mode: str = Field(default="passive")  # passive | copilot | full_access
+    checkpoint_ref: Optional[str] = Field(default=None)
+    trust_level: str = Field(default="trusted")  # trusted | untrusted-external
+    summary: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class DocxEditOperation(SQLModel, table=True):
+    """One typed, inspectable OpenXML structural edit (HL-WRITE-31/32).
+
+    Never an opaque whole-file rewrite: each row is a single structural op with a
+    stable ``target_locator``, human before/after summaries, a JSON payload, and
+    the review/validation/trust state that gates whether it may ever be applied.
+    """
+
+    __tablename__ = "docx_edit_operations"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    plan_id: str = Field(foreign_key="docx_edit_plans.id", index=True)
+    op_type: str = Field(default="other")  # replace_text|insert_paragraph|apply_style|update_table|update_citation|comment|delete|other
+    target_locator: str = Field(default="")
+    location_label: str = Field(default="")
+    before_summary: str = Field(default="")
+    after_summary: str = Field(default="")
+    payload: str = Field(default="{}")  # json
+    risk_label: str = Field(default="low")  # low | medium | high
+    review_status: str = Field(default="pending")  # pending | approved | rejected
+    validation_status: str = Field(default="unvalidated")  # unvalidated | valid | invalid
+    applied: bool = Field(default=False)
+    rollback_ref: Optional[str] = Field(default=None)
+    trust_level: str = Field(default="trusted", index=True)  # trusted | untrusted-external
+    justification: str = Field(default="")
+    motivating_excerpt: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class MigrationIdMap(SQLModel, table=True):
     __tablename__ = "migration_id_maps"
     id: str = Field(default_factory=uuid_text, primary_key=True)
     object_type: str = Field(index=True)
     old_id: str = Field(index=True)
     new_id: str = Field(index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class McpServer(SQLModel, table=True):
+    """MCP server registry (HL-ASSIST-01, Section 25.7).
+
+    Stores transport/connection config and a keychain *reference* to the auth
+    handle (never a raw secret). ``enabled`` defaults to ``False``; a server is
+    inert until the researcher turns it on.
+    """
+
+    __tablename__ = "mcp_servers"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    name: str = Field(index=True)
+    transport: str = Field(default="stdio")  # stdio | http | inproc
+    connection_json: str = Field(default="{}")  # transport/connection config
+    auth_handle_ref: Optional[str] = Field(default=None)  # keychain:* reference only
+    enabled: bool = Field(default=False)
+    connector: Optional[str] = Field(default=None)  # e.g. "zotero-local" for connector contracts
+    status: str = Field(default="registered")  # registered | connected | failed
+    connection_error: str = Field(default="")  # populated on failure state
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class McpTool(SQLModel, table=True):
+    """Discovered MCP tool as a managed capability (HL-ASSIST-02/03).
+
+    Every discovered tool persists ``enabled=False`` and ``permission='deny'``;
+    it is not callable until explicitly enabled/allowed.
+    """
+
+    __tablename__ = "mcp_tools"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    server_id: str = Field(foreign_key="mcp_servers.id", index=True)
+    name: str = Field(index=True)
+    description: str = Field(default="")
+    input_schema_json: str = Field(default="{}")
+    enabled: bool = Field(default=False)
+    permission: str = Field(default="deny")  # allow | deny (resolved before invocation)
+    read_only: bool = Field(default=False)  # connector contract advertises read-only
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class McpToolCallEvent(SQLModel, table=True):
+    """Exactly one trace event per attempted MCP tool call (HL-ASSIST-04).
+
+    Records tool id, status, request/output summaries, redaction applied and any
+    content-type exclusions enforced by the consent gate.
+    """
+
+    __tablename__ = "mcp_tool_call_events"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    server_id: Optional[str] = Field(default=None, index=True)
+    tool_id: Optional[str] = Field(default=None, index=True)
+    tool_name: str = Field(default="")
+    status: str = Field(index=True)  # allowed-completed | denied | error
+    request_summary: str = Field(default="")
+    output_summary: str = Field(default="")
+    redaction: str = Field(default="none")
+    content_exclusions_json: str = Field(default="[]")
+    detail: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class McpArtifact(SQLModel, table=True):
+    """Retained result of a completed MCP tool call, tagged untrusted-external.
+
+    Linked to its trace event (HL-ASSIST-05, Section 34.1). Tool output re-enters
+    the model only through the delimited untrusted region (HL-TRUST-01).
+    """
+
+    __tablename__ = "mcp_artifacts"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    event_id: str = Field(foreign_key="mcp_tool_call_events.id", index=True)
+    tool_id: Optional[str] = Field(default=None, index=True)
+    trust_level: str = Field(default="untrusted-external", index=True)
+    content: str = Field(default="")
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -535,3 +755,45 @@ class ContextFileChange(SQLModel, table=True):
     checkpoint_ref: Optional[str] = Field(default=None)  # Git/checkpoint id for HYDRA.md
     logs_only: bool = Field(default=True)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class IdeaCandidate(SQLModel, table=True):
+    """A saved idea-generation candidate artifact (branch 02-06, HL-ASSIST-04).
+
+    Every field of the canonical candidate schema is persisted so a candidate
+    round-trips. ``evidence_links``/``required_sources`` hold resolvable refs to
+    existing source/evidence ids as JSON (never fabricated free text, DEC-11);
+    they are intentionally NOT source-FK columns, so no entry is added to the
+    Repository source FK-repoint registry. ``parent_candidate_id`` records single
+    Evolve-pass lineage (HL-ASSIST-09). ``rubric_results`` carries the normalized
+    Compare output (per-criterion value/rationale/stage_run_id/source_refs,
+    HL-ASSIST-06/07); it stays empty when Compare is disabled (HL-ASSIST-08).
+    """
+
+    __tablename__ = "idea_candidates"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(foreign_key="agent_runs.id", index=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    title: str = Field(default="")
+    short_hypothesis: str = Field(default="")
+    research_question: str = Field(default="")
+    motivation: str = Field(default="")
+    method_sketch: str = Field(default="")
+    expected_contribution: str = Field(default="")
+    required_sources: str = Field(default="[]")  # json list of source ids
+    evidence_links: str = Field(default="[]")  # json list of {source_id, evidence_id?}
+    novelty_claim: str = Field(default="")
+    feasibility_notes: str = Field(default="")
+    risks: str = Field(default="")
+    estimated_effort: str = Field(default="")
+    generated_by_stage: str = Field(default="generate")  # generate | evolve
+    parent_candidate_id: Optional[str] = Field(
+        default=None, foreign_key="idea_candidates.id", index=True, nullable=True
+    )
+    status: str = Field(default="draft", index=True)  # draft|reviewed|ranked|promoted|rejected
+    critique: str = Field(default="{}")  # json {weaknesses, risks, missing_evidence}
+    rubric_results: str = Field(default="[]")  # json RubricResult list (empty when Compare off)
+    rank: Optional[int] = Field(default=None)
+    trust_origin: str = Field(default="user")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)

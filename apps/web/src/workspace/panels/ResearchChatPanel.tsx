@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { LockKeyhole, Paperclip, Plus, Search, Send, X } from "lucide-react";
-import { api, type Chat, type ChatMessage, type ContextRef, type SendScopeResult } from "../../lib/api";
+import { LockKeyhole, Pause, Paperclip, Play, Plus, Search, Send, ShieldQuestion, X } from "lucide-react";
+import { api, type AgentApproval, type AssistantModes, type Chat, type ChatMessage, type ContextRef, type SendScopeResult } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
+import { fetchApprovals, fetchModes, modeLabel, resolveApproval } from "./agentController";
 import { EmptyState, FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import {
   archiveChat,
@@ -31,6 +32,69 @@ const PICKER_TYPES: Array<{ type: string; label: string }> = [
   { type: "task", label: "Task" },
   { type: "browser_event", label: "Browser event" },
 ];
+
+/** Active Agent Access Mode + live/pause control + pending approval prompts. */
+function AgentRunBar({ streaming, announce }: { streaming: boolean; announce: (message: string) => void }) {
+  const [modes, setModes] = useState<AssistantModes | null>(null);
+  const [approvals, setApprovals] = useState<AgentApproval[]>([]);
+  const [paused, setPaused] = useState(false);
+
+  async function loadApprovals() {
+    try {
+      setApprovals(await fetchApprovals(PROJECT_ID));
+    } catch {
+      setApprovals([]);
+    }
+  }
+
+  useEffect(() => {
+    void fetchModes(PROJECT_ID).then(setModes).catch(() => setModes(null));
+    void loadApprovals();
+  }, []);
+
+  async function decide(id: string, decision: "approved" | "rejected") {
+    await resolveApproval(id, decision);
+    announce(decision === "approved" ? "Approved proposed change" : "Rejected proposed change; workspace unchanged");
+    await loadApprovals();
+  }
+
+  if (!modes) return null;
+  const active = modes.default_mode;
+  return (
+    <div className="agent-run-bar" aria-label="Agent run status">
+      <div className="agent-mode-indicator" role="status">
+        <span className="agent-mode-dot" aria-hidden />
+        <span>Mode: <strong>{modeLabel(active)}</strong></span>
+        {active === "full_access" && (
+          <button
+            type="button"
+            className="agent-pause-control"
+            aria-pressed={paused}
+            onClick={() => { setPaused((value) => !value); announce(paused ? "Resumed run" : "Paused run"); }}
+          >
+            {paused ? <Play size={13} /> : <Pause size={13} />} {paused ? "Resume" : "Pause"}
+          </button>
+        )}
+        {streaming && <span className="agent-live-tag">live</span>}
+      </div>
+      {approvals.length > 0 && (
+        <ul className="agent-approval-list" aria-label="Pending approvals">
+          {approvals.map((approval) => (
+            <li key={approval.id} className="agent-approval">
+              <ShieldQuestion size={13} aria-hidden />
+              <span className="approval-summary">{approval.summary || approval.action_kind}</span>
+              {approval.target_ref && <span className="approval-target">{approval.target_ref}</span>}
+              <div className="approval-actions">
+                <button type="button" onClick={() => void decide(approval.id, "approved")}>Accept</button>
+                <button type="button" onClick={() => void decide(approval.id, "rejected")}>Reject</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export function ResearchChatPanel({ announce }: PanelComponentProps) {
   const [chats, setChats] = useState<Chat[]>([]);
@@ -204,6 +268,7 @@ export function ResearchChatPanel({ announce }: PanelComponentProps) {
         </aside>
 
         <section className="chat-thread" aria-live="polite">
+          <AgentRunBar streaming={streaming} announce={announce} />
           {messages.length === 0 ? (
             <EmptyState title="Default project chat" message="Ask research questions grounded in the active workspace." />
           ) : (

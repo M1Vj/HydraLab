@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
@@ -29,8 +30,10 @@ from hydra.browser_bridge import (
 from hydra.research import citation_for, compose_research_answer, search_academic_sources
 from hydra.schemas import (
     BrowserCaptureRequest,
+    BrowserCopilotActionRequest,
     BrowserHandshakeRequest,
     BrowserHistoryRequest,
+    BrowserHostPermissionUpdateRequest,
     AnnotationClaimRequest,
     AnnotationCreateRequest,
     EvidenceCreateRequest,
@@ -44,12 +47,17 @@ from hydra.schemas import (
     SourceTrashRequest,
     SourceUnmergeRequest,
     ManuscriptExportRequest,
+    DocxEditPlanRequest,
+    DocxOperationReviewRequest,
     NoteCreateRequest,
     NoteFileSaveRequest,
     NoteSuggestionRequest,
     NoteUpdateRequest,
     ProviderSettingsRequest,
     ProviderSecretRequest,
+    McpServerRegisterRequest,
+    McpServerEnableRequest,
+    McpToolPermissionRequest,
     SettingsUpdateRequest,
     SourceDiscoveryRequest,
     SourceSaveRequest,
@@ -74,6 +82,16 @@ from hydra.schemas import (
     ChatUpdateRequest,
     ChatExportRequest,
     SendScopeRequest,
+    AgentModeUpdateRequest,
+    FullAccessUpdateRequest,
+    SkillEnabledRequest,
+    SkillEditRequest,
+    ApprovalResolveRequest,
+    OrchestratorRunStartRequest,
+    LiteratureReviewRunStartRequest,
+    LiteratureReviewSaveRequestModel,
+    IdeaRunStartRequest,
+    IdeaPromoteRequest,
     ContextFileSaveRequest,
     MemoryCandidateRequest,
 )
@@ -101,6 +119,16 @@ from hydra.services.citations import (
     resolve_manuscript_style,
 )
 from hydra.services.docx import DocxPackageError, DocxService, detect_latex_toolchain
+from hydra.services.docx import (
+    DocxApplyError,
+    DocxPlanError,
+    EditProposal,
+    apply_operations,
+    build_plan,
+    read_structural_model,
+    resolve_working_docx,
+    rollback as rollback_docx_plan,
+)
 from hydra.services.writing import (
     global_defaults_from_settings,
     list_manuscripts,
@@ -112,6 +140,12 @@ from hydra.services.ingestion.types import QuarantineError
 from hydra.services.tasks import TaskProposal, propose_task
 from hydra.services.git import GitError, GitService, suggest_grouped_commits
 from hydra.services.console import ConsoleService
+from hydra.services.browser import (
+    BrowserActionRequest as BrowserServiceActionRequest,
+    BrowserActionLogRepository,
+    BrowserCopilotService,
+    BrowserHostPermissionRepository,
+)
 from hydra.services.export import (
     build_project_zip,
     export_options,
@@ -127,7 +161,39 @@ from hydra.settings.toml_config import load_settings, save_settings
 from hydra.settings.secrets import InMemorySecretStore, KeyringSecretStore, ProviderSecretService, SecretStore
 from hydra.providers import MockProvider, ProviderRouter, RoutingPolicy, RunBudget, build_provider
 from hydra.services.assistant import AssistantConfig, AssistantService, ProviderCache
-from hydra.skills.registry import PLUGIN_REJECTION_MESSAGE, load_skill_registry
+from hydra.skills.registry import (
+    PLUGIN_REJECTION_MESSAGE,
+    edit_skill_text,
+    load_skill_registry,
+    restore_skill,
+    set_skill_enabled,
+)
+from hydra.agents.policy import InvalidModeError, VALID_MODES, normalize_mode
+from hydra.agents.runs import RunBudget as AgentRunBudget
+from hydra.agents.runs import RunRepository
+from hydra.agents.approvals import ApprovalService, to_contract
+from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
+from hydra.orchestrator.run import OrchestratorConfigError, RunConfig, RunStateMachine
+from hydra.orchestrator.stages import StageEnum
+from hydra.recipes.literature_review import (
+    LiteratureReviewInput,
+    LiteratureReviewSaveRequest,
+    execute_literature_review,
+    literature_review_descriptor,
+    resolve_literature_review_save_approval,
+    save_literature_review_artifact,
+    validate_literature_review_input,
+)
+from hydra.recipes.paper_critique import PAPER_CRITIQUE_RECIPE_ID, paper_critique_recipe, run_paper_critique_recipe
+from hydra.recipes.related_work import RELATED_WORK_RECIPE_ID, related_work_recipe, run_related_work_recipe
+from hydra.recipes.idea_generation import (
+    DEFAULT_STAGE_TOGGLES as IDEA_DEFAULT_STAGE_TOGGLES,
+    IDEA_SLASH_COMMANDS,
+    IdeaPromotionService,
+    IdeaRunInput,
+    run_idea_recipe,
+)
+from hydra.database.models import IdeaCandidate as IdeaCandidateModel
 from hydra.services.project_context import (
     ContextFileMemory,
     ensure_hydra_md,
@@ -392,6 +458,66 @@ def create_app() -> FastAPI:
         events = await repo.list_browser_events(project_id)
         return build_browser_working_set(events, project_id=project_id, budget_tokens=budget_tokens)
 
+    @app.get("/api/browser/modes")
+    async def browser_modes(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return {"modes": BrowserCopilotService(session).browser_modes()}
+
+    @app.get("/api/browser/actions")
+    async def browser_actions(host: str = "") -> dict[str, object]:
+        from hydra.services.browser import browser_copilot_tool_descriptors
+
+        return {"actions": browser_copilot_tool_descriptors(host)}
+
+    @app.get("/api/browser/permissions")
+    async def browser_host_permission(
+        project_id: str,
+        host: str,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        permission = await BrowserHostPermissionRepository(session).get(project_id, host)
+        return {"permission": permission}
+
+    @app.post("/api/browser/permissions")
+    async def set_browser_host_permission(
+        request: BrowserHostPermissionUpdateRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        permission = await BrowserHostPermissionRepository(session).set(
+            request.project_id,
+            request.host,
+            request.state,
+            task_group_id=request.task_group_id,
+        )
+        return {"permission": permission}
+
+    @app.get("/api/browser/action-log")
+    async def browser_action_log(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return {"actions": await BrowserActionLogRepository(session).list(project_id=project_id)}
+
+    @app.post("/api/browser/copilot/actions")
+    async def propose_browser_action(
+        request: BrowserCopilotActionRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        result = await BrowserCopilotService(session).propose(
+            BrowserServiceActionRequest(
+                project_id=request.project_id,
+                action=request.action,
+                url=request.url,
+                title=request.title,
+                page_text=request.page_text,
+                host=request.host,
+                mode=request.mode,
+                task_group_id=request.task_group_id,
+                task_group_label=request.task_group_label,
+                user_triggered=request.user_triggered,
+            )
+        )
+        return result.__dict__
+
     @app.post("/api/browser/propose-source")
     async def browser_propose_source(
         request: BrowserCaptureRequest,
@@ -532,19 +658,60 @@ def create_app() -> FastAPI:
             )
         return {"included": scope.included, "excluded": scope.excluded, "blocked": scope.blocked}
 
+    async def _mode_policy(session: AsyncSession, project_id: str) -> AgentModePolicy:
+        policy = await session.get(AgentModePolicy, project_id)
+        if policy is None:
+            # Full Access defaults OFF on a fresh project (HL-MODE-03).
+            policy = AgentModePolicy(project_id=project_id, default_mode="passive", full_access_enabled=False)
+        return policy
+
     @app.get("/api/assistant/modes")
-    async def assistant_modes() -> dict[str, object]:
+    async def assistant_modes(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         privacy = _assistant_privacy()
+        policy = await _mode_policy(session, project_id)
         return {
-            "default_mode": privacy["default_mode"],
+            "default_mode": policy.default_mode or privacy["default_mode"],
+            "full_access_enabled": bool(policy.full_access_enabled),
             "modes": [
                 {"id": "passive", "label": "Passive (Suggest-only)", "enabled": True, "phase": 1},
-                {"id": "copilot", "label": "Co-pilot (Approve-to-apply)", "enabled": False, "phase": 2},
-                {"id": "full_access", "label": "Full Access (YOLO)", "enabled": False, "phase": 2},
+                {"id": "copilot", "label": "Co-pilot (Approve-to-apply)", "enabled": True, "phase": 2},
+                {"id": "full_access", "label": "Full Access (YOLO)", "enabled": bool(policy.full_access_enabled), "phase": 2},
             ],
             "offline_only": privacy["offline_only"],
             "g3_provider_send": privacy["g3_enabled"],
         }
+
+    @app.post("/api/assistant/mode")
+    async def set_assistant_mode(request: AgentModeUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        try:
+            mode = normalize_mode(request.mode)
+        except InvalidModeError as exc:
+            raise HTTPException(status_code=400, detail={"reason": str(exc), "valid_modes": list(VALID_MODES)}) from exc
+        settings_path = app_data_root() / "settings.toml"
+        settings = load_settings(settings_path).data
+        settings.setdefault("assistant", {})["default_mode"] = mode
+        save_settings(settings_path, settings)
+        policy = await _mode_policy(session, request.project_id)
+        policy.default_mode = mode
+        # Selecting a higher mode never itself enables Full Access; that is a
+        # separate per-project opt-in (HL-MODE-03).
+        policy.updated_at = datetime.now(timezone.utc)
+        session.add(policy)
+        await session.commit()
+        await session.refresh(policy)
+        return {"default_mode": policy.default_mode, "full_access_enabled": bool(policy.full_access_enabled)}
+
+    @app.post("/api/assistant/full-access")
+    async def set_full_access(request: FullAccessUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        policy.full_access_enabled = bool(request.enabled)
+        if not request.enabled and policy.default_mode == "full_access":
+            policy.default_mode = "passive"
+        policy.updated_at = datetime.now(timezone.utc)
+        session.add(policy)
+        await session.commit()
+        await session.refresh(policy)
+        return {"full_access_enabled": bool(policy.full_access_enabled), "default_mode": policy.default_mode}
 
     @app.post("/api/assistant/offline")
     async def set_offline_only(enabled: bool = True) -> dict[str, object]:
@@ -558,13 +725,544 @@ def create_app() -> FastAPI:
         return {"offline_only": bool(enabled), "cache_purged": bool(enabled), "status": "offline-blocked" if enabled else "online"}
 
     # ---------------------------------------------------------------- skills
+    def _skill_project_dir() -> Path:
+        return hydra_project_root() / ".hydralab" / "skills"
+
+    def _skill_state_dir() -> Path:
+        # Kept separate from the scope folders so the state JSON is never mistaken
+        # for a plugin manifest during discovery.
+        return hydra_project_root() / ".hydralab" / "skill-state"
+
+    def _load_skills():
+        return load_skill_registry(project_dir=_skill_project_dir(), state_dir=_skill_state_dir())
+
     @app.get("/api/skills")
     async def list_skills() -> dict[str, object]:
-        registry = load_skill_registry(project_dir=hydra_project_root() / ".hydralab" / "skills")
+        registry = _load_skills()
         return {
             "skills": [s.to_api() for s in registry.skills],
             "rejected_plugins": registry.rejected_plugins,
         }
+
+    @app.post("/api/skills/{skill_id}/enabled")
+    async def toggle_skill(skill_id: str, request: SkillEnabledRequest) -> dict[str, object]:
+        registry = _load_skills()
+        skill = registry.get(skill_id)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        try:
+            set_skill_enabled(_skill_state_dir(), skill, request.enabled)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _load_skills().get(skill_id).to_api()
+
+    @app.put("/api/skills/{skill_id}")
+    async def edit_skill(skill_id: str, request: SkillEditRequest) -> dict[str, object]:
+        registry = _load_skills()
+        if registry.get(skill_id) is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        reason = edit_skill_text(_skill_state_dir(), skill_id, request.text)
+        return {"skill": _load_skills().get(skill_id).to_api(), "validation_error": reason}
+
+    @app.post("/api/skills/{skill_id}/restore")
+    async def restore_skill_default(skill_id: str) -> dict[str, object]:
+        registry = _load_skills()
+        skill = registry.get(skill_id)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="skill not found")
+        if skill.scope != "builtin":
+            raise HTTPException(status_code=400, detail="only built-in skills restore to factory text")
+        restore_skill(_skill_state_dir(), skill_id)
+        return _load_skills().get(skill_id).to_api()
+
+    # ----------------------------------------------------- orchestrator / agent runs
+    @app.get("/api/orchestrator/stages")
+    async def list_orchestrator_stages() -> dict[str, object]:
+        return {
+            "stages": [
+                {"id": stage.value, "label": stage.value.replace("_", " ").title(), "enabled": True}
+                for stage in StageEnum
+            ]
+        }
+
+    @app.get("/api/orchestrator/recipes")
+    async def list_orchestrator_recipes() -> dict[str, object]:
+        descriptor = literature_review_descriptor(engine_enabled=True)
+        recipes: list[dict[str, object]] = [] if descriptor is None else [descriptor.public_dict()]
+        recipes.extend([paper_critique_recipe(), related_work_recipe()])
+        return {"recipes": recipes}
+
+    @app.get("/api/orchestrator/runs")
+    async def list_orchestrator_runs(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        rows = (
+            await session.exec(
+                select(AgentRun)
+                .where(
+                    AgentRun.project_id == project_id,
+                    AgentRun.recipe.in_(["bounded-stage-pass", PAPER_CRITIQUE_RECIPE_ID, RELATED_WORK_RECIPE_ID]),
+                )
+                .order_by(AgentRun.created_at.desc())
+            )
+        ).all()
+        return {
+            "runs": [
+                {
+                    "id": run.id,
+                    "project_id": run.project_id,
+                    "mode": run.mode,
+                    "status": run.status,
+                    "paused": run.paused,
+                    "tokens_used": run.tokens_used,
+                    "created_at": run.created_at.timestamp(),
+                }
+                for run in rows
+            ]
+        }
+
+    @app.post("/api/orchestrator/runs")
+    async def start_orchestrator_run(
+        request: OrchestratorRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        mode = policy.default_mode or privacy["default_mode"]
+        recipe_privacy = {
+            "g3_enabled": privacy["g3_enabled"],
+            "offline_only": privacy["offline_only"],
+            "opt_ins": privacy["opt_ins"],
+        }
+        if request.recipe_id in {PAPER_CRITIQUE_RECIPE_ID, RELATED_WORK_RECIPE_ID}:
+            runner = run_paper_critique_recipe if request.recipe_id == PAPER_CRITIQUE_RECIPE_ID else run_related_work_recipe
+            result = await runner(
+                session,
+                request.recipe_inputs,
+                project_id=request.project_id,
+                mode=mode,
+                budget=AgentRunBudget(
+                    run_budget_tokens=int(privacy["run_budget"]),
+                    wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+                ),
+                privacy=recipe_privacy,
+            )
+            run = await session.get(AgentRun, result.run_id)
+            return {
+                "run": {
+                    "id": result.run_id,
+                    "project_id": request.project_id,
+                    "mode": run.mode if run else mode,
+                    "status": run.status if run else result.state,
+                    "state": result.state,
+                    "paused": bool(run.paused) if run else False,
+                },
+                "trace": result.trace.public_dict(),
+                "artifacts": result.artifacts,
+            }
+        try:
+            config = RunConfig.resolve(
+                stage_overrides=request.enabled_stages or {stage.value: True for stage in StageEnum},
+                scoring_method=request.scoring_method,
+            )
+        except OrchestratorConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await RunStateMachine(
+            RunRepository(session),
+            config,
+            budget=AgentRunBudget(
+                run_budget_tokens=int(privacy["run_budget"]),
+                wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+            ),
+        ).start(project_id=request.project_id, mode=policy.default_mode or privacy["default_mode"])
+        run = await session.get(AgentRun, result.run_id)
+        trace = await RunRepository(session).get_trace(result.run_id)
+        return {
+            "run": {
+                "id": result.run_id,
+                "project_id": request.project_id,
+                "mode": run.mode if run else policy.default_mode,
+                "status": run.status if run else result.state,
+                "state": result.state,
+                "paused": bool(run.paused) if run else False,
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads((run.artifacts if run else "[]") or "[]"),
+        }
+
+    @app.post("/api/recipes/literature-review/runs")
+    async def start_literature_review_run(
+        request: LiteratureReviewRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        validation = validate_literature_review_input(
+            {
+                "question": request.question,
+                "source_scope": request.source_scope,
+                "depth": request.depth,
+            }
+        )
+        if not validation.allowed or validation.inputs is None:
+            raise HTTPException(status_code=400, detail=validation.message)
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        result = await execute_literature_review(
+            session=session,
+            project_root=hydra_project_root(),
+            inputs=LiteratureReviewInput(
+                question=validation.inputs.question,
+                source_scope=validation.inputs.source_scope,
+                depth=validation.inputs.depth,
+            ),
+            mode=policy.default_mode or privacy["default_mode"],
+            semantic_enabled=request.semantic_search,
+            g3_enabled=bool(privacy["g3_enabled"]),
+            offline_only=bool(privacy["offline_only"]),
+            budget=AgentRunBudget(
+                run_budget_tokens=int(privacy["run_budget"]),
+                wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+            ),
+        )
+        run = await session.get(AgentRun, result.run_id)
+        trace = await RunRepository(session).get_trace(result.run_id)
+        return {
+            "run": {
+                "id": result.run_id,
+                "project_id": request.project_id,
+                "mode": run.mode if run else policy.default_mode,
+                "status": run.status if run else result.state,
+                "state": result.state,
+                "paused": bool(run.paused) if run else False,
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads((run.artifacts if run else "[]") or "[]"),
+            "review_item_ids": result.review_item_ids,
+        }
+
+    @app.post("/api/recipes/literature-review/artifacts/save")
+    async def request_literature_review_save(
+        request: LiteratureReviewSaveRequestModel,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        run = await session.get(AgentRun, request.run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        artifacts = json.loads(run.artifacts or "[]")
+        payload = next((item for item in artifacts if item.get("kind") == "literature-review"), None)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="literature review artifact not found")
+        from hydra.recipes.literature_review import _artifact_from_payload
+
+        pending = await save_literature_review_artifact(
+            session=session,
+            project_root=hydra_project_root(),
+            artifact=_artifact_from_payload(payload),
+            request=LiteratureReviewSaveRequest(
+                run_id=request.run_id,
+                destination=request.destination,
+                filename=request.filename,
+            ),
+            mode=run.mode,
+        )
+        return {
+            "approval_id": pending.approval_id,
+            "artifact_preview": pending.artifact_preview,
+            "target_relative_path": pending.target_relative_path,
+        }
+
+    @app.post("/api/recipes/literature-review/saves/{approval_id}/resolve")
+    async def resolve_literature_review_save(
+        approval_id: str,
+        request: ApprovalResolveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return await resolve_literature_review_save_approval(
+            session=session,
+            project_root=hydra_project_root(),
+            approval_id=approval_id,
+            decision=request.decision,
+        )
+
+    @app.get("/api/agent/runs/{run_id}")
+    async def get_agent_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runs = RunRepository(session)
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        trace = await runs.get_trace(run_id)
+        return {
+            "run": {"id": run.id, "project_id": run.project_id, "mode": run.mode, "status": run.status, "paused": run.paused},
+            "trace": trace.public_dict(),
+            "artifacts": json.loads(run.artifacts or "[]"),
+        }
+
+    @app.post("/api/agent/runs/{run_id}/pause")
+    async def pause_agent_run(run_id: str, paused: bool = True, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await RunRepository(session).pause_run(run_id, paused)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused}
+
+    @app.post("/api/agent/runs/{run_id}/cancel")
+    async def cancel_agent_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await RunRepository(session).cancel_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused}
+
+    @app.get("/api/agent/approvals")
+    async def list_agent_approvals(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = ApprovalService(session)
+        pending = await service.list_pending(project_id)
+        return {"approvals": [to_contract(row).public_dict() for row in pending]}
+
+    @app.post("/api/agent/approvals/{approval_id}/resolve")
+    async def resolve_agent_approval(approval_id: str, request: ApprovalResolveRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = ApprovalService(session)
+        approval = await service.get(approval_id)
+        if approval is None:
+            raise HTTPException(status_code=404, detail="approval not found")
+        if approval.action_kind.startswith("browser."):
+            result = await BrowserCopilotService(session).resolve_approval(approval_id, decision=request.decision)
+            return {
+                "applied": result.outcome == "applied",
+                "status": result.outcome,
+                "reason": result.reason,
+                "log": result.log,
+                "artifact": result.artifact,
+            }
+        result = await service.resolve(approval_id, decision=request.decision)
+        return {"applied": result.applied, "status": result.status, "reason": result.reason}
+
+    # ------------------------------------------- idea recipe (02-06, HL-ASSIST-*)
+    def _idea_candidate_public(candidate: IdeaCandidateModel) -> dict[str, object]:
+        return {
+            "id": candidate.id,
+            "run_id": candidate.run_id,
+            "title": candidate.title,
+            "short_hypothesis": candidate.short_hypothesis,
+            "research_question": candidate.research_question,
+            "motivation": candidate.motivation,
+            "method_sketch": candidate.method_sketch,
+            "expected_contribution": candidate.expected_contribution,
+            "required_sources": json.loads(candidate.required_sources or "[]"),
+            "evidence_links": json.loads(candidate.evidence_links or "[]"),
+            "novelty_claim": candidate.novelty_claim,
+            "feasibility_notes": candidate.feasibility_notes,
+            "risks": candidate.risks,
+            "estimated_effort": candidate.estimated_effort,
+            "generated_by_stage": candidate.generated_by_stage,
+            "parent_candidate_id": candidate.parent_candidate_id,
+            "status": candidate.status,
+            "critique": json.loads(candidate.critique or "{}"),
+            "rubric_results": json.loads(candidate.rubric_results or "[]"),
+            "rank": candidate.rank,
+            "trust_origin": candidate.trust_origin,
+        }
+
+    @app.get("/api/recipes/idea/commands")
+    async def list_idea_commands() -> dict[str, object]:
+        return {"commands": list(IDEA_SLASH_COMMANDS), "default_stages": dict(IDEA_DEFAULT_STAGE_TOGGLES)}
+
+    @app.post("/api/recipes/idea/runs")
+    async def start_idea_run(
+        request: IdeaRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        result = await run_idea_recipe(
+            session,
+            project_id=request.project_id,
+            run_input=IdeaRunInput(
+                topic=request.topic,
+                source_scope=request.source_scope,
+                constraints=request.constraints,
+                novelty_target=request.novelty_target,
+            ),
+            mode=policy.default_mode or privacy["default_mode"],
+            stage_toggles=request.enabled_stages or None,
+            offline_only=bool(privacy["offline_only"]),
+            g3_enabled=bool(privacy["g3_enabled"]),
+            budget=AgentRunBudget(
+                run_budget_tokens=int(privacy["run_budget"]),
+                wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+            ),
+            scoring_method=request.scoring_method,
+        )
+        return await _idea_run_payload(session, result.run_id, state=result.state)
+
+    async def _idea_run_payload(session: AsyncSession, run_id: str, *, state: str | None = None) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="idea run not found")
+        trace = await RunRepository(session).get_trace(run_id)
+        candidates = (
+            await session.exec(
+                select(IdeaCandidateModel).where(IdeaCandidateModel.run_id == run_id)
+            )
+        ).all()
+        return {
+            "run": {
+                "id": run.id,
+                "project_id": run.project_id,
+                "mode": run.mode,
+                "status": run.status,
+                "state": state or run.status,
+                "paused": bool(run.paused),
+                "recipe": run.recipe,
+                "inputs": json.loads(run.inputs_ref or "[]"),
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads(run.artifacts or "[]"),
+            "candidates": [_idea_candidate_public(c) for c in candidates],
+        }
+
+    @app.get("/api/recipes/idea/runs/{run_id}")
+    async def get_idea_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return await _idea_run_payload(session, run_id)
+
+    @app.post("/api/recipes/idea/promote")
+    async def promote_idea_candidate(
+        request: IdeaPromoteRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        try:
+            return await IdeaPromotionService(session).propose(
+                candidate_id=request.candidate_id,
+                target_kind=request.target_kind,
+                project_id=request.project_id,
+                mode=policy.default_mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/recipes/idea/promotions/{review_item_id}/resolve")
+    async def resolve_idea_promotion(
+        review_item_id: str,
+        request: ApprovalResolveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        service = IdeaPromotionService(session)
+        decision = str(request.decision or "").strip().lower()
+        try:
+            if decision in {"approve", "approved", "accept", "accepted"}:
+                return await service.approve(review_item_id)
+            return await service.reject(review_item_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # ----------------------------------------------------------- MCP (02-02)
+    def _mcp_transport_for(server: dict[str, Any]):
+        from hydra.tools.mcp.client import HttpMCPTransport
+
+        connection = json.loads(server.get("connection_json") or "{}") if isinstance(server.get("connection_json"), str) else (server.get("connection_json") or {})
+        return HttpMCPTransport(url=str(connection.get("url") or ""))
+
+    def _mcp_server_view(server: dict[str, Any], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        # Derive the Settings state (HL-ASSIST-07): failure > permission-denied > ready.
+        if server.get("status") == "failed":
+            state = "failure"
+        elif tools and all(not (t.get("enabled") and t.get("permission") == "allow") for t in tools):
+            state = "permission-denied"
+        else:
+            state = "ready"
+        return {
+            "id": server["id"],
+            "name": server["name"],
+            "transport": server.get("transport"),
+            "enabled": server.get("enabled"),
+            "connector": server.get("connector"),
+            "status": server.get("status"),
+            "connection_error": server.get("connection_error") or "",
+            "auth_handle_ref": server.get("auth_handle_ref"),
+            "state": state,
+            "tools": [
+                {
+                    "id": t["id"],
+                    "name": t["name"],
+                    "description": t.get("description") or "",
+                    "enabled": t.get("enabled"),
+                    "permission": t.get("permission"),
+                    "read_only": t.get("read_only"),
+                    "status": "allowed" if (t.get("enabled") and t.get("permission") == "allow") else "disabled",
+                }
+                for t in tools
+            ],
+        }
+
+    @app.get("/api/mcp/servers")
+    async def list_mcp_servers(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        servers = await repo.list_mcp_servers()
+        views = []
+        for server in servers:
+            tools = await repo.list_mcp_tools(server_id=server["id"])
+            views.append(_mcp_server_view(server, tools))
+        # Empty state (HL-ASSIST-07) is derived by the client when servers == [].
+        return {"servers": views}
+
+    @app.post("/api/mcp/servers")
+    async def register_mcp_server(request: McpServerRegisterRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        from hydra.tools.mcp import MCPService
+
+        service = MCPService(Repository(session))
+        try:
+            if request.connector:
+                server = await service.register_connector(request.connector, name=request.name)
+            else:
+                server = await service.register_server(
+                    name=request.name,
+                    transport=request.transport,
+                    connection=request.connection,
+                    auth_handle_ref=request.auth_handle_ref,
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        repo = Repository(session)
+        tools = await repo.list_mcp_tools(server_id=server["id"])
+        return {"server": _mcp_server_view(server, tools)}
+
+    @app.post("/api/mcp/servers/{server_id}/enable")
+    async def enable_mcp_server(server_id: str, request: McpServerEnableRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        server = await repo.set_mcp_server_enabled(server_id, request.enabled)
+        if server is None:
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        tools = await repo.list_mcp_tools(server_id=server_id)
+        return {"server": _mcp_server_view(server, tools)}
+
+    @app.post("/api/mcp/servers/{server_id}/discover")
+    async def discover_mcp_tools(server_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        from hydra.tools.mcp import MCPService
+
+        repo = Repository(session)
+        server = await repo.get_mcp_server(server_id)
+        if server is None:
+            raise HTTPException(status_code=404, detail="MCP server not found")
+        service = MCPService(repo)
+        try:
+            result = await service.connect_and_discover(server_id, _mcp_transport_for(server))
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        server = await repo.get_mcp_server(server_id)
+        tools = await repo.list_mcp_tools(server_id=server_id)
+        return {"result_status": result["status"], "server": _mcp_server_view(server, tools)}
+
+    @app.patch("/api/mcp/tools/{tool_id}")
+    async def set_mcp_tool_permission(tool_id: str, request: McpToolPermissionRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            tool = await repo.set_mcp_tool_permission(tool_id, enabled=request.enabled, permission=request.permission)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if tool is None:
+            raise HTTPException(status_code=404, detail="MCP tool not found")
+        return {"tool": tool}
+
+    @app.get("/api/mcp/events")
+    async def list_mcp_events(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"events": await repo.list_mcp_call_events()}
 
     # ------------------------------------------------------ context files / memory
     @app.get("/api/context-files")
@@ -1029,6 +1727,187 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail={"reason": "export-failed", "message": result.error_detail})
         await repo.add_event("writing.docx.exported", f"Exported manuscript {manuscript} to DOCX")
         return {"status": result.status, "output_path": result.output_path, "format": resolved.format.model_dump()}
+
+    # --- DOCX OpenXML assisted edits (branch 02-08, Phase 2) -----------------
+    @app.post("/api/writing/docx/edit-plan")
+    async def create_docx_edit_plan(
+        request: DocxEditPlanRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        try:
+            working_path = resolve_working_docx(project_root, request.manuscript, request.source_file)
+        except DocxApplyError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "unsafe-path", "message": str(exc)}) from exc
+        if not working_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail={"reason": "manuscript-missing", "message": f"working DOCX not found: {request.source_file}"},
+            )
+        try:
+            model = read_structural_model(working_path, project_root)
+        except DocxPackageError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "package-validation", "message": str(exc)}) from exc
+
+        proposals = [
+            EditProposal(
+                op_type=p.op_type,
+                target_locator=p.target_locator,
+                payload=dict(p.payload),
+                justification=p.justification,
+                justification_source=p.justification_source,
+                motivating_excerpt=p.motivating_excerpt,
+            )
+            for p in request.proposals
+        ]
+        try:
+            plan = build_plan(
+                model,
+                proposals,
+                manuscript=request.manuscript,
+                target_relpath=request.source_file,
+                mode=request.mode,
+                project_id=request.project_id,
+            )
+        except DocxPlanError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "unsupported-op", "message": str(exc)}) from exc
+
+        plan_row = await repo.create_docx_edit_plan(
+            manuscript=request.manuscript,
+            target_relpath=request.source_file,
+            mode=request.mode,
+            trust_level=plan.trust_level,
+            project_id=request.project_id,
+        )
+        operations: list[dict[str, object]] = []
+        for op in plan.operations:
+            operations.append(
+                await repo.add_docx_edit_operation(
+                    plan_id=plan_row["id"],
+                    op_type=op.op_type,
+                    target_locator=op.target_locator,
+                    location_label=op.location_label,
+                    before_summary=op.before_summary,
+                    after_summary=op.after_summary,
+                    payload=op.payload,
+                    risk_label=op.risk_label,
+                    trust_level=op.trust_level,
+                    justification=op.justification,
+                    motivating_excerpt=op.motivating_excerpt,
+                )
+            )
+        for item in plan.review_inbox_items:
+            await repo.create_review_item(item)
+        for entry in plan.downgrade_log:
+            await repo.add_event("writing.docx.mode_downgrade", json.dumps(entry, sort_keys=True))
+        await repo.add_event("writing.docx.plan_created", f"Built DOCX edit plan for {request.manuscript}")
+        return {
+            "plan": plan_row,
+            "operations": operations,
+            "review_inbox": plan.review_inbox_items,
+            "downgrade_log": plan.downgrade_log,
+        }
+
+    @app.get("/api/writing/docx/edit-plan/{plan_id}")
+    async def get_docx_edit_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        plan = await repo.get_docx_edit_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "edit plan not found"})
+        return {"plan": plan, "operations": await repo.list_docx_edit_operations(plan_id)}
+
+    @app.post("/api/writing/docx/edit-plan/{plan_id}/operations/{op_id}/review")
+    async def review_docx_operation(
+        plan_id: str,
+        op_id: str,
+        request: DocxOperationReviewRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        op = await repo.get_docx_edit_operation(op_id)
+        if op is None or op.get("plan_id") != plan_id:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "operation not found"})
+        updated = await repo.review_docx_operation(op_id, request.decision)
+        return {"operation": updated}
+
+    @app.post("/api/writing/docx/edit-plan/{plan_id}/apply")
+    async def apply_docx_edit_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        plan = await repo.get_docx_edit_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "edit plan not found"})
+        operations = await repo.list_docx_edit_operations(plan_id)
+        # HL-WRITE-35: only operations with review_status == "approved" may apply.
+        approved = [op for op in operations if op.get("review_status") == "approved"]
+        if not approved:
+            raise HTTPException(
+                status_code=422,
+                detail={"reason": "no-approved-operations", "message": "no approved operations to apply"},
+            )
+        try:
+            working_path = resolve_working_docx(project_root, plan["manuscript"], plan["target_relpath"])
+        except DocxApplyError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "unsafe-path", "message": str(exc)}) from exc
+
+        result = apply_operations(
+            project_root,
+            plan_id,
+            working_path,
+            [{"op_type": op["op_type"], "target_locator": op["target_locator"], "payload": op["payload"]} for op in approved],
+        )
+        by_index = {outcome.index: outcome for outcome in result.outcomes}
+        for position, op in enumerate(approved):
+            outcome = by_index.get(position)
+            validation = outcome.validation_status if outcome else "unvalidated"
+            await repo.record_docx_operation_result(
+                op["id"],
+                validation_status=validation,
+                applied=(result.status == "applied" and validation == "valid"),
+                rollback_ref=result.checkpoint_ref if result.status == "applied" else None,
+            )
+        await repo.update_docx_plan_status(
+            plan_id,
+            status="applied" if result.status == "applied" else "failed",
+            checkpoint_ref=result.checkpoint_ref,
+        )
+        if result.status != "applied":
+            await repo.add_event("writing.docx.apply_failed", result.error_detail)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "reason": "apply-failed",
+                    "message": result.error_detail,
+                    "outcomes": [outcome.__dict__ for outcome in result.outcomes],
+                },
+            )
+        await repo.add_event("writing.docx.applied", f"Applied DOCX edit plan {plan_id}")
+        return {
+            "status": result.status,
+            "plan": await repo.get_docx_edit_plan(plan_id),
+            "operations": await repo.list_docx_edit_operations(plan_id),
+            "outcomes": [outcome.__dict__ for outcome in result.outcomes],
+        }
+
+    @app.post("/api/writing/docx/edit-plan/{plan_id}/rollback")
+    async def rollback_docx_edit_plan(plan_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        plan = await repo.get_docx_edit_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail={"reason": "not-found", "message": "edit plan not found"})
+        if not plan.get("checkpoint_ref"):
+            raise HTTPException(
+                status_code=422, detail={"reason": "no-checkpoint", "message": "plan has no pre-apply checkpoint"}
+            )
+        try:
+            working_path = resolve_working_docx(project_root, plan["manuscript"], plan["target_relpath"])
+            rollback_docx_plan(project_root, working_path, plan["checkpoint_ref"])
+        except DocxApplyError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "rollback-failed", "message": str(exc)}) from exc
+        updated = await repo.rollback_docx_plan(plan_id)
+        await repo.add_event("writing.docx.rolled_back", f"Rolled back DOCX edit plan {plan_id}")
+        return {"status": "rolled_back", "plan": updated, "operations": await repo.list_docx_edit_operations(plan_id)}
 
     @app.post("/api/evidence")
     async def create_evidence(request: EvidenceCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:

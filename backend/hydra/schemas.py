@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -11,6 +11,26 @@ class ResearchRequest(BaseModel):
 
 class SourceSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=400)
+
+
+class BrowserHostPermissionUpdateRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    host: str = Field(min_length=1, max_length=255)
+    state: Literal["ask", "allow_for_task", "always_allow_host", "blocked"]
+    task_group_id: str | None = Field(default=None, max_length=200)
+
+
+class BrowserCopilotActionRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    action: Literal["search", "save-source", "save-snapshot", "extract-metadata", "create-note"]
+    url: str = Field(min_length=1, max_length=2000)
+    title: str = Field(default="", max_length=400)
+    page_text: str = Field(default="", max_length=200000)
+    host: str = Field(default="", max_length=255)
+    mode: Literal["copilot"] = "copilot"
+    task_group_id: str | None = Field(default=None, max_length=200)
+    task_group_label: str = Field(default="", max_length=200)
+    user_triggered: bool = False
 
 
 class SourceDiscoveryRequest(BaseModel):
@@ -51,6 +71,34 @@ class ManuscriptExportRequest(BaseModel):
         if ".." in value or value.startswith("/") or "\\" in value or "\x00" in value:
             raise ValueError("path traversal is not allowed")
         return value
+
+
+class DocxEditProposalIn(BaseModel):
+    op_type: str = Field(min_length=1, max_length=40)
+    target_locator: str = Field(default="", max_length=400)
+    payload: dict[str, object] = Field(default_factory=dict)
+    justification: str = Field(default="", max_length=4000)
+    justification_source: Literal["assistant", "document"] = "assistant"
+    motivating_excerpt: str = Field(default="", max_length=4000)
+
+
+class DocxEditPlanRequest(BaseModel):
+    manuscript: str = Field(min_length=1, max_length=200)
+    source_file: str = Field(min_length=1, max_length=400)
+    mode: Literal["passive", "copilot", "full_access"] = "passive"
+    project_id: str | None = Field(default=None, max_length=200)
+    proposals: list[DocxEditProposalIn] = Field(default_factory=list)
+
+    @field_validator("manuscript", "source_file")
+    @classmethod
+    def reject_docx_traversal(cls, value: str) -> str:
+        if ".." in value or value.startswith("/") or "\\" in value or "\x00" in value:
+            raise ValueError("path traversal is not allowed")
+        return value
+
+
+class DocxOperationReviewRequest(BaseModel):
+    decision: Literal["approved", "rejected", "pending"]
 
 
 class NoteCreateRequest(BaseModel):
@@ -402,6 +450,66 @@ class MemoryCandidateRequest(BaseModel):
     source_ref: str = Field(default="", max_length=2000)
     trust_origin: str = Field(default="trusted", max_length=40)
 
+class AgentModeUpdateRequest(BaseModel):
+    mode: str = Field(max_length=40)
+    project_id: str = Field(default="default", max_length=200)
+
+
+class FullAccessUpdateRequest(BaseModel):
+    enabled: bool = False
+    project_id: str = Field(default="default", max_length=200)
+
+
+class SkillEnabledRequest(BaseModel):
+    enabled: bool = False
+
+
+class SkillEditRequest(BaseModel):
+    text: str = Field(max_length=200_000)
+
+
+class ApprovalResolveRequest(BaseModel):
+    decision: str = Field(max_length=40)
+
+
+class OrchestratorRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    enabled_stages: dict[str, bool] = Field(default_factory=dict)
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "pairwise"
+    recipe_id: str | None = Field(default=None, max_length=120)
+    recipe_inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+class LiteratureReviewRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    question: str = Field(default="", max_length=2000)
+    source_scope: dict[str, object] = Field(default_factory=lambda: {"kind": "all-project"})
+    depth: Literal["quick", "standard", "deep"] = "standard"
+    semantic_search: bool = False
+
+
+class LiteratureReviewSaveRequestModel(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    destination: Literal["work/reviews", "knowledge/literature"]
+    filename: str = Field(default="", max_length=240)
+
+
+class IdeaRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    topic: str = Field(max_length=2_000)
+    source_scope: str = Field(default="", max_length=2_000)
+    constraints: str = Field(default="", max_length=4_000)
+    novelty_target: str = Field(default="medium", max_length=40)
+    enabled_stages: dict[str, bool] = Field(default_factory=dict)
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "pairwise"
+
+
+class IdeaPromoteRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    candidate_id: str = Field(max_length=200)
+    target_kind: Literal["task", "note", "related_work"] = "task"
+
+
 class ChatMessageResponse(BaseModel):
     id: str
     conversation_id: str
@@ -429,3 +537,20 @@ class SourceRetrieveResponse(BaseModel):
 class RAGRetrieveRequest(BaseModel):
     query: str
     source_id: str | None = None
+
+
+class McpServerRegisterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    transport: str = Field(default="stdio", max_length=40)
+    connection: dict = Field(default_factory=dict)
+    auth_handle_ref: str | None = Field(default=None, max_length=400)
+    connector: str | None = Field(default=None, max_length=80)
+
+
+class McpServerEnableRequest(BaseModel):
+    enabled: bool = True
+
+
+class McpToolPermissionRequest(BaseModel):
+    enabled: bool | None = None
+    permission: Literal["allow", "deny"] | None = None

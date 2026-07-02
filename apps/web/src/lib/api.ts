@@ -360,6 +360,7 @@ export type AssistantMode = { id: string; label: string; enabled: boolean; phase
 
 export type AssistantModes = {
   default_mode: string;
+  full_access_enabled: boolean;
   modes: AssistantMode[];
   offline_only: boolean;
   g3_provider_send: boolean;
@@ -374,11 +375,145 @@ export type SkillInfo = {
   requires_approval: boolean;
   description?: string;
   disabled_reason?: string | null;
+  body?: string;
+  edited?: boolean;
+  restorable?: boolean;
 };
 
 export type SkillsResponse = {
   skills: SkillInfo[];
   rejected_plugins: Array<{ path: string; reason: string }>;
+};
+
+export type AgentApproval = {
+  id: string;
+  action_kind: string;
+  status: string;
+  decision?: string | null;
+  reason: string;
+  trust_origin: string;
+  target_kind?: string | null;
+  target_ref?: string | null;
+  summary: string;
+};
+
+export type AgentTraceStep = {
+  index: number;
+  kind: string;
+  status: string;
+  summary: string;
+  tokens: number;
+  trust_origin: string;
+  skill_id?: string | null;
+  capability?: string | null;
+  denied_capability?: string | null;
+};
+
+export type AgentRunTrace = {
+  run: { id: string; project_id: string; mode: string; status: string; paused: boolean };
+  trace: { run_id: string; steps: AgentTraceStep[] };
+  artifacts?: AgentRunArtifact[];
+};
+
+export type AgentRunArtifact = {
+  id: string;
+  kind: string;
+  ref?: string;
+  summary?: string;
+  stage?: string;
+  method?: string;
+  ranking?: Array<{ id: string; title?: string; score: number }>;
+  markdown?: string;
+  question?: string;
+  sections?: Record<string, Array<{
+    text: string;
+    source_ids?: string[];
+    citation_ids?: string[];
+    marker?: string;
+  }>>;
+};
+
+export type OrchestratorStage = {
+  id: string;
+  label: string;
+  enabled: boolean;
+};
+
+export type OrchestratorRunSummary = {
+  id: string;
+  project_id: string;
+  mode: string;
+  status: string;
+  state?: string;
+  paused: boolean;
+  tokens_used?: number;
+  created_at?: number;
+};
+
+export type OrchestratorRunResponse = AgentRunTrace & {
+  run: AgentRunTrace["run"] & { state?: string };
+  artifacts: AgentRunArtifact[];
+};
+
+export type IdeaRubricResult = {
+  criterion: string;
+  value: number;
+  rationale: string;
+  stage_run_id: string;
+  source_refs: string[];
+};
+
+export type IdeaEvidenceLink = {
+  source_id: string;
+  evidence_id?: string;
+  kind?: string;
+};
+
+export type IdeaCandidate = {
+  id: string;
+  run_id: string;
+  title: string;
+  short_hypothesis: string;
+  research_question: string;
+  motivation: string;
+  method_sketch: string;
+  expected_contribution: string;
+  required_sources: string[];
+  evidence_links: IdeaEvidenceLink[];
+  novelty_claim: string;
+  feasibility_notes: string;
+  risks: string;
+  estimated_effort: string;
+  generated_by_stage: string;
+  parent_candidate_id?: string | null;
+  status: string;
+  critique: Record<string, string[]>;
+  rubric_results: IdeaRubricResult[];
+  rank?: number | null;
+  trust_origin: string;
+};
+
+export type IdeaRunResponse = {
+  run: {
+    id: string;
+    project_id: string;
+    mode: string;
+    status: string;
+    state?: string;
+    paused: boolean;
+    recipe?: string;
+    inputs?: Array<Record<string, string>>;
+  };
+  trace: { run_id: string; steps: AgentTraceStep[] };
+  artifacts: AgentRunArtifact[];
+  candidates: IdeaCandidate[];
+};
+
+export type IdeaPromotionResponse = {
+  review_item_id?: string | null;
+  status: string;
+  created_target_id?: string | null;
+  created_target_kind?: string;
 };
 
 export type ContextFileInfo = {
@@ -411,6 +546,31 @@ export type ContextFileChange = {
   recovery: string;
   created_at: number;
 };
+
+export type McpToolInfo = {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  permission: "allow" | "deny" | string;
+  read_only: boolean;
+  status: "allowed" | "disabled" | string;
+};
+
+export type McpServerInfo = {
+  id: string;
+  name: string;
+  transport?: string;
+  enabled: boolean;
+  connector?: string | null;
+  status: "registered" | "connected" | "failed" | string;
+  connection_error: string;
+  auth_handle_ref?: string | null;
+  state: "empty" | "loading" | "failure" | "permission-denied" | "ready" | string;
+  tools: McpToolInfo[];
+};
+
+export type McpServersResponse = { servers: McpServerInfo[] };
 
 export type SettingsResponse = {
   provider_settings: Array<{
@@ -667,4 +827,99 @@ export function exportManuscript(
   client: ApiClient = api,
 ): Promise<ManuscriptExportResponse> {
   return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/export`, input);
+}
+
+// --- DOCX OpenXML assisted edits (branch 02-08, Phase 2) --------------------
+
+export type DocxOpType =
+  | "replace_text"
+  | "insert_paragraph"
+  | "apply_style"
+  | "update_table"
+  | "update_citation"
+  | "comment"
+  | "delete"
+  | "other";
+export type DocxReviewStatus = "pending" | "approved" | "rejected";
+export type DocxValidationStatus = "unvalidated" | "valid" | "invalid";
+export type DocxRiskLabel = "low" | "medium" | "high";
+
+export type DocxEditOperation = {
+  id: string;
+  plan_id: string;
+  op_type: DocxOpType | string;
+  target_locator: string;
+  location_label: string;
+  before_summary: string;
+  after_summary: string;
+  payload: Record<string, unknown>;
+  risk_label: DocxRiskLabel | string;
+  review_status: DocxReviewStatus | string;
+  validation_status: DocxValidationStatus | string;
+  applied: boolean;
+  trust_level: string;
+  motivating_excerpt?: string;
+};
+
+export type DocxEditPlan = {
+  id: string;
+  manuscript: string;
+  target_relpath: string;
+  status: "draft" | "applied" | "rolled_back" | "failed" | string;
+  mode: string;
+  trust_level: string;
+  checkpoint_ref?: string | null;
+};
+
+export type DocxEditPlanResponse = {
+  plan: DocxEditPlan;
+  operations: DocxEditOperation[];
+  review_inbox?: unknown[];
+  downgrade_log?: unknown[];
+};
+
+export type DocxEditProposalInput = {
+  op_type: DocxOpType | string;
+  target_locator?: string;
+  payload?: Record<string, unknown>;
+  justification?: string;
+  justification_source?: "assistant" | "document";
+  motivating_excerpt?: string;
+};
+
+export function createDocxEditPlan(
+  input: {
+    manuscript: string;
+    source_file: string;
+    mode?: "passive" | "copilot" | "full_access";
+    project_id?: string | null;
+    proposals: DocxEditProposalInput[];
+  },
+  client: ApiClient = api,
+): Promise<DocxEditPlanResponse> {
+  return client.post("/api/writing/docx/edit-plan", input);
+}
+
+export function getDocxEditPlan(planId: string, client: ApiClient = api): Promise<DocxEditPlanResponse> {
+  return client.get(`/api/writing/docx/edit-plan/${encodeURIComponent(planId)}`);
+}
+
+export function reviewDocxOperation(
+  planId: string,
+  operationId: string,
+  decision: DocxReviewStatus,
+  client: ApiClient = api,
+): Promise<{ operation: DocxEditOperation }> {
+  return client.post(
+    `/api/writing/docx/edit-plan/${encodeURIComponent(planId)}/operations/${encodeURIComponent(operationId)}/review`,
+    { decision },
+  );
+}
+
+export function applyDocxEditPlan(planId: string, client: ApiClient = api): Promise<DocxEditPlanResponse> {
+  return client.post(`/api/writing/docx/edit-plan/${encodeURIComponent(planId)}/apply`);
+}
+
+export function rollbackDocxEditPlan(planId: string, client: ApiClient = api): Promise<DocxEditPlanResponse> {
+  return client.post(`/api/writing/docx/edit-plan/${encodeURIComponent(planId)}/rollback`);
 }
