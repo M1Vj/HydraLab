@@ -11,9 +11,11 @@ import {
   Globe2,
   Inbox,
   ListTodo,
+  PackageOpen,
   PenLine,
   ScrollText,
   Settings,
+  SquareTerminal,
   Terminal,
 } from "lucide-react";
 
@@ -29,8 +31,10 @@ export type PanelId =
   | "writing"
   | "citation-evidence"
   | "tasks"
+  | "exports"
   | "settings"
   | "logs"
+  | "terminal"
   | "problems";
 
 export type PanelLocation = "border-left" | "border-bottom" | "center" | "border-right";
@@ -85,8 +89,10 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
     allowMultiple: false,
   },
   tasks: { id: "tasks", title: "Tasks", icon: ListTodo, defaultLocation: "border-right", singleton: true, allowMultiple: false },
+  exports: { id: "exports", title: "Exports", icon: PackageOpen, defaultLocation: "border-right", singleton: true, allowMultiple: false },
   settings: { id: "settings", title: "Settings", icon: Settings, defaultLocation: "border-right", singleton: true, allowMultiple: false },
   logs: { id: "logs", title: "Logs", icon: Terminal, defaultLocation: "border-bottom", singleton: true, allowMultiple: false },
+  terminal: { id: "terminal", title: "Console", icon: SquareTerminal, defaultLocation: "border-bottom", singleton: true, allowMultiple: false },
   problems: { id: "problems", title: "Problems", icon: Bug, defaultLocation: "border-bottom", singleton: true, allowMultiple: false },
 };
 
@@ -130,7 +136,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
         location: "bottom",
         size: 180,
         selected: 0,
-        children: [tab("logs"), tab("problems")],
+        children: [tab("logs"), tab("terminal"), tab("problems")],
       },
     ],
     layout: {
@@ -152,7 +158,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 24,
           selected: 0,
           enableMaximize: true,
-          children: [tab("citation-evidence"), tab("tasks"), tab("settings")],
+          children: [tab("citation-evidence"), tab("tasks"), tab("exports"), tab("settings")],
         },
       ],
     },

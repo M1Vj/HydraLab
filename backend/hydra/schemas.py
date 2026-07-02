@@ -77,6 +77,21 @@ class NoteSuggestionRequest(BaseModel):
 
 
 
+TASK_TARGET_TYPES = (
+    "source",
+    "paper",
+    "note",
+    "claim",
+    "citation",
+    "chat",
+    "browser_event",
+    "annotation",
+    "draft",
+    "manuscript",
+)
+TASK_LINK_ROLES = ("about", "blocks", "derived_from", "follow_up", "evidence_for", "reviews")
+
+
 class TaskCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     column: str = "to_do"
@@ -84,6 +99,10 @@ class TaskCreateRequest(BaseModel):
     progress: int = Field(default=0, ge=0, le=100)
     phase_indicator: str = ""
     position: int = 0
+    due: str | None = Field(default=None, max_length=40)
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    tags: list[str] = Field(default_factory=list)
+    project_id: str | None = Field(default=None, max_length=200)
 
 
 class TaskUpdateRequest(BaseModel):
@@ -93,6 +112,97 @@ class TaskUpdateRequest(BaseModel):
     progress: int | None = Field(default=None, ge=0, le=100)
     phase_indicator: str | None = None
     position: int | None = None
+    due: str | None = Field(default=None, max_length=40)
+    priority: Literal["low", "normal", "high", "urgent"] | None = None
+    tags: list[str] | None = None
+
+
+class TaskLinkCreateRequest(BaseModel):
+    target_type: str = "source"
+    target_id_or_path: str = Field(min_length=1, max_length=1000)
+    link_role: str = "about"
+
+    @field_validator("target_type")
+    @classmethod
+    def _valid_target(cls, value: str) -> str:
+        if value not in TASK_TARGET_TYPES:
+            raise ValueError("unsupported task_link target_type")
+        return value
+
+    @field_validator("link_role")
+    @classmethod
+    def _valid_role(cls, value: str) -> str:
+        if value not in TASK_LINK_ROLES:
+            raise ValueError("unsupported task_link role")
+        return value
+
+
+class TaskSuggestRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    project_id: str | None = Field(default=None, max_length=200)
+    origin: Literal["assistant", "auto"] = "assistant"
+    category: str | None = Field(default=None, max_length=80)
+    trust_origin: Literal["user", "untrusted"] = "user"
+    summary: str = Field(default="", max_length=2000)
+    detail: str = Field(default="", max_length=4000)
+    origin_type: str | None = Field(default=None, max_length=80)
+    origin_id: str | None = Field(default=None, max_length=1000)
+    link: dict[str, str] | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class GitInitRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    confirm: bool = False
+
+
+class GitCommitRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    message: str = Field(min_length=1, max_length=1000)
+    paths: list[str] | None = None
+
+
+class GitRestoreRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    path: str = Field(min_length=1, max_length=1000)
+    ref: str = Field(default="HEAD", max_length=200)
+
+
+class GitDestructiveRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    subcommand: Literal["reset", "checkout", "clean", "rebase", "merge", "push"]
+    args: list[str] = Field(default_factory=list)
+    approved: bool = False
+
+
+class ConsoleRunRequest(BaseModel):
+    command: str = Field(min_length=1, max_length=400)
+    project_id: str = Field(default="default", max_length=200)
+    trigger: Literal["user", "assistant", "untrusted"] = "user"
+    approve: bool = False
+
+
+class CitationExportRequest(BaseModel):
+    source_ids: list[str] = Field(default_factory=list)
+    format: Literal["bibtex", "csl", "ris"] = "bibtex"
+
+
+class ProjectZipRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    selected_files: list[str] | None = None
+    include_chats: bool = False
+    include_agent_logs: bool = False
+    include_browser_snapshots: bool = False
+    include_annotations: bool = False
+
+
+class BackupRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+
+
+class RestoreRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    reindex: bool = True
 
 
 class CitationCreateRequest(BaseModel):

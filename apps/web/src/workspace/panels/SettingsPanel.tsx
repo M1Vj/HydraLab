@@ -12,6 +12,11 @@ const CONSENT_TOGGLES: Array<{ key: string; label: string; fallback: boolean }> 
   { key: "offlineOnly", label: "Offline-only provider block", fallback: false },
 ];
 
+const AUTOMATION_TOGGLES: Array<{ key: string; label: string; fallback: boolean }> = [
+  { key: "auto_draft_tasks", label: "Auto-create low-risk draft tasks", fallback: false },
+  { key: "auto_checkpoint", label: "Auto-checkpoint Git before risky actions", fallback: false },
+];
+
 export function SettingsPanel() {
   const { settings } = useWorkspaceData();
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
@@ -94,6 +99,24 @@ export function SettingsPanel() {
             <strong>Consent and capture</strong>
           </header>
           {CONSENT_TOGGLES.map((toggle) => (
+            <label key={toggle.key}>
+              <input
+                type="checkbox"
+                checked={booleanPreference(preferences, toggle.key, toggle.fallback)}
+                disabled={savingPref === toggle.key}
+                onChange={(event) => void togglePreference(toggle.key, event.target.checked)}
+              />
+              {toggle.label}
+            </label>
+          ))}
+        </section>
+
+        <section className="settings-section">
+          <header>
+            <ShieldCheck size={15} />
+            <strong>Task &amp; Git automation</strong>
+          </header>
+          {AUTOMATION_TOGGLES.map((toggle) => (
             <label key={toggle.key}>
               <input
                 type="checkbox"

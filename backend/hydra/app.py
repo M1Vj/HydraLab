@@ -57,10 +57,21 @@ from hydra.schemas import (
     SourceSearchRequest,
     TaskCreateRequest,
     TaskUpdateRequest,
+    TaskLinkCreateRequest,
+    TaskSuggestRequest,
+    GitInitRequest,
+    GitCommitRequest,
+    GitRestoreRequest,
+    GitDestructiveRequest,
+    ConsoleRunRequest,
+    CitationExportRequest,
+    ProjectZipRequest,
+    BackupRequest,
+    RestoreRequest,
     WritingReviewRequest,
     ChatCompletionRequest,
 )
-from hydra.database.models import Annotation, Claim, IngestionJob
+from hydra.database.models import Annotation, Claim, IngestionJob, Task
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
 from hydra.services.annotations import AnnotationIndexer, create_annotation_record, read_sidecar_records, write_sidecar_records
@@ -92,6 +103,20 @@ from hydra.services.writing import (
 from hydra.services.ingestion import IngestionService
 from hydra.services.ingestion.safety import validate_source_file
 from hydra.services.ingestion.types import QuarantineError
+from hydra.services.tasks import TaskProposal, propose_task
+from hydra.services.git import GitError, GitService, suggest_grouped_commits
+from hydra.services.console import ConsoleService
+from hydra.services.export import (
+    build_project_zip,
+    export_options,
+    restore_project,
+    safe_sqlite_backup,
+    to_bibtex,
+    to_csl_json,
+    to_ris,
+)
+from hydra.services.export.bundle import ExportOptions
+from hydra.storage.project import evaluate_git_init, reindex_notes_from_canonical_files
 from hydra.settings.toml_config import load_settings, save_settings
 from hydra.settings.secrets import InMemorySecretStore, KeyringSecretStore, ProviderSecretService, SecretStore
 from hydra.storage.app_data import app_data_root
@@ -1134,20 +1159,34 @@ def create_app() -> FastAPI:
             detail=request.detail,
             progress=request.progress,
             phase_indicator=request.phase_indicator,
-            position=request.position
+            position=request.position,
+            project_id=request.project_id,
+            due=request.due,
+            priority=request.priority,
+            tags=request.tags,
         )
         await repo.add_event("task.created", f"Created task {request.title}")
         return task
 
     @app.get("/api/tasks")
-    async def list_tasks(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def list_tasks(
+        state: str | None = None,
+        project_id: str | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
         repo = Repository(session)
-        return {"tasks": await repo.list_tasks()}
+        return {"tasks": await repo.list_tasks(state=state, project_id=project_id)}
+
+    def _task_updates(request: TaskUpdateRequest) -> dict[str, object]:
+        updates = request.model_dump(exclude_unset=True)
+        if "tags" in updates and updates["tags"] is not None:
+            updates["tags"] = json.dumps(updates["tags"])
+        return updates
 
     @app.put("/api/tasks/{task_id}")
     async def update_task_put(task_id: str, request: TaskUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        task = await repo.update_task(task_id, request.model_dump(exclude_unset=True))
+        task = await repo.update_task(task_id, _task_updates(request))
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         await repo.add_event("task.updated", f"Updated task {task['title']}")
@@ -1156,7 +1195,7 @@ def create_app() -> FastAPI:
     @app.patch("/api/tasks/{task_id}")
     async def update_task_patch(task_id: str, request: TaskUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        task = await repo.update_task(task_id, request.model_dump(exclude_unset=True))
+        task = await repo.update_task(task_id, _task_updates(request))
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         await repo.add_event("task.updated", f"Updated task {task['title']}")
@@ -1170,6 +1209,74 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Task not found")
         await repo.add_event("task.deleted", f"Deleted task {task_id}")
         return {"status": "success"}
+
+    @app.post("/api/tasks/{task_id}/links")
+    async def create_task_link(task_id: str, request: TaskLinkCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        if await session.get(Task, task_id) is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        link = await repo.create_task_link(
+            task_id=task_id,
+            target_type=request.target_type,
+            target_id_or_path=request.target_id_or_path,
+            link_role=request.link_role,
+        )
+        return link
+
+    @app.get("/api/tasks/{task_id}/links")
+    async def list_task_links(task_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"links": await repo.list_task_links(task_id)}
+
+    @app.post("/api/tasks/suggest")
+    async def suggest_task(request: TaskSuggestRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        settings = await repo.list_settings()
+        auto_draft_enabled = str(settings.get("auto_draft_tasks", "false")).lower() == "true"
+        result = await propose_task(
+            repo,
+            TaskProposal(
+                title=request.title,
+                project_id=request.project_id,
+                origin=request.origin,
+                category=request.category,
+                trust_origin=request.trust_origin,
+                summary=request.summary,
+                detail=request.detail,
+                origin_type=request.origin_type,
+                origin_id=request.origin_id,
+                link=request.link,
+                tags=request.tags,
+            ),
+            auto_draft_enabled=auto_draft_enabled,
+        )
+        await repo.add_event("task.suggested", f"Task proposal processed: {request.title}")
+        return result
+
+    @app.post("/api/tasks/{task_id}/accept")
+    async def accept_task(task_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        task = await repo.accept_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        await repo.add_event("task.accepted", f"Accepted task {task['title']}")
+        return task
+
+    @app.post("/api/tasks/{task_id}/dismiss")
+    async def dismiss_task(task_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        task = await repo.dismiss_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        await repo.add_event("task.dismissed", f"Dismissed task {task['title']}")
+        return task
+
+    @app.post("/api/tasks/dismiss-drafts")
+    async def dismiss_draft_tasks(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        count = await repo.bulk_dismiss_draft_tasks(project_id)
+        await repo.add_event("task.drafts.dismissed", f"Bulk-dismissed {count} draft tasks")
+        return {"dismissed": count}
 
     @app.get("/api/events")
     async def events(request: Request, session: AsyncSession = Depends(get_session)) -> object:
@@ -1354,6 +1461,190 @@ def create_app() -> FastAPI:
         from hydra.writing import review_text
         return review_text(request.text)
 
+    # -- Notes trash/restore (task-link referential integrity, HL-UX-08) -----
+    @app.post("/api/notes/{note_id}/trash")
+    async def trash_note_endpoint(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.trash_note(note_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/notes/{note_id}/restore")
+    async def restore_note_endpoint(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.restore_note(note_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # -- Git panel (HL-GIT-01..05) -------------------------------------------
+    @app.get("/api/git/status")
+    async def git_status() -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "branch": None, "changed_files": [], "clean": True}
+        status = service.status()
+        status["is_repo"] = True
+        return status
+
+    @app.get("/api/git/diff")
+    async def git_diff(path: str | None = None) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "diff": ""}
+        return {"is_repo": True, "diff": service.diff(path)}
+
+    @app.get("/api/git/log")
+    async def git_log(limit: int = 50) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "commits": []}
+        return {"is_repo": True, "commits": service.log(limit=limit), "branch": service.current_branch()}
+
+    @app.get("/api/git/suggest-commits")
+    async def git_suggest_commits() -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "suggestions": []}
+        status = service.status()
+        return {"is_repo": True, "suggestions": suggest_grouped_commits(status["changed_files"])}
+
+    @app.post("/api/git/init")
+    async def git_init(request: GitInitRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        root = hydra_project_root()
+        service = GitService(root)
+        if service.is_repo():
+            return {"action": "reuse", "reason": "Existing Git repository detected.", "branch": service.current_branch()}
+        # Existing non-Git folder: never silently init; require explicit confirm.
+        decision = evaluate_git_init(root, created_by_hydralab=False, git_enabled=True)
+        if decision.action == "ask" and not request.confirm:
+            return {"action": "ask", "reason": decision.reason, "initialized": False}
+        service._run(["init"])
+        repo = Repository(session)
+        await repo.add_event("git.init", "Initialized Git repository after explicit confirmation")
+        return {"action": "init", "initialized": True, "branch": service.current_branch()}
+
+    @app.post("/api/git/commit")
+    async def git_commit(request: GitCommitRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        try:
+            result = service.commit(request.message, request.paths)
+        except GitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        repo = Repository(session)
+        await repo.add_event("git.commit", f"Committed: {request.message}")
+        return result
+
+    @app.post("/api/git/restore")
+    async def git_restore(request: GitRestoreRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        settings = await repo.list_settings()
+        auto_checkpoint = str(settings.get("auto_checkpoint", "false")).lower() == "true"
+        service = GitService(hydra_project_root())
+        try:
+            result = service.restore_previous_version(request.path, ref=request.ref, auto_checkpoint=auto_checkpoint)
+        except GitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await repo.add_event("git.restore", f"Restored {request.path} to {request.ref}")
+        return result
+
+    @app.post("/api/git/destructive")
+    async def git_destructive(request: GitDestructiveRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        try:
+            result = service.destructive(request.subcommand, request.args, approved=request.approved)
+        except GitError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        repo = Repository(session)
+        await repo.add_event("git.destructive", f"Ran approved destructive op: {request.subcommand}")
+        return result
+
+    # -- Safe command console (HL-SAFE-02 / HL-SAFE-03) ----------------------
+    @app.post("/api/console/run")
+    async def console_run(request: ConsoleRunRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        service = ConsoleService(hydra_project_root(), offline=_offline_posture())
+        approved_setting = (await repo.get_setting("console_verify_approved")) or {}
+        approved = set(filter(None, str(approved_setting.get("value", "")).split(","))) if approved_setting else set()
+        result = service.run(
+            request.command,
+            trigger=request.trigger,
+            approve=request.approve,
+            approved_commands=approved,
+        )
+        if result.get("approved_now"):
+            approved.add(str(result["approved_now"]))
+            await repo.save_setting("console_verify_approved", ",".join(sorted(approved)))
+        await repo.add_event("console.run", f"Console command '{result.get('command')}' -> {result.get('status')}")
+        return result
+
+    @app.get("/api/console/allowlist")
+    async def console_allowlist() -> dict[str, object]:
+        from hydra.services.console import GIT_CONSOLE_COMMANDS, VERIFICATION_COMMANDS
+        return {
+            "git_inspection": sorted(GIT_CONSOLE_COMMANDS.keys()),
+            "verification": sorted(VERIFICATION_COMMANDS),
+            "offline": _offline_posture(),
+        }
+
+    # -- Exports & backup (HL-EXPORT-01..06) ---------------------------------
+    @app.get("/api/export/options")
+    async def export_options_endpoint() -> dict[str, object]:
+        return export_options()
+
+    @app.post("/api/export/citations")
+    async def export_citations(request: CitationExportRequest, session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
+        repo = Repository(session)
+        sources = await repo.list_sources()
+        if request.source_ids:
+            wanted = set(request.source_ids)
+            sources = [s for s in sources if s["id"] in wanted]
+        serializer = {"bibtex": to_bibtex, "csl": to_csl_json, "ris": to_ris}[request.format]
+        media = "application/json" if request.format == "csl" else "text/plain"
+        return PlainTextResponse(serializer(sources), media_type=media)
+
+    @app.post("/api/export/project-zip")
+    async def export_project_zip(request: ProjectZipRequest, session: AsyncSession = Depends(get_session)) -> StreamingResponse:
+        options = ExportOptions(
+            include_chats=request.include_chats,
+            include_agent_logs=request.include_agent_logs,
+            include_browser_snapshots=request.include_browser_snapshots,
+            include_annotations=request.include_annotations,
+        )
+        data = build_project_zip(hydra_project_root(), selected_files=request.selected_files, options=options)
+        repo = Repository(session)
+        await repo.add_event("export.project-zip", "Exported clean project ZIP")
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=hydralab_project.zip"},
+        )
+
+    @app.post("/api/backup/sqlite")
+    async def backup_sqlite(request: BackupRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        from hydra.database.session import get_db_url
+
+        db_url = get_db_url()
+        source_db = Path(db_url.removeprefix("sqlite+aiosqlite:///"))
+        dest = hydra_project_root() / ".hydralab" / "backups" / f"backup-{int(time.time())}.db"
+        result = safe_sqlite_backup(source_db, dest)
+        repo = Repository(session)
+        await repo.add_event("backup.sqlite", f"SQLite backup created (integrity_ok={result['integrity_ok']})")
+        return result
+
+    @app.post("/api/restore")
+    async def restore_endpoint(request: RestoreRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        root = hydra_project_root()
+
+        async def _reindex() -> list[str]:
+            return await reindex_notes_from_canonical_files(root, session, request.project_id)
+
+        result = await restore_project(root, reindex=_reindex if request.reindex else None)
+        repo = Repository(session)
+        await repo.add_event("restore.project", f"Restored project reindexed={request.reindex}")
+        return result
+
     return app
 
 async def persist_browser_capture(request: BrowserCaptureRequest, session: AsyncSession, create_source: bool) -> dict[str, object]:
@@ -1475,6 +1766,13 @@ def _resolve_discovery_posture(request: SourceDiscoveryRequest) -> dict[str, boo
     stored_scholarly = bool(privacy.get("scholarly_apis_enabled", True))
     scholarly_apis_enabled = bool(stored_scholarly and request.scholarly_apis_enabled and not offline_only)
     return {"offline_only": offline_only, "scholarly_apis_enabled": scholarly_apis_enabled}
+
+
+def _offline_posture() -> bool:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    privacy = settings.get("privacy", {})
+    general = settings.get("general", {})
+    return bool(privacy.get("offline_only") or general.get("offline_only"))
 
 
 def _discovery_limiter_from_settings() -> ProviderRateLimiter:

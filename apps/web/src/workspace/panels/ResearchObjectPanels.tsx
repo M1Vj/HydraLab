@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
-import { Download } from "lucide-react";
-import { api, type BrowserEventRecord, type SourceRecord } from "../../lib/api";
+import { Download, GitCommitHorizontal, RotateCcw } from "lucide-react";
+import {
+  api,
+  type BrowserEventRecord,
+  type SourceRecord,
+  type GitCommit,
+  type GitCommitSuggestion,
+  type GitStatusResponse,
+} from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
 import { useWorkspaceData } from "../data";
 import { EmptyState, FailureState, LoadingState, NotWiredState, PanelScaffold } from "./PanelState";
@@ -15,6 +22,8 @@ import {
 
 export { PdfReaderPanel } from "./PdfReaderPanel";
 export { SettingsPanel } from "./SettingsPanel";
+export { TerminalPanel } from "./TerminalPanel";
+export { ExportPanel } from "./ExportPanel";
 
 function StatusPill({ badge }: { badge: StatusBadge }) {
   return (
@@ -193,8 +202,93 @@ export function ProblemsPanel() {
   );
 }
 
-export function GitPanel() {
-  return <NotWiredState title="Git" route="Git HTTP route" />;
+export function GitPanel({ announce }: PanelComponentProps) {
+  const [status, setStatus] = useState<GitStatusResponse | null>(null);
+  const [commits, setCommits] = useState<GitCommit[]>([]);
+  const [suggestions, setSuggestions] = useState<GitCommitSuggestion[]>([]);
+  const [error, setError] = useState<Error | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const [statusPayload, logPayload, suggestPayload] = await Promise.all([
+        api.get<GitStatusResponse>("/api/git/status"),
+        api.get<{ commits: GitCommit[] }>("/api/git/log"),
+        api.get<{ suggestions: GitCommitSuggestion[] }>("/api/git/suggest-commits"),
+      ]);
+      setStatus(statusPayload);
+      setCommits(logPayload.commits);
+      setSuggestions(suggestPayload.suggestions);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function commit(message: string) {
+    await api.post("/api/git/commit", { message });
+    announce("Committed changes");
+    void load();
+  }
+
+  if (loading) return <LoadingState title="Loading Git" />;
+  if (error) return <FailureState error={error} onRetry={load} />;
+  if (!status?.is_repo) {
+    return <NotWiredState title="Git" route="No Git repository for this project" />;
+  }
+
+  return (
+    <PanelScaffold title="Git">
+      <header className="panel-toolbar">
+        <span className="git-branch">branch: {status.branch}</span>
+      </header>
+      <section className="git-status">
+        <h3>Changed files</h3>
+        {status.changed_files.length === 0 ? (
+          <p className="settings-hint">Working tree clean.</p>
+        ) : (
+          <ul className="git-file-list">
+            {status.changed_files.map((file) => (
+              <li key={file.path}>
+                <code>{file.code}</code> {file.path}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {suggestions.length > 0 && (
+        <section className="git-suggestions">
+          <h3>Suggested commits</h3>
+          {suggestions.map((suggestion) => (
+            <article className="object-card" key={suggestion.message}>
+              <strong>{suggestion.message}</strong>
+              <small>{suggestion.files.join(", ")}</small>
+              <button onClick={() => void commit(suggestion.message)}>
+                <GitCommitHorizontal size={13} /> Commit
+              </button>
+            </article>
+          ))}
+        </section>
+      )}
+      <section className="git-history">
+        <h3>History</h3>
+        <ul className="git-file-list">
+          {commits.map((entry) => (
+            <li key={entry.hash}>
+              <RotateCcw size={12} aria-hidden /> {entry.subject}
+            </li>
+          ))}
+        </ul>
+      </section>
+    </PanelScaffold>
+  );
 }
 
 export function ExportBibliographyButton() {
