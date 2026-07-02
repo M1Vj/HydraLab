@@ -3,7 +3,7 @@ import { Check, Code2, Columns2, Eye, MessageSquare, Quote, Save, Users, WifiOff
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState, type Range } from "@codemirror/state";
+import { EditorState, StateEffect, type Range } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, keymap, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
 import * as Y from "yjs";
 import { yCollab } from "y-codemirror.next";
@@ -37,6 +37,23 @@ type CollaborationConfig = {
 };
 type InlineComment = { id: string; author: string; range: string; text: string };
 
+// The dynamic data the decoration plugin renders. Held in a ref and read live so
+// data changes never re-run the EditorView-creation effect (which would destroy
+// and rebuild the whole editor — and cursor/undo — on every keystroke, since the
+// parent hands fresh array identities each render).
+type DecorationData = {
+  notes: NoteOption[];
+  citations: CitationOption[];
+  highlights: TextHighlight[];
+  suggestions: InlineSuggestion[];
+  onAcceptSuggestion: (suggestion: InlineSuggestion) => void;
+  onRejectSuggestion: (suggestion: InlineSuggestion) => void;
+};
+
+// A no-op transaction effect that tells the decoration plugin to rebuild from the
+// latest ref data without touching the document or recreating the view.
+const redecorate = StateEffect.define<void>();
+
 export function HydraMarkdownEditor({
   fileRef,
   value,
@@ -65,6 +82,7 @@ export function HydraMarkdownEditor({
   const collaborationRef = useRef<{ doc: Y.Doc; awareness: LocalAwareness; socket: WebSocket | null } | null>(null);
   const valueRef = useRef(value);
   const lastEditAtRef = useRef(Date.now());
+  const dataRef = useRef<DecorationData>({ notes, citations, highlights, suggestions, onAcceptSuggestion, onRejectSuggestion });
   const [mode, setMode] = useState<EditorMode>("live");
   const [draft, setDraft] = useState(value);
   const [saveState, setSaveState] = useState<SaveState>("saved");
@@ -93,6 +111,17 @@ export function HydraMarkdownEditor({
       });
     }
   }, [value, fileRef]);
+
+  // Keep the decoration data ref current on every render (cheap; no view churn).
+  useEffect(() => {
+    dataRef.current = { notes, citations, highlights, suggestions, onAcceptSuggestion, onRejectSuggestion };
+  });
+
+  // When the rendered data changes, tell the plugin to rebuild decorations in
+  // place instead of recreating the whole editor.
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: redecorate.of() });
+  }, [notes, citations, highlights, suggestions]);
 
   useEffect(() => {
     commandRegistry.register({ id: "editor.toggle-mode", title: "Toggle Markdown editor mode", run: () => setMode((current) => nextEditorMode(current)) });
@@ -131,7 +160,7 @@ export function HydraMarkdownEditor({
           EditorState.readOnly.of(Boolean(collaboration?.enabled && collaboration.permission !== "edit")),
           EditorView.editable.of(!collaboration?.enabled || collaboration.permission === "edit"),
           ...collaborationExtensions,
-          hydraDecorationPlugin({ notes, citations, highlights, suggestions, onAcceptSuggestion, onRejectSuggestion }),
+          hydraDecorationPlugin(() => dataRef.current),
           EditorView.lineWrapping,
           EditorView.domEventHandlers({
             blur: () => {
@@ -178,7 +207,10 @@ export function HydraMarkdownEditor({
       collaborationRef.current = null;
       viewRef.current = null;
     };
-  }, [fileRef, notes, citations, highlights, suggestions, collaboration?.enabled, collaboration?.documentId, collaboration?.projectId]);
+    // Deliberately NOT depending on notes/citations/highlights/suggestions: those
+    // update decorations in place via the ref + redecorate effect above. Rebuild
+    // the view only when the document identity or collaboration session changes.
+  }, [fileRef, collaboration?.enabled, collaboration?.documentId, collaboration?.projectId]);
 
   useEffect(() => {
     if (saveState !== "dirty") return;
@@ -500,32 +532,23 @@ function base64ToBytes(value: string) {
   return bytes;
 }
 
-function hydraDecorationPlugin({
-  notes,
-  citations,
-  highlights,
-  suggestions,
-  onAcceptSuggestion,
-  onRejectSuggestion,
-}: {
-  notes: NoteOption[];
-  citations: CitationOption[];
-  highlights: TextHighlight[];
-  suggestions: InlineSuggestion[];
-  onAcceptSuggestion: (suggestion: InlineSuggestion) => void;
-  onRejectSuggestion: (suggestion: InlineSuggestion) => void;
-}) {
+function hydraDecorationPlugin(getData: () => DecorationData) {
+  const render = (view: EditorView) => {
+    const data = getData();
+    return buildDecorations(view, data.notes, data.citations, data.highlights, data.suggestions, data.onAcceptSuggestion, data.onRejectSuggestion);
+  };
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
 
       constructor(view: EditorView) {
-        this.decorations = buildDecorations(view, notes, citations, highlights, suggestions, onAcceptSuggestion, onRejectSuggestion);
+        this.decorations = render(view);
       }
 
       update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged) {
-          this.decorations = buildDecorations(update.view, notes, citations, highlights, suggestions, onAcceptSuggestion, onRejectSuggestion);
+        const dataChanged = update.transactions.some((tr) => tr.effects.some((effect) => effect.is(redecorate)));
+        if (update.docChanged || update.viewportChanged || dataChanged) {
+          this.decorations = render(update.view);
         }
       }
     },
