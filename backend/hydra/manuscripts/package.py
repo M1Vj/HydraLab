@@ -62,10 +62,15 @@ class PackageResult:
 @dataclass(frozen=True)
 class SubmissionResult:
     status: str
-    gate: GateResult
+    gate: GateResult | None = None
+    redaction: RedactionReport | None = None
 
     def public_dict(self) -> dict[str, Any]:
-        return {"status": self.status, "gate": self.gate.__dict__}
+        return {
+            "status": self.status,
+            "gate": self.gate.__dict__ if self.gate else None,
+            "redaction": self.redaction.public_dict() if self.redaction else None,
+        }
 
 
 class ManuscriptPackageService:
@@ -101,7 +106,12 @@ class ManuscriptPackageService:
         # client can precompute, so a request-supplied ack is never trusted on
         # its own: the effective set is the request acks intersected with the
         # ids baked into the APPROVED AgentApproval payload (03-04 fix).
-        authorised_acks = await self._approved_redaction_acks(request.approval_id, request.project_id)
+        authorised_acks = await self._approved_redaction_acks(
+            request.approval_id,
+            request.project_id,
+            action_kind="manuscript_package_create",
+            target_ref=document.manuscript_id,
+        )
         effective_acks = set(request.acknowledged_redaction_item_ids) & authorised_acks
         unresolved_redactions = redaction.unresolved(effective_acks)
         if unresolved_redactions:
@@ -172,6 +182,20 @@ class ManuscriptPackageService:
         project_id: str = "default",
     ) -> SubmissionResult:
         document = self.builder.build(manuscript)
+        # External submission sends bytes off the machine, so it MUST pass the
+        # same redaction gate as local packaging — arguably stricter (03-04
+        # audit: the outbound path previously scanned nothing). Acks are only
+        # honoured when the human approval carries them.
+        redaction = RedactionScanner(self.project_root).scan(document)
+        authorised_acks = await self._approved_redaction_acks(
+            approval_id,
+            project_id,
+            action_kind="external_submission",
+            target_ref=document.manuscript_id,
+        )
+        unresolved_redactions = redaction.unresolved(authorised_acks)
+        if unresolved_redactions:
+            return SubmissionResult(status="redaction_blocked", redaction=RedactionReport(unresolved_redactions))
         gate = await self._gate().govern(
             GovernedAction(
                 mode=COPILOT,
@@ -185,18 +209,32 @@ class ManuscriptPackageService:
                 approval_id=approval_id,
             )
         )
-        return SubmissionResult(status=gate.status, gate=gate)
+        return SubmissionResult(status=gate.status, gate=gate, redaction=redaction)
 
-    async def _approved_redaction_acks(self, approval_id: str | None, project_id: str) -> set[str]:
-        """Redaction ids the human approval authorised, from its APPROVED payload."""
+    async def _approved_redaction_acks(
+        self,
+        approval_id: str | None,
+        project_id: str,
+        *,
+        action_kind: str,
+        target_ref: str,
+    ) -> set[str]:
+        """Redaction ids the human approval authorised, from its APPROVED payload.
+
+        Bound to the approval's action_kind, project_id AND target_ref so an
+        approval for one manuscript/operation can never authorise acks for
+        another.
+        """
         if not approval_id:
             return set()
         approval = await self.session.get(AgentApproval, approval_id)
         if approval is None or approval.status != ApprovalStatus.APPROVED.value:
             return set()
-        if approval.action_kind != "manuscript_package_create":
+        if approval.action_kind != action_kind:
             return set()
         if (approval.project_id or None) not in (None, project_id):
+            return set()
+        if (approval.target_ref or None) not in (None, target_ref):
             return set()
         try:
             payload = json.loads(approval.payload_json or "{}")

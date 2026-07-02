@@ -300,6 +300,48 @@ async def test_hl_write_38_redaction_blocks_until_hazards_acknowledged(session, 
     assert created.status == "created"
 
 
+@pytest.mark.asyncio
+async def test_hl_write_38b_external_submission_enforces_redaction_gate(session, tmp_path):
+    # Outbound submission sends bytes off-machine and MUST pass the redaction
+    # gate — previously it scanned nothing (03-04 audit CONFIRMED gap).
+    _write_manuscript(tmp_path, hazards=True)
+    service = ManuscriptPackageService(
+        tmp_path,
+        session,
+        latex_detector=lambda: {"available": False, "toolchain": "", "path": "", "setup_error": "missing"},
+    )
+
+    blocked = await service.request_external_submission("attention-survey", venue="preprint")
+    assert blocked.status == "redaction_blocked"
+    assert blocked.redaction is not None and blocked.redaction.items
+
+    # A request cannot self-ack; only an APPROVED external_submission approval
+    # carrying the ids unblocks.
+    acked = [item.id for item in blocked.redaction.items]
+    self_ack = await _approved(session, "attention-survey")  # action_kind=manuscript_package_create, wrong kind
+    still_blocked = await service.request_external_submission(
+        "attention-survey", venue="preprint", approval_id=self_ack.id
+    )
+    assert still_blocked.status == "redaction_blocked"
+
+    approval = AgentApproval(
+        project_id="default",
+        mode=FULL_ACCESS,
+        action_kind="external_submission",
+        target_kind="manuscript",
+        target_ref="attention-survey",
+        status=ApprovalStatus.APPROVED.value,
+        payload_json=json.dumps({"acknowledged_redaction_item_ids": acked}, sort_keys=True),
+    )
+    session.add(approval)
+    await session.commit()
+    await session.refresh(approval)
+    unblocked = await service.request_external_submission(
+        "attention-survey", venue="preprint", approval_id=approval.id
+    )
+    assert unblocked.status != "redaction_blocked"
+
+
 def test_hl_lic_30_export_path_bundles_no_strong_copyleft_dependency():
     deps = bundled_export_dependencies()
     assert any(dep["name"] == "citeproc-py" and dep["spdx"].startswith("BSD") for dep in deps)
