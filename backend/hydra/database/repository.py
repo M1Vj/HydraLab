@@ -33,6 +33,7 @@ from hydra.database.models import (
     SourceTombstone,
     TaskLink,
 )
+from hydra.browser_bridge import TRUST_LEVEL_UNTRUSTED
 
 
 class Repository:
@@ -53,6 +54,12 @@ class Repository:
             if model.__tablename__ == "tasks":
                 if "column_name" in d:
                     d["column"] = d.pop("column_name")
+            if model.__tablename__ in {"browser_events", "sources"} and d.get("detected_metadata"):
+                d["detected_metadata"] = json.loads(d["detected_metadata"] or "{}")
+            if model.__tablename__ == "sources" and d.get("metadata_json"):
+                d["metadata_json"] = json.loads(d["metadata_json"] or "{}")
+            if model.__tablename__ == "review_items" and d.get("payload_json"):
+                d["payload"] = json.loads(d["payload_json"] or "{}")
         return d
 
     def _to_dict_list(self, models: List[Any]) -> list[dict[str, Any]]:
@@ -121,6 +128,10 @@ class Repository:
         kind = source_data.get("kind") or "article"
         metadata_json = source_data.get("metadata_json")
         workspace_id = source_data.get("workspace_id")
+        project_id = source_data.get("project_id")
+        trust_origin = source_data.get("trust_origin")
+        doi = source_data.get("doi")
+        arxiv_id = source_data.get("arxiv_id")
 
         if source:
             source.title = title
@@ -133,11 +144,20 @@ class Repository:
                 source.metadata_json = metadata_json
             if workspace_id is not None:
                 source.workspace_id = workspace_id
+            if project_id is not None:
+                source.project_id = project_id
+            if trust_origin is not None:
+                source.trust_origin = trust_origin
+            if doi is not None:
+                source.doi = doi
+            if arxiv_id is not None:
+                source.arxiv_id = arxiv_id
             source.updated_at = datetime.now(timezone.utc)
         else:
             source = Source(
                 id=source_id,
                 workspace_id=workspace_id,
+                project_id=project_id,
                 title=title,
                 authors=authors,
                 year=year,
@@ -145,6 +165,9 @@ class Repository:
                 abstract=abstract,
                 kind=kind,
                 metadata_json=metadata_json,
+                trust_origin=trust_origin or "user",
+                doi=doi,
+                arxiv_id=arxiv_id,
             )
             self.session.add(source)
             
@@ -602,6 +625,78 @@ class Repository:
         await self.session.commit()
         await self.session.refresh(event)
         return self._to_dict(event)
+
+    async def upsert_browser_event(self, event_data: dict[str, Any]) -> dict[str, Any]:
+        q = select(BrowserEvent).where(
+            and_(
+                BrowserEvent.project_id == event_data["project_id"],
+                BrowserEvent.url == event_data["url"],
+                BrowserEvent.soft_deleted == False,  # noqa: E712
+            )
+        )
+        existing = (await self.session.exec(q)).first()
+        metadata = dict(event_data.get("detected_metadata") or {})
+        metadata.setdefault("trust_level", TRUST_LEVEL_UNTRUSTED)
+
+        if existing:
+            previous = json.loads(existing.detected_metadata or "{}")
+            metadata["revisit_count"] = int(previous.get("revisit_count") or 1) + 1
+            metadata["first_seen_at"] = previous.get("first_seen_at") or existing.created_at.timestamp()
+            metadata["last_seen_at"] = time.time()
+            existing.title = event_data.get("title") or existing.title
+            existing.captured_text_ref = event_data.get("page_text") or existing.captured_text_ref
+            existing.selection = event_data.get("selection") or existing.selection
+            existing.event_type = event_data.get("event_type") or existing.event_type
+            existing.detected_metadata = json.dumps(metadata, sort_keys=True)
+            existing.trust_origin = TRUST_LEVEL_UNTRUSTED
+            self.session.add(existing)
+            await self.session.commit()
+            await self.session.refresh(existing)
+            return self._to_dict(existing)
+
+        metadata["revisit_count"] = 1
+        metadata["first_seen_at"] = time.time()
+        metadata["last_seen_at"] = metadata["first_seen_at"]
+        event = BrowserEvent(
+            project_id=event_data["project_id"],
+            url=event_data["url"],
+            title=event_data.get("title") or "",
+            captured_text_ref=event_data.get("page_text") or "",
+            selection=event_data.get("selection") or "",
+            detected_metadata=json.dumps(metadata, sort_keys=True),
+            event_type=event_data.get("event_type") or "capture",
+            trust_origin=TRUST_LEVEL_UNTRUSTED,
+        )
+        self.session.add(event)
+        await self.session.commit()
+        await self.session.refresh(event)
+        return self._to_dict(event)
+
+    async def list_browser_events(self, project_id: str) -> list[dict[str, Any]]:
+        q = (
+            select(BrowserEvent)
+            .where(and_(BrowserEvent.project_id == project_id, BrowserEvent.soft_deleted == False))  # noqa: E712
+            .order_by(BrowserEvent.created_at.desc())
+        )
+        res = await self.session.exec(q)
+        return self._to_dict_list(res.all())
+
+    async def create_review_item(self, item_data: dict[str, Any]) -> dict[str, Any]:
+        item = ReviewItem(
+            project_id=item_data.get("project_id"),
+            item_type=item_data["item_type"],
+            title=item_data["title"],
+            summary=item_data.get("summary", ""),
+            origin_type=item_data.get("origin_type"),
+            origin_id=item_data.get("origin_id"),
+            target_type=item_data.get("target_type"),
+            target_id=item_data.get("target_id"),
+            payload_json=json.dumps(item_data.get("payload") or {}, sort_keys=True),
+        )
+        self.session.add(item)
+        await self.session.commit()
+        await self.session.refresh(item)
+        return self._to_dict(item)
 
     async def list_events(self, limit: int = 100) -> list[dict[str, Any]]:
         q = select(ActivityEvent).order_by(ActivityEvent.created_at.desc()).limit(limit)

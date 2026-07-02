@@ -1,4 +1,8 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+from hydra.browser_bridge import SOURCE_POLICIES, TRUST_LEVEL_UNTRUSTED
 
 
 class ResearchRequest(BaseModel):
@@ -72,6 +76,49 @@ class ProviderSettingsRequest(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     provider_settings: list[ProviderSettingsRequest] | None = None
     workspace_preferences: dict[str, str] | None = None
+
+
+class BrowserHandshakeRequest(BaseModel):
+    handshake_nonce: str = Field(min_length=8, max_length=200)
+
+
+class BrowserCaptureRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    url: str = Field(min_length=1, max_length=2000)
+    title: str = Field(default="", max_length=500)
+    page_text: str = Field(default="", max_length=64000)
+    selection: str = Field(default="", max_length=12000)
+    event_type: str = Field(default="capture", pattern="^(capture|selection|navigation|snapshot|save)$")
+    source_policy: Literal["auto-source", "context-only", "always-ask", "blocked"] = "always-ask"
+    browser_integration_enabled: bool = False
+    g2_local_capture: bool = False
+    browser_page_text_to_provider: bool = False
+    host_permission: Literal["allow-for-project", "always-allow-host", "blocked", "unknown"] = "unknown"
+    incognito: bool = False
+    has_credential_fields: bool = False
+    has_payment_fields: bool = False
+    is_project_relevant: bool = True
+    metadata: dict[str, object] = Field(default_factory=dict)
+    trust_level: Literal["untrusted-external"] = TRUST_LEVEL_UNTRUSTED
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        if "://" not in value:
+            raise ValueError("url must include a scheme")
+        return value
+
+    @field_validator("source_policy")
+    @classmethod
+    def validate_source_policy(cls, value: str) -> str:
+        if value not in SOURCE_POLICIES:
+            raise ValueError("unsupported source policy")
+        return value
+
+
+class BrowserHistoryRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=500)
 class ChatMessage(BaseModel):
     role: str = Field(pattern="^(user|assistant|system)$")
     content: str = Field(min_length=1)
