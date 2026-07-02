@@ -633,6 +633,64 @@ select:focus-visible,
   margin: 4px 0 0;
 }
 
+.mcp-server-list,
+.mcp-tool-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-server {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.mcp-server-head,
+.mcp-tool {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.86em;
+}
+
+.mcp-server-status,
+.mcp-tool-status,
+.mcp-readonly {
+  font-size: 0.78em;
+  opacity: 0.8;
+}
+
+.mcp-tool-list {
+  margin-top: 6px;
+  padding-left: 4px;
+}
+
+.mcp-tool-allowed .mcp-tool-name {
+  font-weight: 600;
+}
+
+.mcp-empty {
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-server-failure {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.settings-section :focus-visible,
+.mcp-server :focus-visible {
+  outline: 2px solid var(--accent-color, #4c8dff);
+  outline-offset: 1px;
+}
+
 .document-header {
   min-height: 36px;
   border-bottom: 1px solid var(--border-color);
