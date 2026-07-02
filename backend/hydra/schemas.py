@@ -72,6 +72,18 @@ class ManuscriptExportRequest(BaseModel):
             raise ValueError("path traversal is not allowed")
         return value
 
+class ManuscriptPackageRequest(BaseModel):
+    approval_id: str | None = Field(default=None, max_length=200)
+    targets: list[Literal["docx", "latex", "html", "pdf"]] = Field(default_factory=lambda: ["docx", "latex", "html", "pdf"])
+    acknowledge_citation_issues: bool = False
+    acknowledged_redaction_item_ids: list[str] = Field(default_factory=list)
+    project_id: str = Field(default="default", max_length=200)
+
+class ManuscriptSubmissionRequest(BaseModel):
+    venue: str = Field(min_length=1, max_length=200)
+    approval_id: str | None = Field(default=None, max_length=200)
+    project_id: str = Field(default="default", max_length=200)
+
 
 class DocxEditProposalIn(BaseModel):
     op_type: str = Field(min_length=1, max_length=40)
