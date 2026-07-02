@@ -240,7 +240,16 @@ class AutonomousBrowserResearchRunner:
         declared_host: str,
     ) -> bool:
         """Re-check the landed page; discard (never capture) if it is not allowed."""
-        landed_url = getattr(page, "url", "") or step.url
+        landed_url = getattr(page, "url", "")
+        if not landed_url:
+            # Fail closed: without a verifiable landed URL we cannot confirm the
+            # host is allowed, so discard rather than fall back to the (approved)
+            # declared URL and capture unknown content (03-06 hardening).
+            await self._record_landing_block(
+                request, run_id, mode, step, host=host_for_url(step.url), landed_url=step.url,
+                reason="landed page reported no URL; cannot verify host", redirected=True,
+            )
+            return True
         decision = await self.policy.evaluate_navigation(
             BrowserAutomationContext(
                 project_id=request.project_id,
@@ -248,7 +257,6 @@ class AutonomousBrowserResearchRunner:
                 task_group_id=request.task_id,
                 has_password_field=bool(getattr(page, "has_password_field", False)),
                 has_payment_field=bool(getattr(page, "has_payment_field", False)),
-                has_cookies=bool(getattr(page, "has_cookies", False)),
             )
         )
         if decision.allowed:
@@ -258,19 +266,45 @@ class AutonomousBrowserResearchRunner:
             reason = f"post-redirect host {decision.host} was not pre-approved for this run"
         else:
             reason = decision.reason
+        await self._record_landing_block(
+            request,
+            run_id,
+            mode,
+            step,
+            host=decision.host,
+            landed_url=landed_url,
+            reason=reason,
+            redirected=redirected,
+            status=decision.status,
+        )
+        return True
+
+    async def _record_landing_block(
+        self,
+        request: BrowserRunRequest,
+        run_id: str,
+        mode: str,
+        step: BrowserResearchStep,
+        *,
+        host: str,
+        landed_url: str,
+        reason: str,
+        redirected: bool,
+        status: str = "blocked",
+    ) -> None:
         kind = "browser.redirect-blocked" if redirected else "browser.landing-blocked"
         action = "redirect-blocked" if redirected else "landing-blocked"
         await self.capture.record_host_blocked(
             project_id=request.project_id,
             run_id=run_id,
             url=landed_url,
-            host=decision.host,
+            host=host,
             reason=reason,
         )
         await self.logs.append(
             project_id=request.project_id,
             action=action,
-            host=decision.host,
+            host=host,
             mode=mode,
             approval_result="blocked",
             target_url=landed_url,
@@ -279,9 +313,9 @@ class AutonomousBrowserResearchRunner:
             payload={
                 "reason": reason,
                 "run_id": run_id,
-                "declared_host": declared_host,
+                "declared_host": host_for_url(step.url),
                 "declared_url": step.url,
-                "status": decision.status,
+                "status": status,
             },
         )
         await self.repo.append_step(
@@ -291,14 +325,13 @@ class AutonomousBrowserResearchRunner:
             summary=f"discarded landed page: {reason}",
             trust_origin="untrusted-external",
             payload={
-                "host": decision.host,
+                "host": host,
                 "landed_url": landed_url,
                 "declared_url": step.url,
                 "reason": reason,
-                "status": decision.status,
+                "status": status,
             },
         )
-        return True
 
     async def cancel(self, run_id: str) -> None:
         self._cancel_requested = True

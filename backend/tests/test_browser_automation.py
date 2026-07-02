@@ -400,6 +400,44 @@ async def test_hl_browse_39b_redirect_to_blocked_host_is_discarded_and_logged(
 
 
 @pytest.mark.asyncio
+async def test_hl_browse_39c_redirect_to_host_allowed_in_other_task_group_is_discarded(
+    session: AsyncSession, tmp_path: Path
+):
+    # allow_for_task is scoped to its task group: a redirect landing on a host
+    # approved for a DIFFERENT task must not be captured (03-06 audit finding b).
+    await BrowserHostPermissionRepository(session).set(
+        PROJECT_ID, "test.local", "allow_for_task", task_group_id="task-transformers"
+    )
+    await BrowserHostPermissionRepository(session).set(
+        PROJECT_ID, "other.local", "allow_for_task", task_group_id="a-different-task"
+    )
+    declared = "http://test.local/paper"
+    landed = DriverPage(
+        url="http://other.local/landing",
+        title="Other task's host",
+        text="must not be captured under this task",
+        snapshot_bytes=b"<html></html>",
+    )
+    driver = FakeBrowserResearchDriver({declared: landed})
+    runner = AutonomousBrowserResearchRunner(session, driver=driver, artifact_root=tmp_path)
+
+    result = await runner.start(
+        BrowserRunRequest(
+            project_id=PROJECT_ID,
+            mode=COPILOT,
+            task_id="task-transformers",
+            task_label="Transformer Survey",
+            steps=[BrowserResearchStep(url=declared)],
+        )
+    )
+
+    steps = (await session.exec(select(AgentRunStep).where(AgentRunStep.run_id == result.run_id))).all()
+    assert any(step.kind == "browser.redirect-blocked" for step in steps)
+    assert not any(step.kind == "browser.capture" for step in steps)
+    assert (await session.exec(select(Source))).all() == []
+
+
+@pytest.mark.asyncio
 async def test_hl_browse_40_landed_password_page_is_discarded_before_capture(
     session: AsyncSession, tmp_path: Path
 ):

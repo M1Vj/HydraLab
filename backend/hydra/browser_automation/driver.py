@@ -102,7 +102,10 @@ class PlaywrightBrowserResearchDriver:
             "input[name*='cvv'], input[autocomplete='cc-number']"
         )
         has_payment = await page.locator(payment_selector).count() > 0
-        has_cookies = bool(await context.cookies())  # type: ignore[attr-defined]
+        # NB: deliberately do NOT report context-wide cookies here. Cookies are
+        # normal once a session starts; feeding a context-scoped has_cookies into
+        # the landed-page hard-block check would discard every page after the
+        # first cookie is set, even on an approved host (03-06 over-block fix).
         return DriverPage(
             url=page.url,
             title=await page.title(),
@@ -110,7 +113,6 @@ class PlaywrightBrowserResearchDriver:
             snapshot_bytes=snapshot,
             has_password_field=has_password,
             has_payment_field=has_payment,
-            has_cookies=has_cookies,
         )
 
     async def close_task_group(self, task_group_id: str) -> None:

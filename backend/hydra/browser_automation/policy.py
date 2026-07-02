@@ -122,7 +122,7 @@ class BrowserAutomationPolicy:
                 bypass_attempted=False,
                 attempted_actions=["headed-navigation", "official-api-fallback"],
             )
-        permission = await self.permissions.get(context.project_id, host)
+        permission = await self.permissions.get(context.project_id, host, context.task_group_id)
         if permission["state"] == "blocked":
             return BrowserNavigationDecision(
                 status="blocked",
