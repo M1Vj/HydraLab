@@ -200,6 +200,7 @@ export type SettingsResponse = {
     api_key_ref?: string;
     secret_ref?: string | null;
     auth_status?: string;
+    resolved?: boolean;
   }>;
   workspace_preferences: Record<string, string>;
   global_settings: Record<string, unknown>;
