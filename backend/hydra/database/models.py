@@ -442,6 +442,44 @@ class AgentAuditLedgerEntry(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class SelfEvolutionChange(SQLModel, table=True):
+    """One typed, reviewable self-evolution change (branch 03-05, HL-ASSIST-30..35).
+
+    A change-set is a group of these rows sharing ``changeset_id``. Each row is a
+    single typed diff (``category`` skill|prompt|setting|app_code) rendered as a
+    human-readable ``unified_diff`` (redacted before persistence) plus the exact
+    ``new_content`` payload written to ``target_path`` on apply. ``test_plan`` names
+    the verification-allowlist commands that gate it; an empty plan is not
+    approvable. ``risk_class`` (auto_eligible|review_required) and ``trust_level``
+    (user|untrusted-external) force protected-field and untrusted-traced proposals
+    to the Review Inbox and bar them from the apply path. Status transitions on the
+    same row are expected (proposed→approved→applied|rolled_back|denied); the
+    forensic trail is the append-only ``agent_audit_ledger``.
+    """
+
+    __tablename__ = "self_evolution_changes"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    run_id: Optional[str] = Field(default=None, index=True)
+    changeset_id: str = Field(default="", index=True)
+    change_id: str = Field(default_factory=uuid_text, index=True)
+    category: str = Field(default="prompt")  # skill | prompt | setting | app_code
+    target_path: str = Field(default="")
+    unified_diff: str = Field(default="")  # redacted, human-readable
+    new_content: str = Field(default="")  # payload written to target_path on apply
+    test_plan: str = Field(default="[]")  # json list[str] of allowlisted commands
+    risk_class: str = Field(default="auto_eligible")  # auto_eligible | review_required
+    risk_reason: str = Field(default="")
+    trust_level: str = Field(default="user")  # user | untrusted-external
+    origin: str = Field(default="user")
+    status: str = Field(default="proposed")  # proposed|approved|applied|rolled_back|denied
+    checkpoint_ref: Optional[str] = Field(default=None)
+    verification_result: str = Field(default="")  # pass | fail | ""
+    review_inbox: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 class ProjectCollaborationSettings(SQLModel, table=True):
     __tablename__ = "project_collaboration_settings"
     project_id: str = Field(primary_key=True)
