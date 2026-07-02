@@ -122,6 +122,23 @@ select:focus-visible,
   align-items: center;
   gap: 3px;
   padding-top: 8px;
+  /* Keep the icon rail inside its grid cell on short viewports: scroll the rail
+     internally instead of letting 16 fixed-height buttons overflow the cell and
+     push the whole document past 100vh (which made the page scroll and hid the
+     lower icons + status bar below the fold). */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+}
+
+.activity-bar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.activity-bar::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 999px;
 }
 
 .activity-button {
