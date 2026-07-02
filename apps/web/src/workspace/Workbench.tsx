@@ -3,6 +3,9 @@ import { Layout, Model, type IJsonModel, type ILayoutApi, type TabNode } from "f
 import "flexlayout-react/style/dark.css";
 import { CheckCircle2, FolderOpen, PanelBottom, Plus, RotateCcw, Save, X } from "lucide-react";
 import { api } from "../lib/api";
+import { useSurface } from "../lib/responsive";
+import { MobileShell } from "../components/mobile/MobileShell";
+import { usePhase3MobileSurfaceEnabled } from "../components/mobile/useMobileSurfaceFlag";
 import { CommandPalette, ShortcutReference } from "./CommandPalette";
 import { CommandRegistry } from "./commands";
 import { WorkspaceDataProvider, useWorkspaceData } from "./data";
@@ -32,12 +35,25 @@ import {
 
 export function WorkbenchRoot() {
   const activeProject = useWorkspaceStore((state) => state.activeProject);
-  return activeProject ? (
+  const surface = useSurface();
+  const mobileEnabled = usePhase3MobileSurfaceEnabled();
+  // Phase-3 mobile surface: only when the flag is ON and a touch-primary surface is
+  // detected. Flag OFF or a desktop surface keeps the existing FlexLayout path
+  // byte-for-byte unchanged (HL-UX-30/32). WorkbenchShell itself is never modified.
+  const useMobileSurface = mobileEnabled && surface !== "desktop";
+
+  if (!activeProject) return <WelcomeSurface />;
+  if (useMobileSurface) {
+    return (
+      <WorkspaceDataProvider projectId={activeProject.id}>
+        <MobileShell project={activeProject} surface={surface} />
+      </WorkspaceDataProvider>
+    );
+  }
+  return (
     <WorkspaceDataProvider projectId={activeProject.id}>
       <WorkbenchShell project={activeProject} />
     </WorkspaceDataProvider>
-  ) : (
-    <WelcomeSurface />
   );
 }
 

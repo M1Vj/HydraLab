@@ -20,6 +20,7 @@ import {
 } from "./settingsController";
 import { AgentAccessModeControl, MemoryContextSurface, SkillsSection } from "./AssistantSettings";
 import { McpSettingsSection } from "./McpSettings";
+import { PHASE3_MOBILE_FLAG_KEY } from "../../components/mobile/useMobileSurfaceFlag";
 
 const CONSENT_TOGGLES: Array<{ key: string; label: string; fallback: boolean }> = [
   { key: "restoreOnLaunch", label: "Session restore on launch", fallback: true },
@@ -222,6 +223,25 @@ export function SettingsPanel() {
               {toggle.label}
             </label>
           ))}
+        </section>
+
+        <section className="settings-section">
+          <header>
+            <ShieldCheck size={15} />
+            <strong>Phase 3 preview</strong>
+          </header>
+          <label>
+            <input
+              type="checkbox"
+              checked={booleanPreference(preferences, PHASE3_MOBILE_FLAG_KEY, false)}
+              disabled={savingPref === PHASE3_MOBILE_FLAG_KEY}
+              onChange={(event) => void togglePreference(PHASE3_MOBILE_FLAG_KEY, event.target.checked)}
+            />
+            Adaptive phone/tablet surface (Phase 3)
+          </label>
+          <span className="settings-hint">
+            When on, phones and tablets get a simplified companion surface. Desktop is unchanged.
+          </span>
         </section>
 
         <section className="settings-section">
