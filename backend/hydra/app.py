@@ -243,6 +243,7 @@ from hydra.recipes.literature_review import (
     save_literature_review_artifact,
     validate_literature_review_input,
 )
+from hydra.recipes.retrieval import RetrievalOptions, retrieve_literature_hits
 from hydra.recipes.paper_critique import PAPER_CRITIQUE_RECIPE_ID, paper_critique_recipe, run_paper_critique_recipe
 from hydra.recipes.related_work import RELATED_WORK_RECIPE_ID, related_work_recipe, run_related_work_recipe
 from hydra.recipes.idea_generation import (
@@ -2588,23 +2589,56 @@ def create_app() -> FastAPI:
         return {"source": source, "note": note, "ingestion": ingestion}
 
     @app.get("/api/sources/retrieve")
-    async def retrieve_rag(query: str, source_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def retrieve_rag(
+        query: str,
+        source_id: str | None = None,
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
         repo = Repository(session)
         await repo.add_event("rag.retrieval", f"Retrieving answers for query '{query}'")
-        
-        # Placeholder until the real retrieval branch replaces this endpoint.
-        chunks = [f"Placeholder relevant passage for '{query}'"]
+
+        # Scope retrieval to this project's saved sources (or a single source when
+        # one is named) so a query never crosses the project boundary or invents a
+        # source reference — hits come only from indexed passages of real sources.
+        project_sources = await repo.list_sources(project_id=project_id)
+        project_source_ids = {str(row["id"]) for row in project_sources}
         if source_id:
-            chunks.append(f"Passage specifically from source_id={source_id}")
-            
-        answer = f"Placeholder retrieval response for '{query}'."
-        
+            scope_ids = [source_id] if source_id in project_source_ids else []
+        else:
+            scope_ids = sorted(project_source_ids)
+        source_scope = {"kind": "source-ids", "source_ids": scope_ids}
+
+        settings = load_settings(app_data_root() / "settings.toml").data
+        privacy = settings.get("privacy", {}) if isinstance(settings.get("privacy"), dict) else {}
+        general = settings.get("general", {}) if isinstance(settings.get("general"), dict) else {}
+        offline_only = bool(privacy.get("offline_only") or general.get("offline_only"))
+
+        result = await retrieve_literature_hits(
+            session,
+            query=query,
+            source_scope=source_scope,
+            options=RetrievalOptions(offline_only=offline_only),
+        )
+        hits = [hit.public_dict() for hit in result.hits]
+        chunks = [hit["text"] for hit in hits]
+
+        # Extractive answer only: quote the best-matching passages verbatim. No
+        # provider is called and no text is synthesised, so the response can never
+        # fabricate content the sources do not contain (HL honesty invariant).
+        if hits:
+            answer = "\n\n".join(f"[{hit['source_title'] or hit['source_id']}] {hit['text']}" for hit in hits[:3])
+        else:
+            answer = "No indexed passages matched this query. Ingest or index the source text to enable retrieval."
+
         return {
             "query": query,
-            "answer": answer,
-            "chunks": chunks,
             "source_id": source_id,
-            "placeholder": True,
+            "hits": hits,
+            "chunks": chunks,
+            "answer": answer,
+            "notices": result.notices,
+            "placeholder": False,
         }
 
     @app.post("/api/writing/review")

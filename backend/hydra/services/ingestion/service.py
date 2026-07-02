@@ -29,6 +29,43 @@ from hydra.services.ingestion.types import (
     QuarantineError,
 )
 
+# Retrieval chunking: index the whole extracted document as overlapping windows
+# rather than a single truncated prefix, so passages past the first page are
+# still findable. Windows align to whitespace to avoid cutting mid-word, and the
+# small overlap keeps a passage that straddles a boundary intact in one chunk.
+_CHUNK_TARGET_CHARS = 1200
+_CHUNK_OVERLAP_CHARS = 150
+
+
+def chunk_document_text(
+    text: str,
+    *,
+    target: int = _CHUNK_TARGET_CHARS,
+    overlap: int = _CHUNK_OVERLAP_CHARS,
+) -> list[tuple[int, str]]:
+    """Split text into overlapping (char_offset, chunk_text) windows."""
+    text = text.strip()
+    if not text:
+        return []
+    chunks: list[tuple[int, str]] = []
+    length = len(text)
+    start = 0
+    while start < length:
+        end = min(start + target, length)
+        if end < length:
+            # Prefer a newline break, else a space, within the tail of the window.
+            floor = start + overlap
+            boundary = max(text.rfind("\n", floor, end), text.rfind(" ", floor, end))
+            if boundary > start:
+                end = boundary
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append((start, chunk))
+        if end >= length:
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
 
 class IngestionService:
     def __init__(
@@ -155,15 +192,24 @@ class IngestionService:
             rows.append(row)
             if artifact.kind == "markdown" and artifact.content.strip():
                 image_parent = row
-                session.add(
-                    LexicalIndexEntry(
-                        source_id=source.source_id,
-                        chunk_id=f"{row.id}:0",
-                        locator=json.dumps({"artifact_id": row.id, "path": row.path}),
-                        text=artifact.content.decode("utf-8", errors="ignore")[:2000],
-                        trust_level=TRUST_LEVEL_UNTRUSTED,
+                full_text = artifact.content.decode("utf-8", errors="ignore")
+                for chunk_index, (char_offset, chunk_text) in enumerate(chunk_document_text(full_text)):
+                    session.add(
+                        LexicalIndexEntry(
+                            source_id=source.source_id,
+                            chunk_id=f"{row.id}:{chunk_index}",
+                            locator=json.dumps(
+                                {
+                                    "artifact_id": row.id,
+                                    "path": row.path,
+                                    "chunk_index": chunk_index,
+                                    "char_offset": char_offset,
+                                }
+                            ),
+                            text=chunk_text,
+                            trust_level=TRUST_LEVEL_UNTRUSTED,
+                        )
                     )
-                )
             for warning in [*artifact_set.warnings, *artifact.warnings]:
                 session.add(
                     ConversionWarning(

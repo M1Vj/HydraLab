@@ -265,3 +265,31 @@ async def test_failed_ingestion_original_mutation_rolls_back_artifact_rows_and_f
     assert list((tmp_path / "sources" / "derived").glob("**/*")) == []
     job = (await session.exec(select(IngestionJob))).one()
     assert job.status == "failed"
+
+
+def test_chunk_document_text_covers_whole_document_with_overlap():
+    from hydra.services.ingestion.service import chunk_document_text
+
+    # A document far longer than one window must yield multiple chunks that,
+    # together, cover the entire text (nothing past the first window is dropped).
+    paragraphs = [f"Paragraph {i} discusses retrieval augmented generation in depth." for i in range(120)]
+    text = "\n\n".join(paragraphs)
+    chunks = chunk_document_text(text)
+
+    assert len(chunks) > 1
+    offsets = [offset for offset, _ in chunks]
+    assert offsets == sorted(offsets)
+    assert offsets[0] == 0
+    # The last paragraph (end of the document) is present in some chunk.
+    assert any("Paragraph 119" in chunk for _, chunk in chunks)
+    # Consecutive chunks overlap or abut — no gap of uncovered text between them.
+    for (start_a, text_a), (start_b, _text_b) in zip(chunks, chunks[1:]):
+        assert start_b <= start_a + len(text_a)
+
+
+def test_chunk_document_text_handles_empty_and_short_input():
+    from hydra.services.ingestion.service import chunk_document_text
+
+    assert chunk_document_text("   ") == []
+    short = chunk_document_text("one small passage")
+    assert short == [(0, "one small passage")]
