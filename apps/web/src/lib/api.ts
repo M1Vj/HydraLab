@@ -445,6 +445,31 @@ export type ContextFileChange = {
   created_at: number;
 };
 
+export type McpToolInfo = {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  permission: "allow" | "deny" | string;
+  read_only: boolean;
+  status: "allowed" | "disabled" | string;
+};
+
+export type McpServerInfo = {
+  id: string;
+  name: string;
+  transport?: string;
+  enabled: boolean;
+  connector?: string | null;
+  status: "registered" | "connected" | "failed" | string;
+  connection_error: string;
+  auth_handle_ref?: string | null;
+  state: "empty" | "loading" | "failure" | "permission-denied" | "ready" | string;
+  tools: McpToolInfo[];
+};
+
+export type McpServersResponse = { servers: McpServerInfo[] };
+
 export type SettingsResponse = {
   provider_settings: Array<{
     provider: string;

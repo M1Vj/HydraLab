@@ -451,3 +451,20 @@ class SourceRetrieveResponse(BaseModel):
 class RAGRetrieveRequest(BaseModel):
     query: str
     source_id: str | None = None
+
+
+class McpServerRegisterRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    transport: str = Field(default="stdio", max_length=40)
+    connection: dict = Field(default_factory=dict)
+    auth_handle_ref: str | None = Field(default=None, max_length=400)
+    connector: str | None = Field(default=None, max_length=80)
+
+
+class McpServerEnableRequest(BaseModel):
+    enabled: bool = True
+
+
+class McpToolPermissionRequest(BaseModel):
+    enabled: bool | None = None
+    permission: Literal["allow", "deny"] | None = None
