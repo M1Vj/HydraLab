@@ -513,3 +513,25 @@ class MigrationIdMap(SQLModel, table=True):
     old_id: str = Field(index=True)
     new_id: str = Field(index=True)
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class ContextFileChange(SQLModel, table=True):
+    """Append-only log of automated/manual edits to the four context files.
+
+    Global files (SOUL/USER/MEMORY) are logs-only; HYDRA.md is Git/checkpoint-backed.
+    """
+
+    __tablename__ = "context_file_changes"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    profile_id: str = Field(default="default", index=True)
+    file: str = Field(index=True)  # SOUL.md / USER.md / MEMORY.md / HYDRA.md
+    change_type: str = Field(default="update")  # update / condense / manual_edit
+    timing: str = Field(default="immediate")  # immediate / batched
+    criticality: str = Field(default="normal")  # critical / normal
+    trust_level: str = Field(default="trusted")  # trusted / untrusted-external
+    provenance: str = Field(default="assistant")  # user / assistant / untrusted-external
+    summary: str = Field(default="")
+    checkpoint_ref: Optional[str] = Field(default=None)  # Git/checkpoint id for HYDRA.md
+    logs_only: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=utcnow)

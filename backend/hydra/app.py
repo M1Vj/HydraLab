@@ -70,6 +70,12 @@ from hydra.schemas import (
     RestoreRequest,
     WritingReviewRequest,
     ChatCompletionRequest,
+    ChatCreateRequest,
+    ChatUpdateRequest,
+    ChatExportRequest,
+    SendScopeRequest,
+    ContextFileSaveRequest,
+    MemoryCandidateRequest,
 )
 from hydra.database.models import Annotation, Claim, IngestionJob, Task
 from hydra.database.session import get_session, init_db, async_session_maker
@@ -119,7 +125,16 @@ from hydra.services.export.bundle import ExportOptions
 from hydra.storage.project import evaluate_git_init, reindex_notes_from_canonical_files
 from hydra.settings.toml_config import load_settings, save_settings
 from hydra.settings.secrets import InMemorySecretStore, KeyringSecretStore, ProviderSecretService, SecretStore
-from hydra.storage.app_data import app_data_root
+from hydra.providers import MockProvider, ProviderRouter, RoutingPolicy, RunBudget, build_provider
+from hydra.services.assistant import AssistantConfig, AssistantService, ProviderCache
+from hydra.skills.registry import PLUGIN_REJECTION_MESSAGE, load_skill_registry
+from hydra.services.project_context import (
+    ContextFileMemory,
+    ensure_hydra_md,
+    load_global_context,
+    load_project_context,
+)
+from hydra.storage.app_data import app_data_root, init_app_data
 from hydra.storage.runtime import DEFAULT_PORT, BackendRuntime, choose_bind_host
 from hydra.writing import review_text
 
@@ -151,6 +166,86 @@ BRIDGE_TOKEN_TTL_SECONDS = 3600
 BRIDGE_NONCE_TTL_SECONDS = 300
 
 _MEMORY_SECRET_STORE = InMemorySecretStore()
+_PROVIDER_CACHE = ProviderCache()
+
+
+def _assistant_privacy() -> dict[str, Any]:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    privacy = settings.get("privacy", {})
+    general = settings.get("general", {})
+    assistant = settings.get("assistant", {})
+    offline_only = bool(privacy.get("offline_only") or general.get("offline_only"))
+    opt_ins = dict(privacy.get("provider_send_opt_ins") or {})
+    # Browser page text to provider is a separate opt-in (HL-CONSENT-04).
+    browser = settings.get("browser", {})
+    if browser.get("browser_page_text_to_provider"):
+        opt_ins["browser_page_text"] = True
+    return {
+        "offline_only": offline_only,
+        "g3_enabled": bool(privacy.get("g3_provider_send")),
+        "opt_ins": opt_ins,
+        "ignored_paths": list(settings.get("indexing", {}).get("ignored_paths") or []),
+        "default_mode": str(assistant.get("default_mode") or assistant.get("mode") or "passive"),
+        "run_budget": int(assistant.get("run_budget", 60000)),
+        "wall_clock_seconds": int(assistant.get("wall_clock_seconds", 120)),
+        "max_parallel_calls": int(assistant.get("max_parallel_calls", 2)),
+    }
+
+
+def _build_assistant_service(secret_store: SecretStore) -> AssistantService:
+    privacy = _assistant_privacy()
+    config = AssistantConfig(
+        g3_enabled=privacy["g3_enabled"],
+        offline_only=privacy["offline_only"],
+        opt_ins=privacy["opt_ins"],
+        ignored_paths=privacy["ignored_paths"],
+        default_mode=privacy["default_mode"],
+        run_budget=privacy["run_budget"],
+        wall_clock_seconds=privacy["wall_clock_seconds"],
+        max_parallel_calls=privacy["max_parallel_calls"],
+    )
+    providers = _resolve_providers(secret_store)
+    router = ProviderRouter(
+        providers=providers,
+        policy=RoutingPolicy(mode="single"),
+        budget=RunBudget(
+            run_budget_tokens=config.run_budget,
+            wall_clock_seconds=config.wall_clock_seconds,
+            max_parallel_calls=config.max_parallel_calls,
+        ),
+    )
+    registry = load_skill_registry()
+    return AssistantService(
+        router=router,
+        config=config,
+        cache=_PROVIDER_CACHE,
+        skill_descriptors=registry.enabled_descriptors(),
+    )
+
+
+def _resolve_providers(secret_store: SecretStore) -> list[Any]:
+    """Build provider adapters from configured accounts; fall back to MockProvider.
+
+    In test/dev with no resolvable BYO key we use MockProvider so no live API is hit.
+    """
+    settings = load_settings(app_data_root() / "settings.toml").data
+    accounts = settings.get("providers", {}).get("accounts", {})
+    providers: list[Any] = []
+    service = ProviderSecretService(secret_store)
+    for provider_id, account in accounts.items():
+        if provider_id not in {"openai", "openrouter"}:
+            continue
+        secret = service.get_provider_secret(app_data_root() / "settings.toml", provider_id, "api_key")
+        if not secret:
+            continue
+        model = str(account.get("model") or ("gpt-4.1-mini" if provider_id == "openai" else "openrouter/auto"))
+        try:
+            providers.append(build_provider(provider_id, secret, model))
+        except Exception:
+            continue
+    if not providers:
+        providers.append(MockProvider())
+    return providers
 
 
 def create_app() -> FastAPI:
@@ -349,39 +444,171 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         return {"messages": await repo.list_messages(conversation_id)}
 
+    # ---------------------------------------------------------------- chats
+    @app.get("/api/chats")
+    async def list_chats(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        await repo.ensure_default_chat(project_id)
+        return {"chats": await repo.list_chats(project_id)}
+
+    @app.post("/api/chats")
+    async def create_chat(request: ChatCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"chat": await repo.create_chat(request.project_id, request.name)}
+
+    @app.patch("/api/chats/{chat_id}")
+    async def update_chat(chat_id: str, request: ChatUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        chat = await repo.update_chat(chat_id, name=request.name, archived=request.archived)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return {"chat": chat}
+
+    @app.get("/api/chats/search")
+    async def search_chats(project_id: str = "default", q: str = "", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"chats": await repo.search_chats(project_id, q)}
+
+    @app.get("/api/chats/{chat_id}/messages")
+    async def list_chat_messages(chat_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"messages": await repo.list_chat_messages(chat_id)}
+
+    @app.post("/api/chats/{chat_id}/export")
+    async def export_chat(chat_id: str, request: ChatExportRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        chat = await repo.get_chat(chat_id)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        messages = await repo.list_chat_messages(chat_id)
+        if request.message_ids:
+            selected = [m for m in messages if m["id"] in set(request.message_ids)]
+        else:
+            selected = messages
+        path = write_chat_artifact(hydra_project_root(), chat, selected)
+        await repo.add_event("chat.exported", f"Exported chat {chat['name']} to {path.name}")
+        return {"path": str(path.relative_to(hydra_project_root())), "message_count": len(selected)}
+
     @app.post("/api/chat/completions")
     async def chat_completions(request: ChatCompletionRequest, session: AsyncSession = Depends(get_session)) -> StreamingResponse:
         repo = Repository(session)
-        conv_id = request.conversation_id
-        if not conv_id:
-            conv = await repo.create_conversation(request.message[:40] or "New Chat")
-            conv_id = conv["id"]
-        
-        await repo.add_message(conv_id, "user", request.message)
-        
+        chat_id = request.chat_id
+        if chat_id:
+            chat = await repo.get_chat(chat_id)
+            if chat is None:
+                raise HTTPException(status_code=404, detail="Chat not found")
+        else:
+            chat = await repo.ensure_default_chat(request.project_id)
+            chat_id = chat["id"]
+
+        context_refs = [ref.model_dump() for ref in request.context_refs]
+        await repo.add_chat_message(chat_id, "user", request.message, context_refs=context_refs)
+        assistant_row = await repo.add_chat_message(chat_id, "assistant", "", trust_origin="assistant")
+        assistant_message_id = assistant_row["id"]
+        service = _build_assistant_service(secret_store)
+
+        async def persist_delta(delta: str) -> None:
+            async with async_session_maker() as bg_session:
+                await Repository(bg_session).append_chat_message_content(assistant_message_id, delta)
+
         async def stream() -> AsyncIterator[str]:
-            yield f"data: {json.dumps({'type': 'status', 'content': 'reading request...'})}\n\n"
-            
-            # Use isolated background session to avoid closed event loop or session access
-            async with async_session_maker() as background_session:
-                bg_repo = Repository(background_session)
-                await bg_repo.add_event("chat.status", "Thinking about the user query...")
-            
-            yield f"data: {json.dumps({'type': 'status', 'content': 'searching memory...'})}\n\n"
-            
-            answer = f"I received your message: '{request.message}'. This is a mock response."
-            
-            async with async_session_maker() as background_session:
-                bg_repo = Repository(background_session)
-                await bg_repo.add_message(conv_id, "assistant", answer)
-            
-            # Stream the answer in chunks
-            for word in answer.split(" "):
-                yield f"data: {json.dumps({'type': 'message', 'content': word + ' '})}\n\n"
-            
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conv_id})}\n\n"
+            async for event in service.stream_reply(request.message, context_refs=context_refs, on_delta=persist_delta):
+                payload = dict(event)
+                if event.get("type") == "done":
+                    payload["chat_id"] = chat_id
+                    payload["message_id"] = assistant_message_id
+                yield f"data: {json.dumps(payload)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/api/assistant/send-scope")
+    async def preview_send_scope(request: SendScopeRequest) -> dict[str, object]:
+        service = _build_assistant_service(secret_store)
+        scope = service.resolve_scope([ref.model_dump() for ref in request.context_refs])
+        if scope.has_hard_block:
+            raise HTTPException(
+                status_code=403,
+                detail={"reason": scope.blocked[0]["reason"], "blocked": scope.blocked, "kind": "hard-blocked"},
+            )
+        return {"included": scope.included, "excluded": scope.excluded, "blocked": scope.blocked}
+
+    @app.get("/api/assistant/modes")
+    async def assistant_modes() -> dict[str, object]:
+        privacy = _assistant_privacy()
+        return {
+            "default_mode": privacy["default_mode"],
+            "modes": [
+                {"id": "passive", "label": "Passive (Suggest-only)", "enabled": True, "phase": 1},
+                {"id": "copilot", "label": "Co-pilot (Approve-to-apply)", "enabled": False, "phase": 2},
+                {"id": "full_access", "label": "Full Access (YOLO)", "enabled": False, "phase": 2},
+            ],
+            "offline_only": privacy["offline_only"],
+            "g3_provider_send": privacy["g3_enabled"],
+        }
+
+    @app.post("/api/assistant/offline")
+    async def set_offline_only(enabled: bool = True) -> dict[str, object]:
+        settings_path = app_data_root() / "settings.toml"
+        settings = load_settings(settings_path).data
+        settings.setdefault("privacy", {})["offline_only"] = bool(enabled)
+        settings.setdefault("general", {})["offline_only"] = bool(enabled)
+        save_settings(settings_path, settings)
+        if enabled:
+            _PROVIDER_CACHE.purge()
+        return {"offline_only": bool(enabled), "cache_purged": bool(enabled), "status": "offline-blocked" if enabled else "online"}
+
+    # ---------------------------------------------------------------- skills
+    @app.get("/api/skills")
+    async def list_skills() -> dict[str, object]:
+        registry = load_skill_registry(project_dir=hydra_project_root() / ".hydralab" / "skills")
+        return {
+            "skills": [s.to_api() for s in registry.skills],
+            "rejected_plugins": registry.rejected_plugins,
+        }
+
+    # ------------------------------------------------------ context files / memory
+    @app.get("/api/context-files")
+    async def get_context_files(project_id: str = "default") -> dict[str, object]:
+        profile = init_app_data("default")
+        ensure_hydra_md(hydra_project_root())
+        global_files = load_global_context(profile.profile_root, profile.profile_id)
+        project_file = load_project_context(hydra_project_root())
+        return {
+            "profile_id": profile.profile_id,
+            "global_files": [vars(f) for f in global_files],
+            "project_file": vars(project_file),
+        }
+
+    @app.put("/api/context-files/{file_name}")
+    async def save_context_file(file_name: str, request: ContextFileSaveRequest, project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        profile = init_app_data("default")
+        memory = ContextFileMemory(session, hydra_project_root(), profile.profile_root, profile.profile_id)
+        try:
+            result = await memory.manual_edit(file=file_name, new_content=request.content, project_id=project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"written": result.written, "file": result.file, "change_id": result.change_id}
+
+    @app.get("/api/context-files/changes")
+    async def context_file_changes(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        profile = init_app_data("default")
+        memory = ContextFileMemory(session, hydra_project_root(), profile.profile_root, profile.profile_id)
+        return {"changes": await memory.list_changes(project_id=project_id)}
+
+    @app.post("/api/memory/candidates")
+    async def create_memory_candidate(request: MemoryCandidateRequest, project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        profile = init_app_data("default")
+        memory = ContextFileMemory(session, hydra_project_root(), profile.profile_root, profile.profile_id)
+        candidate = await memory.route_memory_candidate(
+            fact=request.fact,
+            destination=request.destination,
+            category=request.category,
+            confidence=request.confidence,
+            source_ref=request.source_ref,
+            trust_origin=request.trust_origin,
+            project_id=project_id,
+        )
+        return {"candidate": candidate}
 
     @app.post("/api/chat/research")
     async def research_chat(request: ResearchRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -1707,6 +1934,45 @@ async def persist_browser_capture(request: BrowserCaptureRequest, session: Async
         "event": event,
         "source": source,
     }
+
+def write_chat_artifact(project_root: Path, chat: dict[str, Any], messages: list[dict[str, Any]]) -> Path:
+    """Write a readable Markdown snapshot under work/chats/ (non-authoritative export).
+
+    Editing this file MUST NOT mutate SQLite (HL-ASSIST-04); it embeds chat id, message
+    range, timestamp and model/provider for traceability only.
+    """
+    chats_dir = project_root / "work" / "chats"
+    chats_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(c for c in str(chat.get("name") or "chat") if c.isalnum() or c in (" ", "_", "-")).strip() or "chat"
+    stamp = int(time.time())
+    path = chats_dir / f"{safe_name}-{stamp}.md"
+    ids = [m["id"] for m in messages]
+    model = next((m.get("model") for m in messages if m.get("model")), "")
+    provider = next((m.get("provider") for m in messages if m.get("provider")), "")
+    lines = [
+        "---",
+        f"chat_id: {chat.get('id')}",
+        f"chat_name: {chat.get('name')}",
+        f"message_range: {ids[0] if ids else ''}..{ids[-1] if ids else ''}",
+        f"message_count: {len(messages)}",
+        f"exported_at: {stamp}",
+        f"model: {model}",
+        f"provider: {provider}",
+        "authoritative: false",
+        "note: Snapshot only. Editing this file does not change the canonical SQLite chat.",
+        "---",
+        "",
+        f"# {chat.get('name')}",
+        "",
+    ]
+    for message in messages:
+        lines.append(f"## {message.get('role')}")
+        lines.append("")
+        lines.append(str(message.get("content") or ""))
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
 
 def motivating_excerpt(text: str) -> str:
     normalized = " ".join(text.split())
