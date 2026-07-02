@@ -206,6 +206,19 @@ def _bibtex_entry_to_csl(entry: dict[str, Any]) -> dict[str, Any]:
     return csl
 
 
+def _escape_bibtex_value(value: str) -> str:
+    """Sanitize a field value so it cannot corrupt the ``{...}``-delimited entry.
+
+    A stray brace in a title/author closes the field early and breaks the whole
+    record (unparseable .bib). bibtexparser's reader counts braces literally and
+    does NOT honor ``\\{`` / ``\\}`` escapes, so the only way to guarantee a
+    parseable record is to drop braces. These values are plain-text CSL (import
+    already strips protective braces via ``_strip_braces``), so there is no
+    semantic brace to preserve.
+    """
+    return value.replace("{", "").replace("}", "")
+
+
 def csl_json_to_bibtex(items: list[dict[str, Any]]) -> str:
     database = bibtexparser.bibdatabase.BibDatabase()
     entries = []
@@ -216,9 +229,9 @@ def csl_json_to_bibtex(items: list[dict[str, Any]]) -> str:
             "ID": item.get("id") or citation_key(item) or f"entry{index + 1}",
         }
         if item.get("title"):
-            entry["title"] = str(item["title"])
+            entry["title"] = _escape_bibtex_value(str(item["title"]))
         if item.get("author"):
-            entry["author"] = _csl_authors_to_string(item["author"])
+            entry["author"] = _escape_bibtex_value(_csl_authors_to_string(item["author"]))
         year = _year_from_csl(item)
         if year:
             entry["year"] = year
@@ -233,7 +246,7 @@ def csl_json_to_bibtex(items: list[dict[str, Any]]) -> str:
             ("abstract", "abstract"),
         ):
             if item.get(src):
-                entry[dst] = str(item[src])
+                entry[dst] = _escape_bibtex_value(str(item[src]))
         entries.append(entry)
     database.entries = entries
     writer = BibTexWriter()

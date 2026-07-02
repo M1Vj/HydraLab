@@ -300,3 +300,23 @@ def test_bibtex_roundtrip_equivalent():
     reparsed = bibtex_to_csl_json(exported)
     assert reparsed[0]["title"] == "Attention Is All You Need"
     assert reparsed[0]["DOI"] == "10.48550/arXiv.1706.03762"
+
+
+def test_bibtex_export_sanitizes_stray_braces_stays_parseable():
+    # A stray brace in a title would close the {...} field early and corrupt the
+    # whole entry; the export must stay parseable.
+    exported = csl_json_to_bibtex(
+        [
+            {
+                "id": "k1",
+                "type": "article-journal",
+                "title": "A } brace { problem",
+                "author": [{"family": "Doe", "given": "J"}],
+                "issued": {"date-parts": [[2020]]},
+            }
+        ]
+    )
+    assert "{" not in exported.split("title = ", 1)[1].split("\n", 1)[0].strip("{},")
+    reparsed = bibtex_to_csl_json(exported)
+    assert reparsed[0]["id"] == "k1"
+    assert "brace" in reparsed[0]["title"]
