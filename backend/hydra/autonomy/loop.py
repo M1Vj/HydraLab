@@ -10,6 +10,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.agents.contracts import RunStatus
 from hydra.agents.runs import RunBudget, RunRepository, budget_exceeded
+from hydra.autonomy.gate import ActionGate
 from hydra.autonomy.policy import AutonomyPolicy, AutonomyPolicyError
 from hydra.database.models import AgentRun
 from hydra.orchestrator.run import RunConfig, RunExecutionResult, RunStateMachine
@@ -22,6 +23,7 @@ class AutopilotLoop:
     policy: AutonomyPolicy
     config: RunConfig
     runner_factory: RunnerFactory | None = None
+    full_access_enabled: bool = False
     loop_count: int = 0
     stop_conditions: list[str] = field(default_factory=list)
     cancelled: bool = False
@@ -68,9 +70,16 @@ class AutopilotLoop:
         last: RunExecutionResult | None = None
 
         while self.loop_count < self.policy.max_loop_count:
-            if self.cancelled:
+            # Re-read persisted state each iteration so an out-of-band cancel
+            # (a separate request flipping the run row) actually stops the loop
+            # before the next iteration (M2), and the token ceiling is enforced
+            # against the run's real consumption, not a hardcoded zero (M1).
+            current = await self.session.get(AgentRun, run_id) if run_id else None
+            if self.cancelled or (current is not None and current.status == RunStatus.CANCELLED.value):
+                self.stop_reason = self.stop_reason or "cancelled by user"
                 break
-            if budget_exceeded(tokens_used=0, elapsed_seconds=time.monotonic() - started, budget=budget):
+            tokens_used = current.tokens_used if current is not None else 0
+            if budget_exceeded(tokens_used=tokens_used, elapsed_seconds=time.monotonic() - started, budget=budget):
                 self.stop_reason = "budget exceeded"
                 if run_id:
                     await repo.block_on_budget(run_id)
@@ -106,4 +115,10 @@ class AutopilotLoop:
     def _runner(self, repo: RunRepository, budget: RunBudget) -> RunStateMachine:
         if self.runner_factory is not None:
             return self.runner_factory(repo, self.config, budget)
-        return RunStateMachine(repo, self.config, budget=budget)
+        return RunStateMachine(
+            repo,
+            self.config,
+            budget=budget,
+            action_gate=ActionGate(self.session),
+            full_access_enabled=self.full_access_enabled,
+        )

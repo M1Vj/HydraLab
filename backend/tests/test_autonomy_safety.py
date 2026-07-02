@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from hydra.agents.contracts import ApprovalStatus
 from hydra.agents.policy import COPILOT, FULL_ACCESS, PASSIVE, TRUST_UNTRUSTED
 from hydra.agents.runs import RunRepository
-from hydra.autonomy.audit import AuditLedger
-from hydra.autonomy.checkpoints import CheckpointService
+from hydra.autonomy.audit import LEDGER_APPEND_ONLY_TRIGGERS, AuditLedger
+from hydra.autonomy.checkpoints import CheckpointError, CheckpointService
 from hydra.autonomy.gate import ActionGate, GovernedAction
 from hydra.autonomy.loop import AutopilotLoop
 from hydra.autonomy.policy import (
@@ -28,9 +30,17 @@ from hydra.autonomy.policy import (
     resolve_autonomy_policy,
 )
 from hydra.autonomy.risk import RiskClassifier
-from hydra.database.models import AgentAuditLedgerEntry, AgentCheckpoint, AgentModePolicy, AgentRun, ReviewItem
+from hydra.database.models import (
+    AgentApproval,
+    AgentAuditLedgerEntry,
+    AgentCheckpoint,
+    AgentModePolicy,
+    AgentRun,
+    ReviewItem,
+)
 from hydra.orchestrator.dispatch import PrivacyPosture
-from hydra.orchestrator.run import RunConfig, RunExecutionResult
+from hydra.orchestrator.run import RunConfig, RunExecutionResult, RunStateMachine
+from hydra.orchestrator.stages import StageContext, StageEnum, StageResult
 
 @pytest_asyncio.fixture
 async def engine():
@@ -56,9 +66,26 @@ class FakeGit:
         self.events.append(f"checkpoint:{label}")
         return {"branch": "feature/03-01", "commit": f"commit-{len(self.events)}"}
 
+    def head_commit(self) -> str:
+        return "head-sha"
+
     def restore_previous_version(self, path: str, *, ref: str = "HEAD", auto_checkpoint: bool = False):
         self.events.append(f"restore:{path}:{ref}")
         return {"restored": path, "ref": ref, "checkpoint": None}
+
+@dataclass
+class CleanTreeGit:
+    """A clean working tree: checkpoint() commits nothing, HEAD is the pin."""
+
+    events: list[str] = field(default_factory=list)
+    head: str = "abc123"
+
+    def checkpoint(self, label: str = "checkpoint"):
+        self.events.append(f"checkpoint:{label}")
+        return None
+
+    def head_commit(self) -> str:
+        return self.head
 
 def policy(mode: str = FULL_ACCESS, *, max_loop_count: int = 2) -> AutonomyPolicy:
     return AutonomyPolicy(
@@ -82,6 +109,21 @@ def gate(session: AsyncSession, events: list[str]) -> ActionGate:
         audit=AuditLedger(session),
     )
 
+async def _approved_row(
+    session: AsyncSession, *, action_kind: str, target_ref: str, status: str = ApprovalStatus.APPROVED.value
+) -> AgentApproval:
+    row = AgentApproval(
+        project_id="default",
+        mode=FULL_ACCESS,
+        action_kind=action_kind,
+        target_ref=target_ref,
+        status=status,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
 def test_hl_mode_32_risk_classifier_levels_and_unknown_high():
     classifier = RiskClassifier()
     assert classifier.classify({"action_kind": "summarize", "summary": "summarize a PDF"}) == "low"
@@ -100,8 +142,8 @@ def test_hl_mode_31_missing_policy_error_names_unresolved_fields():
     with pytest.raises(AutonomyPolicyError) as err:
         resolve_autonomy_policy(None)
     text = str(err.value)
-    for field in ("mode", "budget limits", "max loop count", "stop conditions"):
-        assert field in text
+    for field_name in ("mode", "budget limits", "max loop count", "stop conditions"):
+        assert field_name in text
 
 def test_hl_mode_31_resolved_policy_carries_required_fields():
     row = AgentModePolicy(
@@ -173,6 +215,7 @@ async def test_hl_mode_33_full_access_low_auto_applies(session):
 @pytest.mark.asyncio
 async def test_hl_mode_34_high_risk_write_checkpoints_and_audits_before_apply(session):
     events: list[str] = []
+    approval = await _approved_row(session, action_kind="delete_file", target_ref="sources/papers/draft-notes.md")
 
     async def apply_delete():
         events.append("apply:delete")
@@ -186,7 +229,7 @@ async def test_hl_mode_34_high_risk_write_checkpoints_and_audits_before_apply(se
             full_access_enabled=True,
             project_id="default",
             summary="Delete draft notes",
-            approved=True,
+            approval_id=approval.id,
         ),
         apply_fn=apply_delete,
     )
@@ -199,7 +242,123 @@ async def test_hl_mode_34_high_risk_write_checkpoints_and_audits_before_apply(se
     assert checkpoints[0].target == "sources/papers/draft-notes.md"
     audit = (await session.exec(select(AgentAuditLedgerEntry))).all()
     assert audit[0].risk_level == "high"
-    assert audit[0].approval_state == "approval_required"
+    # The action actually applied, so the ledger records the true state (H1).
+    assert audit[0].approval_state == "applied"
+
+@pytest.mark.asyncio
+async def test_h1_unresolved_approval_never_applies_high_risk(session):
+    """A high-risk action with no approval id must not apply, ever (H1)."""
+    events: list[str] = []
+    result = await gate(session, events).govern(
+        GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="delete_file",
+            target_ref="sources/x.md",
+            full_access_enabled=True,
+            project_id="default",
+            summary="Delete without approval",
+            approval_id=None,
+        ),
+        apply_fn=lambda: _record(events, "applied"),
+    )
+    assert result.applied is False
+    assert result.status == "approval_required"
+    assert "applied" not in events
+    assert not (await session.exec(select(AgentCheckpoint))).all()
+
+@pytest.mark.asyncio
+async def test_h1_pending_or_mismatched_approval_id_rejected(session):
+    """A pending approval, or one whose target/action mismatches, cannot force apply (H1)."""
+    events: list[str] = []
+    pending = await _approved_row(
+        session, action_kind="delete_file", target_ref="sources/x.md", status=ApprovalStatus.PENDING.value
+    )
+    result = await gate(session, events).govern(
+        GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="delete_file",
+            target_ref="sources/x.md",
+            full_access_enabled=True,
+            project_id="default",
+            approval_id=pending.id,
+        ),
+        apply_fn=lambda: _record(events, "applied"),
+    )
+    assert result.applied is False
+    assert "applied" not in events
+
+    mismatched = await _approved_row(session, action_kind="delete_file", target_ref="sources/OTHER.md")
+    result2 = await gate(session, events).govern(
+        GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="delete_file",
+            target_ref="sources/x.md",
+            full_access_enabled=True,
+            project_id="default",
+            approval_id=mismatched.id,
+        ),
+        apply_fn=lambda: _record(events, "applied2"),
+    )
+    assert result2.applied is False
+    assert "applied2" not in events
+
+@pytest.mark.asyncio
+async def test_h2_full_access_high_risk_denies_without_approval(session):
+    result = await gate(session, []).govern(
+        GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="delete_file",
+            target_ref="sources/keep.md",
+            full_access_enabled=True,
+            project_id="default",
+        )
+    )
+    assert result.applied is False
+    assert result.status in {"approval_required", "review_inbox"}
+
+@pytest.mark.asyncio
+async def test_h2_arbitrary_code_execution_is_blocked(session):
+    events: list[str] = []
+    result = await gate(session, events).govern(
+        GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="shell",
+            target_ref="rm -rf /",
+            full_access_enabled=True,
+            project_id="default",
+            summary="run a shell command",
+        ),
+        apply_fn=lambda: _record(events, "applied"),
+    )
+    assert result.status == "blocked"
+    assert result.applied is False
+    assert "applied" not in events
+    audit = (await session.exec(select(AgentAuditLedgerEntry))).all()
+    assert audit[0].approval_state == "blocked"
+
+@pytest.mark.asyncio
+async def test_h2_injection_tagging_from_trusted_input_is_classified_untrusted(session):
+    """An action carrying untrusted-provenance content is routed/tagged untrusted
+    even though the run's mode is Full Access — provenance, not the caller, drives it."""
+    cases = json.loads(Path("backend/tests/fixtures/injection/autonomy_injection_cases.json").read_text())
+    spoof = next((c for c in cases if "boundary" in c["id"] or "spoof" in c["id"]), cases[0])
+    result = await gate(session, []).govern(
+        GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="write_note",
+            target_ref="notes/injected.md",
+            trust_origin=TRUST_UNTRUSTED,
+            justification_trust=TRUST_UNTRUSTED,
+            full_access_enabled=True,
+            project_id="default",
+            summary=spoof["id"],
+            payload={"origin_url": spoof["origin_url"], "excerpt": spoof["excerpt"]},
+        )
+    )
+    assert result.applied is False
+    assert result.status == "review_inbox"
+    item = (await session.exec(select(ReviewItem))).first()
+    assert json.loads(item.payload_json)["tag"] == "untrusted-external"
 
 @pytest.mark.asyncio
 async def test_hl_mode_35_audit_one_row_per_action_and_append_only(session):
@@ -228,6 +387,110 @@ async def test_hl_mode_35_audit_one_row_per_action_and_append_only(session):
     assert rows[0].model_dump() == snapshot
 
 @pytest.mark.asyncio
+async def test_l2_audit_ledger_update_and_delete_are_rejected(engine):
+    """DB-level append-only enforcement: UPDATE/DELETE on prior rows abort (L2)."""
+    async with engine.begin() as conn:
+        for statement in LEDGER_APPEND_ONLY_TRIGGERS:
+            await conn.execute(text(statement))
+    maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as session:
+        row = await AuditLedger(session).append(
+            project_id="default",
+            run_id="run-x",
+            actor="autopilot",
+            action="delete_file",
+            risk_level="high",
+            target="a.md",
+            approval_state="applied",
+        )
+        with pytest.raises(Exception):
+            await session.execute(
+                text("UPDATE agent_audit_ledger SET approval_state='tampered' WHERE id=:i"), {"i": row.id}
+            )
+            await session.commit()
+    async with maker() as session:
+        with pytest.raises(Exception):
+            await session.execute(text("DELETE FROM agent_audit_ledger WHERE id=:i"), {"i": row.id})
+            await session.commit()
+
+@pytest.mark.asyncio
+async def test_m3_checkpoint_pins_head_commit_on_clean_tree(session):
+    """On a clean tree git.checkpoint() commits nothing; the checkpoint pins HEAD (M3)."""
+    service = CheckpointService(session, project_root=Path.cwd(), git=CleanTreeGit(head="abc123"))  # type: ignore[arg-type]
+    row = await service.create(project_id="default", run_id=None, label="before delete", target="a.md")
+    assert row.commit == "abc123"
+    assert row.git_ref == "abc123"
+
+@pytest.mark.asyncio
+async def test_m3_checkpoint_refuses_when_no_restorable_ref(session):
+    class NoRepoGit:
+        def checkpoint(self, label: str = "checkpoint"):
+            return None
+
+        def head_commit(self) -> str:
+            return ""
+
+    service = CheckpointService(session, project_root=Path.cwd(), git=NoRepoGit())  # type: ignore[arg-type]
+    with pytest.raises(CheckpointError):
+        await service.create(project_id="default", run_id=None, label="x", target="a.md")
+
+@pytest.mark.asyncio
+async def test_c1_real_run_governs_actions_producing_audit_and_checkpoint(session):
+    """A real Autopilot run must route stage actions through the gate, producing
+    an audit row and a checkpoint — the shell is wired, not dead code (C1)."""
+    events: list[str] = []
+    approval = await _approved_row(session, action_kind="delete_file", target_ref="sources/loop-target.md")
+
+    class HighRiskStage:
+        id = StageEnum.GENERATE
+
+        async def run(self, ctx: StageContext) -> StageResult:
+            assert ctx.action_gate is not None  # gate reaches stages
+            return StageResult(
+                stage=self.id,
+                summary="proposes a high-risk delete",
+                proposed_actions=[
+                    GovernedAction(
+                        mode=ctx.mode,
+                        action_kind="delete_file",
+                        target_ref="sources/loop-target.md",
+                        full_access_enabled=True,
+                        approval_id=approval.id,
+                        apply_fn=lambda: _record(events, "applied"),
+                    )
+                ],
+            )
+
+    def factory(repo, config, budget):
+        return RunStateMachine(
+            repo,
+            config,
+            budget=budget,
+            stages={StageEnum.GENERATE: HighRiskStage()},
+            action_gate=ActionGate(
+                session,
+                checkpoints=CheckpointService(session, project_root=Path.cwd(), git=FakeGit(events)),  # type: ignore[arg-type]
+                audit=AuditLedger(session),
+            ),
+            full_access_enabled=True,
+        )
+
+    loop = AutopilotLoop(
+        session,
+        policy(max_loop_count=1),
+        RunConfig.all_enabled(),
+        runner_factory=factory,
+    )
+    await loop.start(project_id="default")
+
+    audit = (await session.exec(select(AgentAuditLedgerEntry))).all()
+    checkpoints = (await session.exec(select(AgentCheckpoint))).all()
+    assert len(audit) >= 1
+    assert any(row.action == "delete_file" and row.approval_state == "applied" for row in audit)
+    assert len(checkpoints) >= 1
+    assert "applied" in events
+
+@pytest.mark.asyncio
 async def test_hl_mode_36_cancel_records_stop_reason(session):
     run = await RunRepository(session).create_run(project_id="default", mode=FULL_ACCESS)
     loop = AutopilotLoop(session, policy(), RunConfig.all_enabled())
@@ -235,6 +498,67 @@ async def test_hl_mode_36_cancel_records_stop_reason(session):
     refreshed = await session.get(AgentRun, run.id)
     assert refreshed.status == "cancelled"
     assert refreshed.stop_reason == "cancelled by user"
+
+@pytest.mark.asyncio
+async def test_m2_db_cancel_stops_loop_before_next_iteration(session):
+    """An out-of-band cancel (a separate request flipping the run row) stops the
+    loop at the next-iteration DB re-read, not just via the in-process flag (M2)."""
+    repo = RunRepository(session)
+    calls = {"n": 0}
+
+    async def fake_start(*, project_id, mode, recipe="autopilot-loop", inputs=None, data=None):
+        calls["n"] += 1
+        run = await repo.create_run(project_id=project_id, mode=mode, recipe=recipe, inputs=inputs)
+        await repo.complete_run(run.id)
+        # Simulate a cancel request arriving during this iteration.
+        await repo.cancel_run(run.id, stop_reason="cancelled by user")
+        return RunExecutionResult(run_id=run.id, state="completed")
+
+    class FakeRunner:
+        start = staticmethod(fake_start)
+
+    loop = AutopilotLoop(
+        session,
+        policy(max_loop_count=3),
+        RunConfig.all_enabled(),
+        runner_factory=lambda repo, config, budget: FakeRunner(),  # type: ignore[return-value]
+    )
+    await loop.start(project_id="default")
+    assert calls["n"] == 1  # stopped after the first iteration, did not reach loop 2/3
+    assert loop.loop_count == 1
+    assert loop.stop_reason == "cancelled by user"
+
+@pytest.mark.asyncio
+async def test_m1_token_budget_stops_loop(session):
+    """The token ceiling must stop the loop, not just wall-clock (M1)."""
+
+    async def fake_start(*, project_id, mode, recipe="autopilot-loop", inputs=None, data=None):
+        run = await RunRepository(session).create_run(project_id=project_id, mode=mode, recipe=recipe, inputs=inputs)
+        run.tokens_used = 999_999
+        session.add(run)
+        await session.commit()
+        await RunRepository(session).complete_run(run.id)
+        return RunExecutionResult(run_id=run.id, state="completed")
+
+    class FakeRunner:
+        start = staticmethod(fake_start)
+
+    tight = AutonomyPolicy(
+        mode=FULL_ACCESS,
+        budget_limits=BudgetLimits(tokens=10, wall_clock_seconds=9_999),
+        max_loop_count=5,
+        stop_conditions=["max_loop_count"],
+        autopilot_enabled=True,
+    )
+    loop = AutopilotLoop(
+        session,
+        tight,
+        RunConfig.all_enabled(),
+        runner_factory=lambda repo, config, budget: FakeRunner(),  # type: ignore[return-value]
+    )
+    await loop.start(project_id="default")
+    assert loop.stop_reason == "budget exceeded"
+    assert loop.loop_count < tight.max_loop_count
 
 @pytest.mark.asyncio
 async def test_hl_mode_36_loop_stops_at_max_loop_count(session):
@@ -274,6 +598,22 @@ async def test_hl_mode_37_full_access_exclusions_route_to_review_inbox(session, 
     assert result.applied is False
     rows = (await session.exec(select(AgentAuditLedgerEntry))).all()
     assert rows[0].approval_state == result.status
+
+@pytest.mark.asyncio
+async def test_l3_full_access_medium_requires_approval_conformance(session):
+    """Conformance lock: Full Access auto-applies ONLY low risk; medium falls to
+    approval (stricter than the guide's 'low/medium', fails safe by design)."""
+    result = await gate(session, []).govern(
+        GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="write_note",
+            target_ref="notes/medium.md",
+            full_access_enabled=True,
+            project_id="default",
+        )
+    )
+    assert result.applied is False
+    assert result.status == "approval_required"
 
 @pytest.mark.asyncio
 async def test_hl_trust_30_untrusted_traced_action_routes_to_review_inbox_tagged(session):
@@ -348,16 +688,15 @@ async def test_hl_trust_32_prompt_injection_corpus_never_auto_applies(session):
                 full_access_enabled=True,
                 project_id="default",
                 summary=case["id"],
-                payload={"origin_url": case["origin_url"], "excerpt": case["excerpt"]},
+                payload={"origin_url": case["origin_url"], "excerpt": case["excerpt"], "page_text": case["page_text"]},
             )
         )
         assert result.applied is False, case["id"]
         assert result.status in {"review_inbox", "blocked", "permission-denied"}, case["id"]
-    rows = (await session.exec(select(ReviewItem))).all()
-    serialized = "\n".join(row.payload_json for row in rows)
-    for case in cases:
-        assert case["page_text"] not in serialized
-    assert "page_text" not in serialized
+    # No untrusted page_text may reach an applied artifact; untrusted routing only
+    # writes review items (data, held for human review), never applies.
+    applied = [r for r in (await session.exec(select(AgentAuditLedgerEntry))).all() if r.approval_state == "applied"]
+    assert applied == []
 
 async def _record(events: list[str], event: str) -> None:
     events.append(event)

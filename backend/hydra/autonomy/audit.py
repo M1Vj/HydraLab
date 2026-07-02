@@ -7,6 +7,18 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.database.models import AgentAuditLedgerEntry
 
+# Defense-in-depth beyond the append-only Python API: SQLite triggers that abort
+# any UPDATE/DELETE on prior rows so the forensic ledger cannot be rewritten by
+# another code path or a direct ORM mutation (HL-MODE-35, L2).
+LEDGER_APPEND_ONLY_TRIGGERS: tuple[str, ...] = (
+    "CREATE TRIGGER IF NOT EXISTS agent_audit_ledger_no_update "
+    "BEFORE UPDATE ON agent_audit_ledger "
+    "BEGIN SELECT RAISE(ABORT, 'audit ledger is append-only'); END",
+    "CREATE TRIGGER IF NOT EXISTS agent_audit_ledger_no_delete "
+    "BEFORE DELETE ON agent_audit_ledger "
+    "BEGIN SELECT RAISE(ABORT, 'audit ledger is append-only'); END",
+)
+
 class AuditLedger:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session

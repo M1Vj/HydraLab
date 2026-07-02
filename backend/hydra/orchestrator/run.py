@@ -80,12 +80,16 @@ class RunStateMachine:
         stages: dict[StageEnum, Stage] | None = None,
         budget: RunBudget | None = None,
         cancel_after_stage: StageEnum | None = None,
+        action_gate: Any = None,
+        full_access_enabled: bool = False,
     ) -> None:
         self.repository = repository
         self.config = config
         self.stages = {**default_stages(config.scoring_method), **(stages or {})}
         self.budget = budget or RunBudget()
         self.cancel_after_stage = cancel_after_stage
+        self.action_gate = action_gate
+        self.full_access_enabled = full_access_enabled
         self.run_id = ""
 
     async def start(
@@ -126,9 +130,18 @@ class RunStateMachine:
                 continue
 
             stage_impl = self.stages[stage]
-            ctx = StageContext(run_id=run_id, project_id=project_id, mode=mode, data=data, config=self.config)
+            ctx = StageContext(
+                run_id=run_id,
+                project_id=project_id,
+                mode=mode,
+                data=data,
+                config=self.config,
+                full_access_enabled=self.full_access_enabled,
+                action_gate=self.action_gate,
+            )
             try:
                 result = await stage_impl.run(ctx)
+                await self._govern_actions(run_id, project_id, mode, result)
             except Exception as exc:
                 await self.repository.append_step(
                     run_id,
@@ -156,6 +169,24 @@ class RunStateMachine:
 
         await self.repository.complete_run(run_id, status=RunStatus.COMPLETED.value)
         return RunExecutionResult(run_id=run_id, state="completed", completed_stages=completed)
+
+    async def _govern_actions(self, run_id: str, project_id: str, mode: str, result: StageResult) -> None:
+        """Route every stage-proposed substantive action through the ActionGate.
+
+        The run's mode/project/run id are authoritative and stamped onto each
+        proposed action so a stage can never widen the active mode's scope
+        (HL-MODE-30). With no gate wired (plain Phase-2 run) this is a no-op.
+        """
+        if self.action_gate is None or not result.proposed_actions:
+            return
+        for action in result.proposed_actions:
+            action.mode = mode
+            action.project_id = project_id
+            action.run_id = run_id
+            if not getattr(action, "full_access_enabled", False):
+                action.full_access_enabled = self.full_access_enabled
+            gate_result = await self.action_gate.govern(action, apply_fn=getattr(action, "apply_fn", None))
+            result.governed.append(gate_result)
 
     async def _persist_result(self, run_id: str, result: StageResult) -> None:
         await self.repository.append_step(

@@ -12,6 +12,7 @@ from typing import Sequence, Union
 from alembic import op
 from sqlmodel import SQLModel
 
+from hydra.autonomy.audit import LEDGER_APPEND_ONLY_TRIGGERS
 from hydra.database import models  # noqa: F401
 
 revision: str = "202607030100"
@@ -22,6 +23,9 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
     SQLModel.metadata.create_all(bind=bind)
+    for statement in LEDGER_APPEND_ONLY_TRIGGERS:
+        op.execute(statement)
 
 def downgrade() -> None:
-    pass
+    op.execute("DROP TRIGGER IF EXISTS agent_audit_ledger_no_update")
+    op.execute("DROP TRIGGER IF EXISTS agent_audit_ledger_no_delete")

@@ -7,10 +7,12 @@ from typing import Any, Awaitable, Callable
 
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from hydra.agents.contracts import ApprovalStatus
 from hydra.agents.policy import Outcome
 from hydra.autonomy.audit import AuditLedger
 from hydra.autonomy.checkpoints import CheckpointService
 from hydra.autonomy.risk import RiskClassifier
+from hydra.database.models import AgentApproval
 from hydra.orchestrator.dispatch import DispatchAction, DispatchGuard, PrivacyPosture
 
 ApplyFn = Callable[[], Awaitable[Any]]
@@ -32,7 +34,12 @@ class GovernedAction:
     payload: dict[str, Any] = field(default_factory=dict)
     privacy: PrivacyPosture | None = None
     actor: str = "autopilot"
-    approved: bool = False
+    # Apply-after-approval is proven ONLY by a persisted, approved AgentApproval
+    # row id — never a caller-supplied bool (see govern()).
+    approval_id: str | None = None
+    # Optional side-effect callback governed actions run once, after the gate
+    # authorises apply and (for high-risk) a checkpoint exists.
+    apply_fn: ApplyFn | None = None
 
 @dataclass
 class GateResult:
@@ -83,9 +90,20 @@ class ActionGate:
             )
         )
         target = action.target_ref or action.target_kind or ""
-        approval_state = dispatch.status
+
+        # Only the chokepoint's own APPLY outcome auto-applies. A human approval
+        # is honoured ONLY through a persisted, approved AgentApproval row whose
+        # action_kind/target match — an inbound bool is never trusted (H1).
+        should_apply = dispatch.applied
+        if not should_apply and action.approval_id and dispatch.status == "approval_required":
+            should_apply = await self._approval_authorises(action)
+
         if dispatch.decision.outcome == Outcome.BLOCKED.value:
             approval_state = "blocked"
+        elif should_apply:
+            approval_state = "applied"
+        else:
+            approval_state = dispatch.status
 
         audit = await self.audit.append(
             project_id=action.project_id,
@@ -98,7 +116,6 @@ class ActionGate:
         )
 
         checkpoint_id: str | None = None
-        should_apply = dispatch.applied or (action.approved and dispatch.status == "approval_required")
         if should_apply:
             if risk == "high" or dispatch.decision.checkpoint_required:
                 checkpoint = await self.checkpoints.create(
@@ -108,8 +125,9 @@ class ActionGate:
                     target=target,
                 )
                 checkpoint_id = checkpoint.id
-            if apply_fn is not None:
-                await apply_fn()
+            runner = apply_fn or action.apply_fn
+            if runner is not None:
+                await runner()
             return GateResult(
                 status="applied",
                 applied=True,
@@ -130,6 +148,15 @@ class ActionGate:
             checkpoint_id=checkpoint_id,
             review_item_id=dispatch.review_item_id,
             approval_id=dispatch.approval_id,
+        )
+
+    async def _approval_authorises(self, action: GovernedAction) -> bool:
+        approval = await self.session.get(AgentApproval, action.approval_id)
+        return (
+            approval is not None
+            and approval.status == ApprovalStatus.APPROVED.value
+            and approval.action_kind == action.action_kind
+            and (approval.target_ref or None) == (action.target_ref or None)
         )
 
     def _payload(self, action: GovernedAction, risk: str) -> dict[str, Any]:

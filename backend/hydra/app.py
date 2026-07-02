@@ -1106,7 +1106,9 @@ def create_app() -> FastAPI:
             )
         except (AutonomyPolicyError, OrchestratorConfigError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        result = await AutopilotLoop(session, policy, config).start(project_id=request.project_id, inputs=request.inputs)
+        result = await AutopilotLoop(
+            session, policy, config, full_access_enabled=bool(stored.full_access_enabled)
+        ).start(project_id=request.project_id, inputs=request.inputs)
         return await _autonomy_run_response(session, result.run_id, state=result.state)
 
     @app.post("/api/autonomy/runs/{run_id}/pause")
@@ -1126,7 +1128,9 @@ def create_app() -> FastAPI:
             policy = resolve_autonomy_policy(stored)
         except AutonomyPolicyError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        result = await AutopilotLoop(session, policy, RunConfig.all_enabled()).resume(run_id=run_id, project_id=run.project_id)
+        result = await AutopilotLoop(
+            session, policy, RunConfig.all_enabled(), full_access_enabled=bool(stored.full_access_enabled)
+        ).resume(run_id=run_id, project_id=run.project_id)
         return await _autonomy_run_response(session, result.run_id, state=result.state)
 
     @app.post("/api/autonomy/runs/{run_id}/cancel")
@@ -1150,7 +1154,9 @@ def create_app() -> FastAPI:
             policy = resolve_autonomy_policy(stored)
         except AutonomyPolicyError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        result = await AutopilotLoop(session, policy, RunConfig.all_enabled()).retry(project_id=run.project_id)
+        result = await AutopilotLoop(
+            session, policy, RunConfig.all_enabled(), full_access_enabled=bool(stored.full_access_enabled)
+        ).retry(project_id=run.project_id)
         return await _autonomy_run_response(session, result.run_id, state=result.state)
 
     @app.get("/api/autonomy/pending-actions")
