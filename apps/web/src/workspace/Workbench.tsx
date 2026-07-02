@@ -12,6 +12,7 @@ import { WorkspaceDataProvider, useWorkspaceData } from "./data";
 import { activeJsonLayout } from "./layout";
 import { createPanelRegistry, panelChrome, tab, tabStableKey, type PanelConfig, type PanelId, type PanelLocation } from "./panelRegistry";
 import { PanelErrorBoundary } from "./PanelErrorBoundary";
+import { usePrompt } from "../components/ui/usePrompt";
 import { useWorkspaceStore, type ActiveProject, type RecentProject } from "./store";
 import { ExplorerPanel } from "./panels/ExplorerPanel";
 import { SourceDiscoveryPanel } from "./panels/SourceDiscoveryPanel";
@@ -85,6 +86,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
   // programmatic open/close mutate it in place via Actions; only an explicit
   // reset/switch swaps in a new model (where a remount is expected).
   const [model, setModel] = useState(() => Model.fromJson(activeJsonLayout(store.activeLayoutState())));
+  const { prompt, dialog } = usePrompt();
   const modelRef = useRef(model);
   useEffect(() => {
     modelRef.current = model;
@@ -206,16 +208,21 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
     announce("Layout reset");
   }
 
-  function saveLayoutAs() {
-    const name = window.prompt("Save layout as", "Research layout");
+  async function saveLayoutAs() {
+    const name = await prompt({ title: "Save layout as", defaultValue: "Research layout", confirmLabel: "Save" });
     if (!name) return;
     store.saveActiveLayoutAs(name, modelRef.current.toJson());
     announce(`Saved layout ${name}`);
   }
 
-  function switchLayout() {
+  async function switchLayout() {
     const layouts = Object.keys(store.activeLayoutState().layouts);
-    const name = window.prompt(`Switch layout (${layouts.join(", ")})`, store.activeLayoutState().activeLayout);
+    const name = await prompt({
+      title: "Switch layout",
+      defaultValue: store.activeLayoutState().activeLayout,
+      placeholder: layouts.join(", "),
+      confirmLabel: "Switch",
+    });
     if (!name) return;
     store.switchActiveLayout(name);
     setModel(Model.fromJson(activeJsonLayout(useWorkspaceStore.getState().activeLayoutState())));
@@ -269,6 +276,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         }}
       />
       <ShortcutReference open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+      {dialog}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Info, LockKeyhole, Pause, Paperclip, Play, Plus, Search, Send, ShieldQuestion, X } from "lucide-react";
 import { api, type AgentApproval, type AssistantModes, type Chat, type ChatMessage, type ContextRef, type SendScopeResult } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
+import { usePrompt } from "../../components/ui/usePrompt";
 import { fetchApprovals, fetchModes, modeLabel, resolveApproval } from "./agentController";
 import { EmptyState, FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import {
@@ -115,6 +116,7 @@ export function ResearchChatPanel({ announce }: PanelComponentProps) {
   const [scope, setScope] = useState<SendScopeResult | null>(null);
   const [pickerType, setPickerType] = useState(PICKER_TYPES[0].type);
   const [pickerValue, setPickerValue] = useState("");
+  const { prompt, dialog } = usePrompt();
 
   const streaming = stream.status === "streaming";
   const consentBlocked = isConsentBlocked(stream);
@@ -146,7 +148,7 @@ export function ResearchChatPanel({ announce }: PanelComponentProps) {
   }
 
   async function onCreateChat() {
-    const name = window.prompt("New chat name", "New chat");
+    const name = await prompt({ title: "New chat name", defaultValue: "New chat", confirmLabel: "Create" });
     if (!name) return;
     const chat = await createChat(PROJECT_ID, name);
     await loadChats();
@@ -154,7 +156,7 @@ export function ResearchChatPanel({ announce }: PanelComponentProps) {
   }
 
   async function onRename(id: string) {
-    const name = window.prompt("Rename chat");
+    const name = await prompt({ title: "Rename chat", confirmLabel: "Rename" });
     if (!name) return;
     await renameChat(id, name);
     await loadChats();
@@ -352,6 +354,7 @@ export function ResearchChatPanel({ announce }: PanelComponentProps) {
           </form>
         </div>
       </div>
+      {dialog}
     </PanelScaffold>
   );
 }
