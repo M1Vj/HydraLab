@@ -10,6 +10,7 @@ Review-Inbox routing of tool-derived write proposals.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -154,8 +155,11 @@ class MCPService:
 
         client = MCPClient(transport)
         try:
-            client.connect()
-            tools = client.list_tools()
+            # The transport speaks blocking HTTP; run it off the event loop so an
+            # unreachable/slow server (up to the 5s timeout) can't stall the whole
+            # backend for other requests.
+            await asyncio.to_thread(client.connect)
+            tools = await asyncio.to_thread(client.list_tools)
         except MCPError as exc:
             await self.repo.set_mcp_server_status(server_id, "failed", connection_error=str(exc))
             return {"status": "failed", "error": str(exc), "tools": []}
@@ -229,8 +233,9 @@ class MCPService:
             return await self._error(tool_id, server_id, tool_name, "no transport bound for this server")
         client = MCPClient(transport)
         try:
-            client.connect()
-            result = client.call_tool(tool_name, arguments)
+            # Blocking HTTP transport → run off the event loop (see discovery).
+            await asyncio.to_thread(client.connect)
+            result = await asyncio.to_thread(client.call_tool, tool_name, arguments)
         except MCPError as exc:
             return await self._error(tool_id, server_id, tool_name, str(exc))
 
