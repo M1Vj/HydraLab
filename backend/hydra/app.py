@@ -47,6 +47,8 @@ from hydra.schemas import (
     SourceTrashRequest,
     SourceUnmergeRequest,
     ManuscriptExportRequest,
+    ManuscriptPackageRequest,
+    ManuscriptSubmissionRequest,
     DocxEditPlanRequest,
     DocxOperationReviewRequest,
     NoteCreateRequest,
@@ -137,6 +139,7 @@ from hydra.services.writing import (
     list_manuscripts,
     resolve_manuscript_format,
 )
+from hydra.manuscripts import ManuscriptBuildError, ManuscriptPackageService, PackageRequest
 from hydra.services.ingestion import IngestionService
 from hydra.services.ingestion.safety import validate_source_file
 from hydra.services.ingestion.types import QuarantineError
@@ -1833,6 +1836,56 @@ def create_app() -> FastAPI:
             "validation_error": resolved.validation_error,
             "source": resolved.source,
         }
+
+    @app.get("/api/writing/manuscripts/{manuscript}/export-preview")
+    async def get_manuscript_export_preview(
+        manuscript: str,
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ManuscriptPackageService(hydra_project_root(), session).preview(manuscript, project_id=project_id)
+        except ManuscriptBuildError as exc:
+            raise HTTPException(status_code=404, detail={"reason": "manuscript-missing", "message": str(exc)}) from exc
+        return result.public_dict()
+
+    @app.post("/api/writing/manuscripts/{manuscript}/package")
+    async def create_manuscript_package(
+        manuscript: str,
+        request: ManuscriptPackageRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ManuscriptPackageService(hydra_project_root(), session).create_package(
+                manuscript,
+                PackageRequest(
+                    approval_id=request.approval_id,
+                    targets=list(request.targets),
+                    acknowledge_citation_issues=request.acknowledge_citation_issues,
+                    acknowledged_redaction_item_ids=list(request.acknowledged_redaction_item_ids),
+                    project_id=request.project_id,
+                ),
+            )
+        except ManuscriptBuildError as exc:
+            raise HTTPException(status_code=404, detail={"reason": "manuscript-missing", "message": str(exc)}) from exc
+        return result.public_dict()
+
+    @app.post("/api/writing/manuscripts/{manuscript}/submit")
+    async def submit_manuscript_package(
+        manuscript: str,
+        request: ManuscriptSubmissionRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ManuscriptPackageService(hydra_project_root(), session).request_external_submission(
+                manuscript,
+                venue=request.venue,
+                approval_id=request.approval_id,
+                project_id=request.project_id,
+            )
+        except ManuscriptBuildError as exc:
+            raise HTTPException(status_code=404, detail={"reason": "manuscript-missing", "message": str(exc)}) from exc
+        return result.public_dict()
 
     @app.get("/api/writing/latex/availability")
     async def get_latex_availability() -> dict[str, object]:
