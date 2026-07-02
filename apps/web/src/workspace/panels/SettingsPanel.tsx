@@ -5,6 +5,7 @@ import { HydraApiError } from "../../lib/api";
 import { useWorkspaceData } from "../data";
 import { FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import { booleanPreference, looksLikeRawSecret, providerSecretStored, saveProviderModel, saveProviderSecret, saveWorkspacePreferences } from "./settingsController";
+import { AgentAccessModeControl, MemoryContextSurface, SkillsSection } from "./AssistantSettings";
 
 const CONSENT_TOGGLES: Array<{ key: string; label: string; fallback: boolean }> = [
   { key: "restoreOnLaunch", label: "Session restore on launch", fallback: true },
@@ -88,6 +89,7 @@ export function SettingsPanel() {
   return (
     <PanelScaffold title="Settings">
       <div className="settings-grid">
+        <AgentAccessModeControl />
         <section className="settings-section">
           <header>
             <ShieldCheck size={15} />
@@ -158,6 +160,9 @@ export function SettingsPanel() {
             })
           )}
         </section>
+
+        <SkillsSection />
+        <MemoryContextSurface />
       </div>
     </PanelScaffold>
   );

@@ -467,6 +467,172 @@ select:focus-visible,
   resize: none;
 }
 
+/* Assistant panel — chat list, context picker, pre-send surface, memory/context */
+.chat-layout {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.chat-list-header {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.chat-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.chat-search input {
+  border: none;
+  background: transparent;
+  width: 100%;
+}
+
+.chat-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.chat-list-row.active {
+  outline: 1px solid rgba(47, 129, 247, 0.45);
+  border-radius: 6px;
+}
+
+.chat-list-row > button:first-child {
+  flex: 1;
+  text-align: left;
+}
+
+.chat-archived-badge {
+  opacity: 0.6;
+  font-size: 0.85em;
+}
+
+.chat-composer-area {
+  grid-column: 2;
+  grid-row: 2;
+  border-top: 1px solid var(--border-color);
+}
+
+.chat-composer-area .chat-composer {
+  border-top: none;
+}
+
+.context-picker {
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.context-picker-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.context-picker-controls input {
+  flex: 1;
+}
+
+.context-ref-list,
+.send-scope-surface ul,
+.chat-refs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+  font-size: 0.85em;
+}
+
+.context-ref-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.send-scope-surface {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.scope-included {
+  color: #2ea043;
+}
+
+.scope-excluded {
+  color: var(--text-muted, #8b949e);
+}
+
+.mode-fieldset {
+  border: none;
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+}
+
+.mode-option.disabled {
+  opacity: 0.55;
+}
+
+.phase-badge,
+.untrusted-tag {
+  margin-left: 6px;
+  font-size: 0.75em;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.untrusted-tag {
+  color: #d29922;
+  border-color: #d29922;
+}
+
+.skill-list,
+.context-change-list,
+.memory-candidate-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.skill-row,
+.context-change,
+.memory-candidate {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.skill-row.disabled {
+  opacity: 0.7;
+}
+
+.skill-meta,
+.candidate-meta,
+.candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.82em;
+}
+
+.skill-reason {
+  color: #d29922;
+  margin: 4px 0 0;
+}
+
 .document-header {
   min-height: 36px;
   border-bottom: 1px solid var(--border-color);

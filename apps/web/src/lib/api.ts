@@ -188,9 +188,99 @@ export type ChatConversation = {
 export type ChatMessage = {
   id: string;
   conversation_id?: string;
+  chat_id?: string;
   role: "user" | "assistant" | "system";
   content: string;
+  context_refs?: ContextRef[];
+  trust_origin?: string;
   created_at?: number;
+};
+
+export type Chat = {
+  id: string;
+  project_id: string;
+  name: string;
+  archived?: boolean;
+  created_at?: number;
+  updated_at?: number;
+};
+
+export type ContextRef = {
+  type: string;
+  id_or_path: string;
+  locator?: Record<string, unknown>;
+  label?: string;
+  text?: string;
+};
+
+export type SendScopeItem = {
+  type: string;
+  id_or_path: string;
+  label?: string;
+  reason?: string;
+  locator?: Record<string, unknown>;
+};
+
+export type SendScopeResult = {
+  included: SendScopeItem[];
+  excluded: SendScopeItem[];
+  blocked: SendScopeItem[];
+};
+
+export type AssistantMode = { id: string; label: string; enabled: boolean; phase: number };
+
+export type AssistantModes = {
+  default_mode: string;
+  modes: AssistantMode[];
+  offline_only: boolean;
+  g3_provider_send: boolean;
+};
+
+export type SkillInfo = {
+  id: string;
+  name: string;
+  scope: string;
+  enabled: boolean;
+  risk_level: string;
+  requires_approval: boolean;
+  description?: string;
+  disabled_reason?: string | null;
+};
+
+export type SkillsResponse = {
+  skills: SkillInfo[];
+  rejected_plugins: Array<{ path: string; reason: string }>;
+};
+
+export type ContextFileInfo = {
+  name: string;
+  path: string;
+  content: string;
+  scope: string;
+  recovery: string;
+  exists: boolean;
+  visible?: boolean;
+};
+
+export type ContextFilesResponse = {
+  profile_id: string;
+  global_files: ContextFileInfo[];
+  project_file: ContextFileInfo;
+};
+
+export type ContextFileChange = {
+  id: string;
+  file: string;
+  change_type: string;
+  timing: string;
+  criticality: string;
+  trust_level: string;
+  provenance: string;
+  summary: string;
+  checkpoint_ref?: string | null;
+  logs_only: boolean;
+  recovery: string;
+  created_at: number;
 };
 
 export type SettingsResponse = {

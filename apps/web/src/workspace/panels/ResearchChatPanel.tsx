@@ -1,33 +1,67 @@
-import { useEffect, useState } from "react";
-import { Send } from "lucide-react";
-import { api, type ChatConversation, type ChatMessage } from "../../lib/api";
+import { useEffect, useMemo, useState } from "react";
+import { LockKeyhole, Paperclip, Plus, Search, Send, X } from "lucide-react";
+import { api, type Chat, type ChatMessage, type ContextRef, type SendScopeResult } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
 import { EmptyState, FailureState, LoadingState, PanelScaffold } from "./PanelState";
+import {
+  archiveChat,
+  buildContextRefs,
+  createChat,
+  fetchChats,
+  fetchMessages,
+  initialStreamState,
+  isConsentBlocked,
+  previewSendScope,
+  reduceStreamEvent,
+  renameChat,
+  searchChats,
+  type StreamEvent,
+  type StreamState,
+} from "./chatController";
+
+const PROJECT_ID = "default";
+
+const PICKER_TYPES: Array<{ type: string; label: string }> = [
+  { type: "active_file", label: "Active file" },
+  { type: "selection", label: "Selection" },
+  { type: "attachment", label: "Attached item" },
+  { type: "pdf", label: "PDF" },
+  { type: "source", label: "Source" },
+  { type: "note", label: "Note" },
+  { type: "task", label: "Task" },
+  { type: "browser_event", label: "Browser event" },
+];
 
 export function ResearchChatPanel({ announce }: PanelComponentProps) {
-  const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [chats, setChats] = useState<Chat[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [chatId, setChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
-  const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [stream, setStream] = useState<StreamState>(() => initialStreamState());
+  const [searchTerm, setSearchTerm] = useState("");
+  const [refs, setRefs] = useState<ContextRef[]>([]);
+  const [scope, setScope] = useState<SendScopeResult | null>(null);
+  const [pickerType, setPickerType] = useState(PICKER_TYPES[0].type);
+  const [pickerValue, setPickerValue] = useState("");
+
+  const streaming = stream.status === "streaming";
+  const consentBlocked = isConsentBlocked(stream);
 
   useEffect(() => {
-    void loadConversations();
+    void loadChats();
   }, []);
 
-  async function loadConversations() {
+  async function loadChats() {
     setLoading(true);
     setError(null);
     try {
-      const payload = await api.get<{ conversations: ChatConversation[] }>("/api/chat/conversations");
-      setConversations(payload.conversations);
-      if (payload.conversations[0]) {
-        setConversationId(payload.conversations[0].id);
-        const messagePayload = await api.get<{ messages: ChatMessage[] }>(`/api/chat/conversations/${payload.conversations[0].id}/messages`);
-        setMessages(messagePayload.messages);
-      }
+      const list = await fetchChats(PROJECT_ID);
+      setChats(list);
+      const first = list[0]?.id ?? null;
+      setChatId(first);
+      if (first) setMessages(await fetchMessages(first));
     } catch (caught) {
       setError(caught instanceof Error ? caught : new Error(String(caught)));
     } finally {
@@ -35,64 +69,217 @@ export function ResearchChatPanel({ announce }: PanelComponentProps) {
     }
   }
 
-  async function sendMessage() {
-    const message = input.trim();
-    if (!message || streaming) return;
-    setInput("");
-    setStreaming(true);
-    setError(null);
-    setMessages((current) => [...current, { id: `local-${Date.now()}`, role: "user", content: message }, { id: "streaming", role: "assistant", content: "" }]);
+  async function selectChat(id: string) {
+    setChatId(id);
+    setStream(initialStreamState(id));
+    setMessages(await fetchMessages(id));
+  }
+
+  async function onCreateChat() {
+    const name = window.prompt("New chat name", "New chat");
+    if (!name) return;
+    const chat = await createChat(PROJECT_ID, name);
+    await loadChats();
+    void selectChat(chat.id);
+  }
+
+  async function onRename(id: string) {
+    const name = window.prompt("Rename chat");
+    if (!name) return;
+    await renameChat(id, name);
+    await loadChats();
+  }
+
+  async function onArchive(id: string, archived: boolean) {
+    await archiveChat(id, archived);
+    await loadChats();
+  }
+
+  async function onSearch(term: string) {
+    setSearchTerm(term);
+    if (!term.trim()) {
+      await loadChats();
+      return;
+    }
+    setChats(await searchChats(PROJECT_ID, term));
+  }
+
+  function addRef() {
+    if (!pickerValue.trim()) return;
+    setRefs((current) => [...current, { type: pickerType, id_or_path: pickerValue.trim(), label: pickerValue.trim() }]);
+    setPickerValue("");
+    setScope(null);
+  }
+
+  function removeRef(index: number) {
+    setRefs((current) => current.filter((_, i) => i !== index));
+    setScope(null);
+  }
+
+  async function reviewSend() {
     try {
-      await api.stream("/api/chat/completions", { conversation_id: conversationId, message }, (event) => {
-        const item = event as { type?: string; content?: string; conversation_id?: string };
-        if (item.type === "message") {
-          setMessages((current) => current.map((row) => (row.id === "streaming" ? { ...row, content: row.content + (item.content ?? "") } : row)));
-        }
-        if (item.type === "status") announce(item.content ?? "Chat status update");
-        if (item.type === "done" && item.conversation_id) setConversationId(item.conversation_id);
-      });
-      void loadConversations();
+      setScope(await previewSendScope(buildContextRefs(refs)));
+      announce("Reviewed what will be sent to the provider");
     } catch (caught) {
       setError(caught instanceof Error ? caught : new Error(String(caught)));
-      setMessages((current) => current.map((row) => (row.id === "streaming" ? { ...row, content: `${row.content}\n\n[interrupted]` } : row)));
-    } finally {
-      setStreaming(false);
     }
   }
 
-  if (loading) return <LoadingState title="Loading conversations" />;
-  if (error) return <FailureState error={error} onRetry={loadConversations} />;
+  async function sendMessage() {
+    const message = input.trim();
+    if (!message || streaming || !chatId) return;
+    setInput("");
+    const contextRefs = buildContextRefs(refs);
+    setMessages((current) => [
+      ...current,
+      { id: `local-${Date.now()}`, role: "user", content: message, context_refs: contextRefs },
+      { id: "streaming", role: "assistant", content: "" },
+    ]);
+    let next = initialStreamState(chatId);
+    setStream(next);
+    try {
+      await api.stream("/api/chat/completions", { chat_id: chatId, project_id: PROJECT_ID, message, context_refs: contextRefs }, (event) => {
+        next = reduceStreamEvent(next, event as StreamEvent);
+        setStream(next);
+        const evt = event as { type?: string; content?: string };
+        if (evt.type === "status" && evt.content) announce(evt.content);
+        if (evt.type === "message") {
+          setMessages((current) => current.map((row) => (row.id === "streaming" ? { ...row, content: next.assistantContent } : row)));
+        }
+      });
+      if (next.status === "blocked") {
+        setMessages((current) => current.filter((row) => row.id !== "streaming"));
+        announce(next.blockedReason ?? "Send blocked");
+      }
+      setRefs([]);
+      setScope(null);
+      await loadMessagesOnly(chatId);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught : new Error(String(caught)));
+    }
+  }
+
+  async function loadMessagesOnly(id: string) {
+    try {
+      setMessages(await fetchMessages(id));
+    } catch {
+      /* keep optimistic view */
+    }
+  }
+
+  const visibleChats = useMemo(() => chats, [chats]);
+
+  if (loading) return <LoadingState title="Loading chats" />;
+  if (error) return <FailureState error={error} onRetry={loadChats} />;
 
   return (
-    <PanelScaffold title="Research Chat">
+    <PanelScaffold title="Assistant">
       <div className="chat-layout">
-        <aside className="conversation-list" aria-label="Conversations">
-          {conversations.length === 0 ? <span>No conversations</span> : conversations.map((conversation) => <button key={conversation.id}>{conversation.title}</button>)}
+        <aside className="conversation-list" aria-label="Chats">
+          <div className="chat-list-header">
+            <button onClick={() => void onCreateChat()} aria-label="New chat"><Plus size={14} /> New</button>
+          </div>
+          <label className="chat-search">
+            <Search size={12} aria-hidden />
+            <input value={searchTerm} onChange={(event) => void onSearch(event.target.value)} placeholder="Search chats" aria-label="Search chats" />
+          </label>
+          {visibleChats.length === 0 ? (
+            <span>No chats</span>
+          ) : (
+            visibleChats.map((chat) => (
+              <div key={chat.id} className={`chat-list-row ${chat.id === chatId ? "active" : ""}`}>
+                <button onClick={() => void selectChat(chat.id)}>
+                  {chat.name}
+                  {chat.archived && <span className="chat-archived-badge"> (archived)</span>}
+                </button>
+                <div className="chat-row-actions">
+                  <button onClick={() => void onRename(chat.id)} title="Rename">✎</button>
+                  <button onClick={() => void onArchive(chat.id, !chat.archived)} title={chat.archived ? "Unarchive" : "Archive"}>
+                    {chat.archived ? "↩" : "🗄"}
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
         </aside>
+
         <section className="chat-thread" aria-live="polite">
           {messages.length === 0 ? (
-            <EmptyState title="Default project chat empty" message="Ask research questions grounded in the active workspace." action="Ask the assistant" onAction={() => undefined} />
+            <EmptyState title="Default project chat" message="Ask research questions grounded in the active workspace." />
           ) : (
             messages.map((message) => (
               <article key={message.id} className={`chat-message ${message.role}`}>
                 <strong>{message.role}</strong>
                 <p>{message.content}</p>
+                {message.context_refs && message.context_refs.length > 0 && (
+                  <ul className="chat-refs" aria-label="Context references">
+                    {message.context_refs.map((ref, index) => (
+                      <li key={index}>{ref.type}: {ref.label ?? ref.id_or_path}</li>
+                    ))}
+                  </ul>
+                )}
               </article>
             ))
           )}
+          {stream.statusLine && streaming && <p className="chat-status-line" role="status">{stream.statusLine}</p>}
+          {consentBlocked && (
+            <div className="panel-state permission-denied" role="alert">
+              <LockKeyhole size={16} aria-hidden />
+              <strong>Send blocked</strong>
+              <span>{stream.blockedReason}</span>
+            </div>
+          )}
         </section>
-        <form
-          className="chat-composer"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void sendMessage();
-          }}
-        >
-          <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask about notes, sources, claims, or citations" />
-          <button type="submit" disabled={streaming}>
-            <Send size={14} /> {streaming ? "Streaming" : "Send"}
-          </button>
-        </form>
+
+        <div className="chat-composer-area">
+          <div className="context-picker" aria-label="Context picker">
+            <div className="context-picker-controls">
+              <select value={pickerType} onChange={(event) => setPickerType(event.target.value)} aria-label="Context type">
+                {PICKER_TYPES.map((option) => (
+                  <option key={option.type} value={option.type}>{option.label}</option>
+                ))}
+              </select>
+              <input value={pickerValue} onChange={(event) => setPickerValue(event.target.value)} placeholder="id or path" aria-label="Context reference" />
+              <button onClick={addRef} aria-label="Attach context"><Paperclip size={13} /> Attach</button>
+            </div>
+            {refs.length > 0 && (
+              <ul className="context-ref-list" aria-label="Attached context">
+                {refs.map((ref, index) => (
+                  <li key={index}>
+                    {ref.type}: {ref.label ?? ref.id_or_path}
+                    <button onClick={() => removeRef(index)} aria-label={`Remove ${ref.label ?? ref.id_or_path}`}><X size={11} /></button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {refs.length > 0 && <button className="review-send" onClick={() => void reviewSend()}>Review what will be sent</button>}
+            {scope && (
+              <div className="send-scope-surface" aria-label="What will be sent">
+                <strong>What will be sent</strong>
+                <ul>
+                  {scope.included.map((item, index) => (
+                    <li key={`in-${index}`} className="scope-included">✓ {item.label ?? item.id_or_path}</li>
+                  ))}
+                  {scope.excluded.map((item, index) => (
+                    <li key={`ex-${index}`} className="scope-excluded">✕ {item.label ?? item.id_or_path} — {item.reason}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+          <form
+            className="chat-composer"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void sendMessage();
+            }}
+          >
+            <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask about notes, sources, claims, or citations" aria-label="Message" />
+            <button type="submit" disabled={streaming || !chatId}>
+              <Send size={14} /> {streaming ? "Streaming" : "Send"}
+            </button>
+          </form>
+        </div>
       </div>
     </PanelScaffold>
   );
