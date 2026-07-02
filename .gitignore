@@ -62,3 +62,6 @@ Hermes/
 # Transient audit / e2e artifacts
 .playwright-mcp/
 apps/web/test-results/
+
+# Transient live-walkthrough screenshots (curated evidence committed separately)
+.agents/evidence/live-audit/
