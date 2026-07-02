@@ -452,6 +452,12 @@ class ApprovalResolveRequest(BaseModel):
     decision: str = Field(max_length=40)
 
 
+class OrchestratorRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    enabled_stages: dict[str, bool] = Field(default_factory=dict)
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "rubric"
+
+
 class ChatMessageResponse(BaseModel):
     id: str
     conversation_id: str

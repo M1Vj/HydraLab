@@ -1,0 +1,94 @@
+import { describe, expect, test } from "bun:test";
+import type { ApiClient } from "../../lib/api";
+import {
+  CANONICAL_STAGE_IDS,
+  buildStartRunPayload,
+  fetchOrchestratorStages,
+  startOrchestratorRun,
+  summarizeRunState,
+  toggleStage,
+} from "./agentRunsController";
+
+function fakeClient(handler: (path: string, body?: unknown) => unknown): ApiClient {
+  return {
+    get: async <T,>(path: string) => handler(path) as T,
+    post: async <T,>(path: string, body?: unknown) => handler(path, body) as T,
+    put: async <T,>(path: string, body?: unknown) => handler(path, body) as T,
+    patch: async <T,>(path: string, body?: unknown) => handler(path, body) as T,
+    delete: async <T,>(path: string) => handler(path) as T,
+    stream: async () => undefined,
+  } as unknown as ApiClient;
+}
+
+describe("agent runs controller", () => {
+  test("exposes exactly the seven canonical stage ids", () => {
+    expect(CANONICAL_STAGE_IDS).toEqual([
+      "generate",
+      "review",
+      "compare",
+      "evolve",
+      "validate",
+      "cache",
+      "loop_control",
+    ]);
+  });
+
+  test("buildStartRunPayload includes only stage toggles", () => {
+    const payload = buildStartRunPayload("default", { compare: false });
+    expect(payload).toEqual({
+      project_id: "default",
+      enabled_stages: {
+        generate: true,
+        review: true,
+        compare: false,
+        evolve: true,
+        validate: true,
+        cache: true,
+        loop_control: true,
+      },
+    });
+    expect(JSON.stringify(payload)).not.toContain("loop_count");
+    expect(JSON.stringify(payload)).not.toContain("population");
+    expect(JSON.stringify(payload)).not.toContain("stop_condition");
+  });
+
+  test("toggleStage preserves stable stage order", () => {
+    const toggles = toggleStage({ generate: true, compare: true }, "compare", false);
+    expect(Object.keys(toggles)).toEqual(CANONICAL_STAGE_IDS);
+    expect(toggles.compare).toBe(false);
+  });
+
+  test("fetchOrchestratorStages reads backend stage list", async () => {
+    const client = fakeClient((path) => {
+      expect(path).toBe("/api/orchestrator/stages");
+      return { stages: [{ id: "generate", label: "Generate", enabled: true }] };
+    });
+    await expect(fetchOrchestratorStages(client)).resolves.toEqual([
+      { id: "generate", label: "Generate", enabled: true },
+    ]);
+  });
+
+  test("startOrchestratorRun posts the bounded run request", async () => {
+    const captured: { path: string; body: unknown } = { path: "", body: null };
+    const client = fakeClient((path, body) => {
+      captured.path = path;
+      captured.body = body;
+      return {
+        run: { id: "run-1", status: "completed", state: "completed", project_id: "default", mode: "passive", paused: false },
+        trace: { run_id: "run-1", steps: [] },
+        artifacts: [],
+      };
+    });
+
+    await startOrchestratorRun("default", { compare: false }, client);
+
+    expect(captured.path).toBe("/api/orchestrator/runs");
+    expect(captured.body).toEqual(buildStartRunPayload("default", { compare: false }));
+  });
+
+  test("summarizeRunState surfaces budget and offline stops", () => {
+    expect(summarizeRunState("blocked", "budget_blocked")).toBe("Budget blocked");
+    expect(summarizeRunState("permission-denied", "permission-denied")).toBe("Permission denied");
+    expect(summarizeRunState("completed")).toBe("Completed");
+  });
+});
