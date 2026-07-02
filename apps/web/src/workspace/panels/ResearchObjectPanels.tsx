@@ -1,43 +1,95 @@
 import { useEffect, useState } from "react";
 import { Download } from "lucide-react";
-import { api, type BrowserEventRecord } from "../../lib/api";
+import { api, type BrowserEventRecord, type SourceRecord } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
 import { useWorkspaceData } from "../data";
 import { EmptyState, FailureState, LoadingState, NotWiredState, PanelScaffold } from "./PanelState";
+import {
+  citationMissingMetadata,
+  claimStatusBadge,
+  evidenceSupportBadge,
+  inlineBadgesForSource,
+  summarizeCitationEvidence,
+  type StatusBadge,
+} from "./citationEvidence";
 
 export { PdfReaderPanel } from "./PdfReaderPanel";
 export { SettingsPanel } from "./SettingsPanel";
 
+function StatusPill({ badge }: { badge: StatusBadge }) {
+  return (
+    <small className={`status-pill tone-${badge.tone}`} data-tone={badge.tone}>
+      <span aria-hidden="true">{badge.symbol}</span> {badge.label}
+    </small>
+  );
+}
+
 export function CitationEvidencePanel({ openPanel }: PanelComponentProps) {
-  const { objects } = useWorkspaceData();
+  const { objects, review } = useWorkspaceData();
   if (objects.status === "loading" && !objects.data) return <LoadingState title="Loading evidence graph" />;
   if (objects.status === "failure") return <FailureState error={objects.error} onRetry={objects.reload} />;
   const data = objects.data;
-  if (!data || (data.objects.evidence.length === 0 && data.objects.citations.length === 0 && data.objects.claims.length === 0)) {
-    return <EmptyState title="No citations" message="Claims, citations and evidence links will appear after sources are saved or imported." action="Add from source library" onAction={() => openPanel("source-discovery")} />;
+  const summary = data
+    ? summarizeCitationEvidence(data.objects)
+    : { claims: 0, citations: 0, evidence: 0, unsupportedClaims: 0, isEmpty: true };
+  if (!data || summary.isEmpty) {
+    return (
+      <EmptyState
+        title="No citations yet"
+        message="Claims, citations and evidence links will appear after sources are saved or imported."
+        action="Add from source library"
+        onAction={() => openPanel("source-discovery")}
+      />
+    );
   }
+  const reviewItems = review.data?.items ?? [];
+  const sourcesById = new Map<string, SourceRecord>(data.objects.sources.map((source) => [source.id, source]));
+
   return (
     <PanelScaffold title="Citation & Evidence">
       <div className="object-list">
+        {summary.unsupportedClaims > 0 && (
+          <p className="panel-hint" role="status">
+            {summary.unsupportedClaims} of {summary.claims} claim(s) are not yet supported by reviewed evidence.
+          </p>
+        )}
         {data.objects.claims.map((claim) => (
           <article className="object-card" key={claim.id}>
-            <strong>{claim.text}</strong>
-            <small>{claim.status ?? "needs_review"}</small>
+            <strong>{claim.claim_text ?? claim.text}</strong>
+            <StatusPill badge={claimStatusBadge(claim)} />
           </article>
         ))}
         {data.objects.evidence.map((evidence) => (
           <article className="object-card" key={evidence.id}>
-            <strong>{evidence.support}</strong>
-            <span>{evidence.passage}</span>
+            <StatusPill badge={evidenceSupportBadge(evidence)} />
+            <span>{evidence.quote_text ?? evidence.passage}</span>
             <button onClick={() => openPanel("pdf-reader", { sourceId: evidence.source_id, title: evidence.source_title ?? evidence.source_id })}>Go to origin</button>
           </article>
         ))}
-        {data.objects.citations.map((citation) => (
-          <article className="object-card" key={citation.id}>
-            <strong>{citation.citation_key || citation.source_id}</strong>
-            <span>{citation.text}</span>
-          </article>
-        ))}
+        {data.objects.citations.map((citation) => {
+          const missing = citationMissingMetadata(sourcesById.get(citation.source_id));
+          const badges = inlineBadgesForSource(reviewItems, citation.source_id);
+          return (
+            <article className="object-card" key={citation.id}>
+              <strong>{citation.citation_key || citation.source_id}</strong>
+              <span>{citation.text}</span>
+              {missing.length > 0 && (
+                <small className="status-pill tone-warn" data-tone="warn">
+                  <span aria-hidden="true">!</span> Missing metadata: {missing.join(", ")}
+                </small>
+              )}
+              {badges.map((badge) => (
+                <button
+                  key={badge.reviewItemId}
+                  className={`inline-badge badge-${badge.kind}`}
+                  onClick={() => openPanel("review-inbox", { objectId: badge.reviewItemId })}
+                >
+                  {badge.label}
+                </button>
+              ))}
+            </article>
+          );
+        })}
       </div>
     </PanelScaffold>
   );

@@ -28,6 +28,14 @@ export type SourceRecord = {
   source_type?: string;
   doi?: string | null;
   arxiv_id?: string | null;
+  venue?: string;
+  publisher?: string;
+  csl_json?: Record<string, unknown>;
+  keywords?: string[];
+  identifiers?: Record<string, unknown>;
+  duplicate_group_id?: string | null;
+  duplicate_status?: string;
+  merge_confidence?: number;
   metadata_json?: Record<string, unknown>;
   link_state?: string;
   trashed?: boolean;
@@ -55,12 +63,19 @@ export type TaskRecord = {
   project_id?: string | null;
 };
 
+export type ClaimStatus = "draft" | "supported" | "weak" | "contradicted" | "needs_review" | "rejected";
+
 export type ClaimRecord = {
   id: string;
   text: string;
-  status?: string;
+  claim_text?: string;
+  status?: ClaimStatus | string;
+  claim_type?: string;
   location_type?: string | null;
   location_id?: string | null;
+  extraction_mode?: string;
+  origin_quote?: string;
+  extraction_confidence?: number;
   link_state?: string;
   project_id?: string | null;
 };
@@ -70,7 +85,16 @@ export type CitationRecord = {
   source_id: string;
   text: string;
   citation_key?: string;
+  csl_json?: Record<string, unknown>;
   project_id?: string | null;
+};
+
+export type EvidenceLocator = {
+  type?: string;
+  page?: number;
+  section?: string;
+  paragraph?: number;
+  fragment?: string;
 };
 
 export type EvidenceRecord = {
@@ -80,10 +104,55 @@ export type EvidenceRecord = {
   source_id: string;
   passage: string;
   support: string;
+  support_level?: string;
   confidence: number;
+  evidence_type?: string;
+  quote_text?: string;
+  locator?: EvidenceLocator;
+  annotation_id?: string | null;
+  sidecar_record_id?: string | null;
   review_status?: string;
   source_title?: string;
   claim_text?: string;
+};
+
+export type ClaimSuggestion = {
+  claim_text: string;
+  origin_quote: string;
+  origin_ref?: string | null;
+  location_type?: string | null;
+  location_id?: string | null;
+  extraction_confidence: number;
+  extraction_mode: string;
+  user_selected: boolean;
+};
+
+export type DuplicateVerdict = {
+  left_id: string;
+  right_id: string;
+  status: "auto_merge" | "needs_review" | "flagged" | "none" | string;
+  confidence: number;
+  reason: string;
+};
+
+export type CitationRenderResponse = {
+  style: string;
+  processor: string;
+  entries: string[];
+};
+
+export type SourceImportResponse = {
+  imported: SourceRecord[];
+  count: number;
+  format: string;
+};
+
+export type RefIntFinding = {
+  origin_type: string;
+  origin_id: string;
+  target_type: string;
+  target_id: string;
+  summary: string;
 };
 
 export type ReviewItem = {
@@ -314,3 +383,51 @@ function resolvePath(baseUrl: string, path: string): string {
 }
 
 export const api = createApiClient();
+
+// --- Citation / claim / evidence typed endpoints (branch 01-09) -------------
+
+export function importSources(
+  input: { format: "bibtex" | "ris" | "csl-json"; content: string; project_id?: string | null },
+  client: ApiClient = api,
+): Promise<SourceImportResponse> {
+  return client.post<SourceImportResponse>("/api/sources/import", input);
+}
+
+export function renderCitations(
+  input: { source_ids?: string[]; style?: string; manuscript?: string; html?: boolean },
+  client: ApiClient = api,
+): Promise<CitationRenderResponse> {
+  return client.post<CitationRenderResponse>("/api/citations/render", input);
+}
+
+export function detectClaimCandidates(
+  input: { text: string; location_type?: string; location_id?: string; origin_ref?: string; auto_create?: boolean },
+  client: ApiClient = api,
+): Promise<{ suggestions: ClaimSuggestion[]; created_claims: ClaimRecord[]; committed: boolean }> {
+  return client.post("/api/claims/detect", input);
+}
+
+export function promoteClaim(
+  claimId: string,
+  input: { status: ClaimStatus; reviewed?: boolean },
+  client: ApiClient = api,
+): Promise<ClaimRecord> {
+  return client.patch<ClaimRecord>(`/api/claims/${encodeURIComponent(claimId)}`, input);
+}
+
+export function detectDuplicateSources(projectId?: string, client: ApiClient = api): Promise<{ duplicates: DuplicateVerdict[] }> {
+  const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return client.post(`/api/sources/duplicates${query}`);
+}
+
+export function mergeSources(
+  input: { source_ids: string[]; reason?: "exact_identifier" | "exact_hash" | "user_confirmed_fuzzy"; merge_confidence?: number },
+  client: ApiClient = api,
+): Promise<{ survivor_id: string; merged_ids: string[]; merge_record_id: string }> {
+  return client.post("/api/sources/merge", input);
+}
+
+export function scanReferentialIntegrity(projectId?: string, client: ApiClient = api): Promise<{ findings: RefIntFinding[]; count: number }> {
+  const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  return client.post(`/api/refint/scan${query}`);
+}
