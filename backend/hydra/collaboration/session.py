@@ -85,18 +85,26 @@ class CollaborationSession:
         if _has_overlapping_replacements(self.pending_edits, other.pending_edits):
             return self._conflict(other, "offline edits changed the same text range")
         merged = self.base_content
-        edits = sorted(
-            [*self.pending_edits, *other.pending_edits],
-            key=lambda item: (item.insert_at is None, item.insert_at if item.insert_at is not None else 0, item.collaborator_id),
+        base_len = len(self.base_content)
+        # Every edit carries base-relative coordinates. Sort by start position
+        # (inserts before replaces at the same spot, then by collaborator for
+        # determinism) and shift each span by ``offset`` — the running sum of
+        # length deltas from edits already applied *before* it — so a replace no
+        # longer lands on coordinates an earlier insert has since shifted.
+        spans = sorted(
+            (_edit_span(edit, base_len) for edit in (*self.pending_edits, *other.pending_edits)),
+            key=lambda s: (s[0], s[1], 0 if s[3] else 1, s[4]),
         )
         offset = 0
-        for edit in edits:
-            if edit.insert_at is None:
-                merged = _apply(merged, edit)
-                continue
-            position = max(0, min(len(merged), edit.insert_at + offset))
-            merged = merged[:position] + edit.text + merged[position:]
-            offset += len(edit.text)
+        had_replace = False
+        for start, end, text, is_replace, _cid in spans:
+            real_start = max(0, min(len(merged), start + offset))
+            real_end = max(real_start, min(len(merged), end + offset))
+            merged = merged[:real_start] + text + merged[real_end:]
+            offset += len(text) - (real_end - real_start)
+            had_replace = had_replace or is_replace
+        if had_replace:
+            merged = _ensure_trailing_newline(merged)
         self.content = merged
         other.content = merged
         self.pending_edits.clear()
@@ -141,6 +149,20 @@ class CollaborationSession:
                 payload=dict(payload or {}),
             )
         )
+
+
+def _edit_span(edit: CollaborativeEdit, base_len: int) -> tuple[int, int, str, bool, str]:
+    """Normalize an edit to base-relative ``(start, end, text, is_replace, cid)``.
+
+    A pure insert is a zero-width span at its position; ``insert_at is None`` means
+    append at end-of-base; a replace spans its ``replace_range``.
+    """
+    if edit.replace_range is not None:
+        start, end = edit.replace_range
+        return start, end, edit.text, True, edit.collaborator_id
+    if edit.insert_at is None:
+        return base_len, base_len, edit.text, False, edit.collaborator_id
+    return edit.insert_at, edit.insert_at, edit.text, False, edit.collaborator_id
 
 
 def _apply(content: str, edit: CollaborativeEdit) -> str:

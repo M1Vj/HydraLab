@@ -208,6 +208,39 @@ def test_hl_core_89_conflicting_offline_edits_create_safe_copy_without_overwriti
     assert left.content == "Owner revision\n"
 
 
+def test_reconcile_insert_and_disjoint_replace_do_not_corrupt_positions():
+    # Regression: an insert on one side shifts positions that a replace on the
+    # other side addresses. The merge must offset the replace by the insert's
+    # length instead of applying it at stale base coordinates.
+    # base "AB" + insert "X"@0 + replace(1,2)->"Y"  ==>  "XAY", never "XYB".
+    left = CollaborationSession.open_document("notes/doc.md", "AB")
+    right = CollaborationSession.open_document("notes/doc.md", "AB")
+
+    left.apply_local_edit(CollaborativeEdit(collaborator_id="owner", insert_at=0, text="X", summary="prepend"))
+    right.apply_local_edit(CollaborativeEdit(collaborator_id="dana", replace_range=(1, 2), text="Y", summary="replace B"))
+
+    result = left.reconcile_with(right)
+
+    assert result.sync_state == "synced"
+    assert left.content == right.content == "XAY\n"
+
+
+def test_reconcile_replace_then_later_insert_stays_ordered():
+    # Replace early text, insert after it: the insert position must not be
+    # dragged by the replace's length delta into the replaced region.
+    # base "HELLO" + replace(0,1)->"J" + insert "!"@5  ==>  "JELLO!".
+    left = CollaborationSession.open_document("notes/doc.md", "HELLO")
+    right = CollaborationSession.open_document("notes/doc.md", "HELLO")
+
+    left.apply_local_edit(CollaborativeEdit(collaborator_id="owner", replace_range=(0, 1), text="J", summary="H->J"))
+    right.apply_local_edit(CollaborativeEdit(collaborator_id="dana", insert_at=5, text="!", summary="bang"))
+
+    result = left.reconcile_with(right)
+
+    assert result.sync_state == "synced"
+    assert left.content == right.content == "JELLO!\n"
+
+
 @pytest.mark.asyncio
 async def test_hl_core_90_collaborative_audit_is_append_only(session: AsyncSession):
     audit = CollaborativeAuditTrail(session)

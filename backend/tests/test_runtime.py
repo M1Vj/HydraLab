@@ -106,12 +106,19 @@ def test_hl_core_08_failed_contender_release_does_not_remove_owner_lock(tmp_path
 
 
 def test_hl_core_08_port_selection_falls_back_when_default_is_bound():
+    # Bind whatever port the selector currently prefers rather than hardcoding
+    # 8765, so the test is deterministic even when a real HydraLab backend (or any
+    # other process) already holds the default port.
+    first = choose_available_port()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
         occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        occupied.bind((choose_bind_host(), 8765))
+        occupied.bind((choose_bind_host(), first))
         occupied.listen(1)
 
-        assert choose_available_port() == 8766
+        fallback = choose_available_port()
+
+    assert fallback != first
+    assert fallback > first
 
 
 def test_hl_core_08_port_files_are_owner_only_and_removed(tmp_path):
