@@ -120,7 +120,7 @@ from hydra.database.models import Annotation, Claim, IngestionJob, Task
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
 from hydra.services.annotations import AnnotationIndexer, create_annotation_record, read_sidecar_records, write_sidecar_records
-from hydra.services.notes import NoteFileService
+from hydra.services.notes import NoteFileService, recovery_journal_path
 from hydra.services.discovery import (
     DiscoveryCache,
     DiscoveryCoordinator,
@@ -3282,7 +3282,10 @@ def create_app() -> FastAPI:
 
     @app.post("/api/note-files/recovery/{journal_id}/accept")
     async def accept_note_recovery(journal_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
-        journal_path = hydra_project_root() / ".hydralab" / "temp" / f"{journal_id}.note-recovery.json"
+        try:
+            journal_path = recovery_journal_path(hydra_project_root(), journal_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Recovery journal not found")
         if not journal_path.exists():
             raise HTTPException(status_code=404, detail="Recovery journal not found")
         return await NoteFileService(session, hydra_project_root()).accept_recovery(journal_id)

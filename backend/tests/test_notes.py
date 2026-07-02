@@ -177,6 +177,18 @@ async def test_hl_write_13_recovery_journal_restores_without_overwriting_canonic
 
 
 @pytest.mark.asyncio
+async def test_accept_recovery_rejects_traversal_journal_id(session: AsyncSession, tmp_path: Path):
+    service = NoteFileService(session, tmp_path)
+    # Plant a journal outside the temp dir that a traversal id could target.
+    outside = tmp_path / "escape.note-recovery.json"
+    outside.write_text('{"note_id":"x","relative_path":"knowledge/x.md","content":"pwn","status":"pending"}')
+
+    for bad in ("../escape", "..%2Fescape", "not-hex", "", "a" * 31, "A" * 32):
+        with pytest.raises(ValueError):
+            await service.accept_recovery(bad)
+
+
+@pytest.mark.asyncio
 async def test_hl_trust_08_untrusted_buffer_routes_suggestion_to_review_inbox(session: AsyncSession, tmp_path: Path):
     service = NoteFileService(session, tmp_path)
     note_path = tmp_path / "knowledge" / "Captured.md"

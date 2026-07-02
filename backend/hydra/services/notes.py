@@ -77,6 +77,27 @@ def _safe_relative_path(path: str) -> str:
     return normalized.as_posix()
 
 
+# Recovery journal ids are generated as ``uuid4().hex`` (32 lowercase hex
+# chars). Anything else in the {journal_id} path segment is a traversal
+# attempt, so it is refused before any filesystem access.
+_RECOVERY_JOURNAL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def recovery_journal_path(project_root: Path, journal_id: str) -> Path:
+    """Resolve a recovery journal path, rejecting ids that could escape temp.
+
+    Validating the id shape closes the traversal, and the resolved-parent
+    containment check is defense-in-depth against symlinked temp dirs.
+    """
+    if not _RECOVERY_JOURNAL_ID_RE.fullmatch(journal_id):
+        raise ValueError("invalid recovery journal id")
+    temp_dir = (project_root / ".hydralab" / "temp").resolve()
+    journal_path = (temp_dir / f"{journal_id}.note-recovery.json").resolve()
+    if journal_path.parent != temp_dir:
+        raise ValueError("recovery journal path escapes temp directory")
+    return journal_path
+
+
 NOTE_EXTENSIONS = {".md", ".markdown"}
 PROTECTED_PATHS = {
     "HYDRA.md",
@@ -313,7 +334,7 @@ class NoteFileService:
         return journals
 
     async def accept_recovery(self, journal_id: str) -> dict[str, Any]:
-        journal_path = self.project_root / ".hydralab" / "temp" / f"{journal_id}.note-recovery.json"
+        journal_path = recovery_journal_path(self.project_root, journal_id)
         payload = json.loads(journal_path.read_text())
         _atomic_write(self.project_root / _safe_relative_path(payload["relative_path"]), payload["content"])
         payload["status"] = "accepted"
