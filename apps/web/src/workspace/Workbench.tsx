@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Layout, Model, type IJsonModel, type ILayoutApi, type TabNode } from "flexlayout-react";
+import { Actions, DockLocation, Layout, Model, type ILayoutApi, type TabNode } from "flexlayout-react";
 import "flexlayout-react/style/dark.css";
 import { CheckCircle2, FolderOpen, PanelBottom, Plus, RotateCcw, Save, X } from "lucide-react";
 import { api } from "../lib/api";
@@ -9,8 +9,8 @@ import { usePhase3MobileSurfaceEnabled } from "../components/mobile/useMobileSur
 import { CommandPalette, ShortcutReference } from "./CommandPalette";
 import { CommandRegistry } from "./commands";
 import { WorkspaceDataProvider, useWorkspaceData } from "./data";
-import { activeJsonLayout, openPanelInLayout, removeActiveTabFromLayout } from "./layout";
-import { createPanelRegistry, panelChrome, panelIds, type PanelComponentProps, type PanelId } from "./panelRegistry";
+import { activeJsonLayout } from "./layout";
+import { createPanelRegistry, panelChrome, tab, tabStableKey, type PanelConfig, type PanelId, type PanelLocation } from "./panelRegistry";
 import { useWorkspaceStore, type ActiveProject, type RecentProject } from "./store";
 import { ExplorerPanel } from "./panels/ExplorerPanel";
 import { SourceDiscoveryPanel } from "./panels/SourceDiscoveryPanel";
@@ -35,6 +35,18 @@ import {
   SettingsPanel,
   TerminalPanel,
 } from "./panels/ResearchObjectPanels";
+
+// Map a panel's default location to the FlexLayout node the tab is added to.
+// center/right target the two named tabsets; border-left/bottom resolve to the
+// live border node's id so Actions.addNode drops the tab into the right border.
+function resolveAddTarget(model: Model, location: PanelLocation): { toNodeId: string; dock: DockLocation } {
+  if (location === "center") return { toNodeId: "center_main", dock: DockLocation.CENTER };
+  if (location === "border-right") return { toNodeId: "right_main", dock: DockLocation.CENTER };
+  const wanted = location === "border-left" ? "left" : "bottom";
+  const border = model.getBorderSet().getBorders().find((node) => node.getLocation().getName() === wanted);
+  // Fall back to the center tabset if the border was removed from a custom layout.
+  return { toNodeId: border ? border.getId() : "center_main", dock: DockLocation.CENTER };
+}
 
 export function WorkbenchRoot() {
   const activeProject = useWorkspaceStore((state) => state.activeProject);
@@ -65,7 +77,17 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
   const data = useWorkspaceData();
   const layoutRef = useRef<ILayoutApi | null>(null);
   const saveTimer = useRef<number | null>(null);
-  const [layoutJson, setLayoutJson] = useState<IJsonModel>(() => activeJsonLayout(store.activeLayoutState()));
+  // FlexLayout owns ONE mutable Model for the lifetime of the shell. Recreating
+  // it (Model.fromJson) on every onModelChange forced FlexLayout to unmount and
+  // remount every panel, wiping each panel's React state on any tab select,
+  // resize or drag (the "panel state evaporates" bug). The model is created once;
+  // programmatic open/close mutate it in place via Actions; only an explicit
+  // reset/switch swaps in a new model (where a remount is expected).
+  const [model, setModel] = useState(() => Model.fromJson(activeJsonLayout(store.activeLayoutState())));
+  const modelRef = useRef(model);
+  useEffect(() => {
+    modelRef.current = model;
+  }, [model]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [toast, setToast] = useState("");
@@ -101,24 +123,30 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
     [],
   );
 
-  const model = useMemo(() => Model.fromJson(layoutJson), [layoutJson]);
-
   function announce(message: string) {
     setAnnouncement(message);
     setToast(message);
   }
 
-  function openPanel(id: PanelId, config = {}) {
-    const next = openPanelInLayout(layoutJson, id, config);
-    setLayoutJson(next);
-    store.saveActiveLayout(next);
+  function openPanel(id: PanelId, config: PanelConfig = {}) {
+    const activeModel = modelRef.current;
+    const tabId = tabStableKey(id, config);
+    if (activeModel.getNodeById(tabId)) {
+      // Already open: just focus it — never rebuild the layout.
+      activeModel.doAction(Actions.selectTab(tabId));
+    } else {
+      const { toNodeId, dock } = resolveAddTarget(activeModel, panelChrome[id].defaultLocation);
+      activeModel.doAction(Actions.addNode(tab(id, config), toNodeId, dock, -1, true));
+    }
     announce(`Opened ${panelChrome[id].title}`);
   }
 
   function closeActivePanel() {
-    const next = removeActiveTabFromLayout(layoutJson);
-    setLayoutJson(next);
-    store.saveActiveLayout(next);
+    // Close the selected tab of the ACTIVE tabset (what the user is focused on),
+    // not the first container found — which previously closed a border tab by
+    // mistake (Cmd+W wrong-tab bug).
+    const selected = modelRef.current.getActiveTabset()?.getSelectedNode();
+    if (selected) modelRef.current.doAction(Actions.deleteTab(selected.getId()));
   }
 
   useEffect(() => {
@@ -137,7 +165,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
       { id: "workbench.close-active-tab", title: "Close active tab", run: closeActivePanel },
       { id: "workbench.split-editor-tabset", title: "Split active editor tabset", run: () => openPanel("markdown-editor", { fileRef: `split-${Date.now()}` }) },
     ]);
-  }, [registry, layoutJson, project.path]);
+  }, [registry, project.path]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -169,19 +197,18 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [layoutJson]);
+  }, []);
 
   function resetLayout() {
     store.resetActiveLayout();
-    const next = activeJsonLayout(useWorkspaceStore.getState().activeLayoutState());
-    setLayoutJson(next);
+    setModel(Model.fromJson(activeJsonLayout(useWorkspaceStore.getState().activeLayoutState())));
     announce("Layout reset");
   }
 
   function saveLayoutAs() {
     const name = window.prompt("Save layout as", "Research layout");
     if (!name) return;
-    store.saveActiveLayoutAs(name, layoutJson);
+    store.saveActiveLayoutAs(name, modelRef.current.toJson());
     announce(`Saved layout ${name}`);
   }
 
@@ -190,7 +217,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
     const name = window.prompt(`Switch layout (${layouts.join(", ")})`, store.activeLayoutState().activeLayout);
     if (!name) return;
     store.switchActiveLayout(name);
-    setLayoutJson(activeJsonLayout(useWorkspaceStore.getState().activeLayoutState()));
+    setModel(Model.fromJson(activeJsonLayout(useWorkspaceStore.getState().activeLayoutState())));
   }
 
   const reviewCount = data.review.data?.counts.pending ?? 0;
@@ -214,8 +241,9 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
             renderValues.content = <span className="tab-title">{panelChrome[panelId]?.title ?? node.getName()}</span>;
           }}
           onModelChange={(nextModel) => {
+            // Persistence only — never rebuild the model here (that was the
+            // remount storm). FlexLayout has already mutated its own model.
             const nextJson = nextModel.toJson();
-            setLayoutJson(nextJson);
             if (saveTimer.current) window.clearTimeout(saveTimer.current);
             saveTimer.current = window.setTimeout(() => store.saveActiveLayout(nextJson), 220);
           }}
