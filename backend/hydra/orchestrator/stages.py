@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+from hydra.orchestrator.ranking import rank_candidates
+
 
 class StageEnum(str, Enum):
     GENERATE = "generate"
@@ -131,17 +133,7 @@ class CompareStage:
 
     async def run(self, ctx: StageContext) -> StageResult:
         candidates = list(ctx.data.get("candidates") or [])
-        ranking = sorted(
-            (
-                {
-                    "id": candidate.get("id"),
-                    "title": candidate.get("title"),
-                    "score": int(candidate.get("base_score") or 0),
-                }
-                for candidate in candidates
-            ),
-            key=lambda item: (-item["score"], str(item["id"])),
-        )
+        ranking = rank_candidates(candidates, self.scoring_method)
         artifact = {
             "id": f"{ctx.run_id}:compare:ranking",
             "kind": "ranking",
