@@ -37,6 +37,22 @@ class WritingReviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
 
 
+class ManuscriptExportRequest(BaseModel):
+    source_file: str = Field(min_length=1, max_length=400)
+    output_name: str | None = Field(default=None, max_length=400)
+    include_bibliography: bool = False
+    project_id: str | None = Field(default=None, max_length=200)
+
+    @field_validator("source_file", "output_name")
+    @classmethod
+    def reject_traversal(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if ".." in value or value.startswith("/") or "\\" in value or "\x00" in value:
+            raise ValueError("path traversal is not allowed")
+        return value
+
+
 class NoteCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=20000)
