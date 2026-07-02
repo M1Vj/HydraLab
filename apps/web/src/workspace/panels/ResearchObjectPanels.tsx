@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
-import { Download, KeyRound, RefreshCcw, ShieldCheck } from "lucide-react";
-import { api, type BrowserEventRecord, type SettingsResponse } from "../../lib/api";
+import { Download } from "lucide-react";
+import { api, type BrowserEventRecord } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
 import { useWorkspaceData } from "../data";
 import { EmptyState, FailureState, LoadingState, NotWiredState, PanelScaffold } from "./PanelState";
+
+export { PdfReaderPanel } from "./PdfReaderPanel";
+export { SettingsPanel } from "./SettingsPanel";
 
 export function CitationEvidencePanel({ openPanel }: PanelComponentProps) {
   const { objects } = useWorkspaceData();
@@ -104,52 +107,6 @@ export function BrowserPanel() {
   );
 }
 
-export function SettingsPanel() {
-  const { settings } = useWorkspaceData();
-  const [saving, setSaving] = useState(false);
-  if (settings.status === "loading" && !settings.data) return <LoadingState title="Loading settings" />;
-  if (settings.status === "failure") return <FailureState error={settings.error} onRetry={settings.reload} />;
-  const payload = settings.data as SettingsResponse | null;
-  async function saveProvider(provider: string, model: string) {
-    setSaving(true);
-    try {
-      await api.put("/api/settings/provider", { provider, model, api_key_ref: "keychain:pending-write" });
-      settings.reload();
-    } finally {
-      setSaving(false);
-    }
-  }
-  return (
-    <PanelScaffold title="Settings">
-      <div className="settings-grid">
-        <section className="settings-section">
-          <header>
-            <ShieldCheck size={15} />
-            <strong>Consent and capture</strong>
-          </header>
-          <label><input type="checkbox" checked={String(payload?.workspace_preferences?.restoreOnLaunch ?? "true") === "true"} readOnly /> Session restore</label>
-          <label><input type="checkbox" checked={false} readOnly /> Browser page text to provider</label>
-          <label><input type="checkbox" checked={false} readOnly /> Offline-only provider block</label>
-        </section>
-        <section className="settings-section">
-          <header>
-            <KeyRound size={15} />
-            <strong>Providers</strong>
-          </header>
-          {(payload?.provider_settings ?? []).length === 0 ? <span>not set</span> : payload?.provider_settings.map((provider) => (
-            <div key={provider.provider} className="provider-row">
-              <span>{provider.provider}</span>
-              <span>{provider.model}</span>
-              <span>{provider.api_key_ref || provider.secret_ref ? "stored" : "not set"}</span>
-            </div>
-          ))}
-          <button disabled={saving} onClick={() => void saveProvider("openai", "gpt-4.1")}>Store provider reference</button>
-        </section>
-      </div>
-    </PanelScaffold>
-  );
-}
-
 export function LogsPanel() {
   const { events } = useWorkspaceData();
   if (events.status === "loading" && !events.data) return <LoadingState title="Loading logs" />;
@@ -186,20 +143,6 @@ export function ProblemsPanel() {
 
 export function GitPanel() {
   return <NotWiredState title="Git" route="Git HTTP route" />;
-}
-
-export function PdfReaderPanel({ config }: PanelComponentProps) {
-  const sourceId = typeof config?.sourceId === "string" ? config.sourceId : null;
-  return (
-    <PanelScaffold title="PDF Reader">
-      <EmptyState
-        title={sourceId ? "PDF source selected" : "No document open"}
-        message={sourceId ? `Annotations are available through /api/annotations/${sourceId}. Local file rendering remains in the PDF module branch.` : "Open a local PDF or select a source from Explorer."}
-        action={sourceId ? "Load annotations" : "Open a PDF"}
-        onAction={() => undefined}
-      />
-    </PanelScaffold>
-  );
 }
 
 export function ExportBibliographyButton() {
