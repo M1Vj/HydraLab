@@ -43,6 +43,7 @@ coverage/
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
+.playwright-cli/
 
 # Temporary upstream references
 tmp/
@@ -54,3 +55,6 @@ references/tmp/
 t3code/
 hermes/
 Hermes/
+
+# Orchestration state (oh-my-claudecode)
+.omc/

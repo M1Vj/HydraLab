@@ -2,41 +2,278 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import secrets
+import hashlib
+import hmac
+import sys
+import time
+from pathlib import Path
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, AsyncGenerator
+from typing import AsyncIterator, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from hydra.browser_bridge import (
+    TRUST_LEVEL_UNTRUSTED,
+    build_browser_working_set,
+    detect_source_metadata,
+    should_capture,
+    source_id_from_metadata,
+    source_should_promote,
+)
 from hydra.research import citation_for, compose_research_answer, search_academic_sources
 from hydra.schemas import (
+    BrowserCaptureRequest,
+    BrowserHandshakeRequest,
+    BrowserHistoryRequest,
+    AnnotationClaimRequest,
+    AnnotationCreateRequest,
     EvidenceCreateRequest,
     CitationCreateRequest,
+    CitationRenderRequest,
     ClaimCreateRequest,
     ClaimDetectRequest,
+    ClaimPromoteRequest,
+    SourceImportRequest,
+    SourceMergeRequest,
+    SourceTrashRequest,
+    SourceUnmergeRequest,
+    ManuscriptExportRequest,
     NoteCreateRequest,
+    NoteFileSaveRequest,
+    NoteSuggestionRequest,
     NoteUpdateRequest,
     ProviderSettingsRequest,
+    ProviderSecretRequest,
     SettingsUpdateRequest,
+    SourceDiscoveryRequest,
+    SourceSaveRequest,
     ResearchRequest,
     SourceSearchRequest,
     TaskCreateRequest,
     TaskUpdateRequest,
+    TaskLinkCreateRequest,
+    TaskSuggestRequest,
+    GitInitRequest,
+    GitCommitRequest,
+    GitRestoreRequest,
+    GitDestructiveRequest,
+    ConsoleRunRequest,
+    CitationExportRequest,
+    ProjectZipRequest,
+    BackupRequest,
+    RestoreRequest,
     WritingReviewRequest,
     ChatCompletionRequest,
+    ChatCreateRequest,
+    ChatUpdateRequest,
+    ChatExportRequest,
+    SendScopeRequest,
+    ContextFileSaveRequest,
+    MemoryCandidateRequest,
 )
+from hydra.database.models import Annotation, Claim, IngestionJob, Task
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
+from hydra.services.annotations import AnnotationIndexer, create_annotation_record, read_sidecar_records, write_sidecar_records
+from hydra.services.notes import NoteFileService
+from hydra.services.discovery import (
+    DiscoveryCache,
+    DiscoveryCoordinator,
+    ProviderRateLimiter,
+    SourceProviderConfig,
+    author_string,
+    evaluate_pdf_download_policy,
+    result_from_dict,
+)
+from hydra.services.discovery.providers import default_providers
+from hydra.services.citations import (
+    CSL_PROCESSOR,
+    DEFAULT_STYLE_ID,
+    CitationParseError,
+    CslRenderer,
+    CslRenderError,
+    resolve_manuscript_style,
+)
+from hydra.services.docx import DocxPackageError, DocxService, detect_latex_toolchain
+from hydra.services.writing import (
+    global_defaults_from_settings,
+    list_manuscripts,
+    resolve_manuscript_format,
+)
+from hydra.services.ingestion import IngestionService
+from hydra.services.ingestion.safety import validate_source_file
+from hydra.services.ingestion.types import QuarantineError
+from hydra.services.tasks import TaskProposal, propose_task
+from hydra.services.git import GitError, GitService, suggest_grouped_commits
+from hydra.services.console import ConsoleService
+from hydra.services.export import (
+    build_project_zip,
+    export_options,
+    restore_project,
+    safe_sqlite_backup,
+    to_bibtex,
+    to_csl_json,
+    to_ris,
+)
+from hydra.services.export.bundle import ExportOptions
+from hydra.storage.project import evaluate_git_init, reindex_notes_from_canonical_files
+from hydra.settings.toml_config import load_settings, save_settings
+from hydra.settings.secrets import InMemorySecretStore, KeyringSecretStore, ProviderSecretService, SecretStore
+from hydra.providers import MockProvider, ProviderRouter, RoutingPolicy, RunBudget, build_provider
+from hydra.services.assistant import AssistantConfig, AssistantService, ProviderCache
+from hydra.skills.registry import PLUGIN_REJECTION_MESSAGE, load_skill_registry
+from hydra.services.project_context import (
+    ContextFileMemory,
+    ensure_hydra_md,
+    load_global_context,
+    load_project_context,
+)
+from hydra.storage.app_data import app_data_root, init_app_data
+from hydra.storage.runtime import DEFAULT_PORT, BackendRuntime, choose_bind_host
 from hydra.writing import review_text
+
+HYDRALAB_BIND_HOST = choose_bind_host()
+HYDRALAB_EXTENSION_ORIGIN = "chrome-extension://hydralab-dev-extension"
+HYDRALAB_FRONTEND_ORIGINS = {
+    origin
+    for port in range(5173, 5180)
+    for origin in (f"http://localhost:{port}", f"http://127.0.0.1:{port}")
+}
+HYDRALAB_BRIDGE_ORIGINS = {HYDRALAB_EXTENSION_ORIGIN, *HYDRALAB_FRONTEND_ORIGINS}
+EXTENSION_BRIDGE_PATHS = {
+    "/api/browser/handshake",
+    "/api/browser/capture",
+    "/api/browser/selection",
+    "/api/browser/propose-source",
+}
+RAW_SECRET_PREFIXES = (
+    "sk-",
+    "ai-",
+    "ghp_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "AKIA",
+    "ASIA",
+)
+BRIDGE_TOKEN_TTL_SECONDS = 3600
+BRIDGE_NONCE_TTL_SECONDS = 300
+
+_MEMORY_SECRET_STORE = InMemorySecretStore()
+_PROVIDER_CACHE = ProviderCache()
+
+
+def _assistant_privacy() -> dict[str, Any]:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    privacy = settings.get("privacy", {})
+    general = settings.get("general", {})
+    assistant = settings.get("assistant", {})
+    offline_only = bool(privacy.get("offline_only") or general.get("offline_only"))
+    opt_ins = dict(privacy.get("provider_send_opt_ins") or {})
+    # Browser page text to provider is a separate opt-in (HL-CONSENT-04).
+    browser = settings.get("browser", {})
+    if browser.get("browser_page_text_to_provider"):
+        opt_ins["browser_page_text"] = True
+    return {
+        "offline_only": offline_only,
+        "g3_enabled": bool(privacy.get("g3_provider_send")),
+        "opt_ins": opt_ins,
+        "ignored_paths": list(settings.get("indexing", {}).get("ignored_paths") or []),
+        "default_mode": str(assistant.get("default_mode") or assistant.get("mode") or "passive"),
+        "run_budget": int(assistant.get("run_budget", 60000)),
+        "wall_clock_seconds": int(assistant.get("wall_clock_seconds", 120)),
+        "max_parallel_calls": int(assistant.get("max_parallel_calls", 2)),
+    }
+
+
+def _build_assistant_service(secret_store: SecretStore) -> AssistantService:
+    privacy = _assistant_privacy()
+    config = AssistantConfig(
+        g3_enabled=privacy["g3_enabled"],
+        offline_only=privacy["offline_only"],
+        opt_ins=privacy["opt_ins"],
+        ignored_paths=privacy["ignored_paths"],
+        default_mode=privacy["default_mode"],
+        run_budget=privacy["run_budget"],
+        wall_clock_seconds=privacy["wall_clock_seconds"],
+        max_parallel_calls=privacy["max_parallel_calls"],
+    )
+    providers = _resolve_providers(secret_store)
+    router = ProviderRouter(
+        providers=providers,
+        policy=RoutingPolicy(mode="single"),
+        budget=RunBudget(
+            run_budget_tokens=config.run_budget,
+            wall_clock_seconds=config.wall_clock_seconds,
+            max_parallel_calls=config.max_parallel_calls,
+        ),
+    )
+    registry = load_skill_registry()
+    return AssistantService(
+        router=router,
+        config=config,
+        cache=_PROVIDER_CACHE,
+        skill_descriptors=registry.enabled_descriptors(),
+    )
+
+
+def _resolve_providers(secret_store: SecretStore) -> list[Any]:
+    """Build provider adapters from configured accounts; fall back to MockProvider.
+
+    In test/dev with no resolvable BYO key we use MockProvider so no live API is hit.
+    """
+    settings = load_settings(app_data_root() / "settings.toml").data
+    accounts = settings.get("providers", {}).get("accounts", {})
+    providers: list[Any] = []
+    service = ProviderSecretService(secret_store)
+    for provider_id, account in accounts.items():
+        if provider_id not in {"openai", "openrouter"}:
+            continue
+        secret = service.get_provider_secret(app_data_root() / "settings.toml", provider_id, "api_key")
+        if not secret:
+            continue
+        model = str(account.get("model") or ("gpt-4.1-mini" if provider_id == "openai" else "openrouter/auto"))
+        try:
+            providers.append(build_provider(provider_id, secret, model))
+        except Exception:
+            continue
+    if not providers:
+        providers.append(MockProvider())
+    return providers
 
 
 def create_app() -> FastAPI:
+    bridge_tokens: dict[str, float] = {}
+    discovery_cache = DiscoveryCache(persist=True)
+    secret_store = _secret_store()
+    _ensure_runtime_nonce(app_data_root())
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        runtime: BackendRuntime | None = None
+        runtime_managed = os.environ.get("HYDRALAB_RUNTIME_MANAGED") == "1"
+        if not runtime_managed:
+            port = int(os.environ.get("HYDRALAB_PORT", str(DEFAULT_PORT)))
+            runtime = BackendRuntime(app_data_root=app_data_root(), host=HYDRALAB_BIND_HOST, port=port)
+            acquired = runtime.acquire()
+            if not acquired.acquired:
+                message = f"HydraLab backend is already running (pid {acquired.running_pid}); refusing to start a second writer."
+                print(message, file=sys.stderr)
+                raise RuntimeError(message)
+            project_root = os.environ.get("HYDRALAB_PROJECT_ROOT")
+            runtime.write_port_file(project_root=Path(project_root) if project_root else None)
         await init_db()
-        yield
+        try:
+            yield
+        finally:
+            if runtime is not None:
+                runtime.release()
 
     app = FastAPI(title="Hydra Phase 1 Research API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -44,16 +281,158 @@ def create_app() -> FastAPI:
         allow_origins=[
             "http://localhost:5173",
             "http://127.0.0.1:5173",
-            "http://localhost:8000",
-            "http://127.0.0.1:8000",
+            "http://localhost:8765",
+            "http://127.0.0.1:8765",
+            HYDRALAB_EXTENSION_ORIGIN,
         ],
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
+    @app.middleware("http")
+    async def browser_bridge_boundary(request: Request, call_next):
+        origin = request.headers.get("origin")
+        path = request.url.path
+        if origin and origin.startswith("chrome-extension://") and path not in EXTENSION_BRIDGE_PATHS:
+            return JSONResponse({"detail": "Extension capability not allowed for this endpoint"}, status_code=403)
+        if path.startswith("/api/browser") and request.method != "OPTIONS":
+            if origin not in HYDRALAB_BRIDGE_ORIGINS:
+                return JSONResponse({"detail": "Forbidden browser bridge origin"}, status_code=403)
+        return await call_next(request)
+
+    def require_bridge_auth(request: Request) -> dict[str, str]:
+        origin = request.headers.get("origin")
+        if origin not in HYDRALAB_BRIDGE_ORIGINS:
+            raise HTTPException(status_code=403, detail="Forbidden browser bridge origin")
+        authorization = request.headers.get("authorization", "")
+        prefix = "Bearer "
+        if not authorization.startswith(prefix):
+            raise HTTPException(status_code=401, detail="Missing browser bridge token")
+        token = authorization[len(prefix):]
+        token_hash = _hash_bridge_token(token)
+        now = time.time()
+        for stored_hash, issued_at in list(bridge_tokens.items()):
+            if now - issued_at > BRIDGE_TOKEN_TTL_SECONDS:
+                bridge_tokens.pop(stored_hash, None)
+        if not any(hmac.compare_digest(token_hash, stored_hash) for stored_hash in bridge_tokens):
+            raise HTTPException(status_code=401, detail="Invalid browser bridge token")
+        return {"origin": origin, "token": token}
+
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "phase": "1"}
+
+    @app.get("/healthz")
+    def healthz() -> dict[str, str]:
+        return {"status": "ok", "host": HYDRALAB_BIND_HOST}
+
+    @app.get("/readyz")
+    def readyz() -> dict[str, object]:
+        return {
+            "status": "ready",
+            "subsystems": {
+                "sqlite": "ready",
+                "migrations": "ready",
+                "bind_host": HYDRALAB_BIND_HOST,
+            },
+        }
+
+    @app.post("/api/browser/handshake")
+    def browser_handshake(request: BrowserHandshakeRequest, raw_request: Request) -> dict[str, object]:
+        origin = raw_request.headers.get("origin")
+        if origin not in HYDRALAB_BRIDGE_ORIGINS:
+            raise HTTPException(status_code=403, detail="Forbidden browser bridge origin")
+        if not _consume_runtime_nonce(app_data_root(), request.handshake_nonce):
+            raise HTTPException(status_code=401, detail="Invalid browser bridge nonce")
+        token = secrets.token_urlsafe(32)
+        bridge_tokens.clear()
+        bridge_tokens[_hash_bridge_token(token)] = time.time()
+        return {
+            "status": "connected",
+            "token": token,
+            "origin": origin,
+            "expires_in_seconds": 3600,
+            "transport": "loopback-http",
+        }
+
+    @app.post("/api/browser/capture")
+    async def browser_capture(
+        request: BrowserCaptureRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return await persist_browser_capture(request, session, create_source=True)
+
+    @app.post("/api/browser/selection")
+    async def browser_selection(
+        request: BrowserCaptureRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        request.event_type = "selection"
+        return await persist_browser_capture(request, session, create_source=False)
+
+    @app.get("/api/browser/ledger")
+    async def browser_ledger(
+        project_id: str,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        return {"events": await repo.list_browser_events(project_id)}
+
+    @app.get("/api/browser/working-set")
+    async def browser_working_set(
+        project_id: str,
+        budget_tokens: int = 8000,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        events = await repo.list_browser_events(project_id)
+        return build_browser_working_set(events, project_id=project_id, budget_tokens=budget_tokens)
+
+    @app.post("/api/browser/propose-source")
+    async def browser_propose_source(
+        request: BrowserCaptureRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        metadata = detect_source_metadata(request.url, request.title, request.page_text)
+        metadata.update(request.metadata)
+        metadata["trust_level"] = TRUST_LEVEL_UNTRUSTED
+        review_item = await repo.create_review_item(
+            {
+                "project_id": request.project_id,
+                "item_type": "browser-source-proposal",
+                "title": f"Review browser source: {request.title or request.url}",
+                "summary": "Browser page content proposed a source save. User review is required.",
+                "origin_type": "browser",
+                "origin_id": request.url,
+                "target_type": "source",
+                "payload": {
+                    "url": request.url,
+                    "title": request.title,
+                    "trust_level": TRUST_LEVEL_UNTRUSTED,
+                    "detected_metadata": metadata,
+                    "motivating_excerpt": motivating_excerpt(request.page_text),
+                },
+            }
+        )
+        return {"created_source": None, "review_item": review_item}
+
+    @app.post("/api/browser/history/request")
+    def browser_history_request(
+        request: BrowserHistoryRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+    ) -> dict[str, object]:
+        return {
+            "project_id": request.project_id,
+            "scope": "single-request",
+            "reason": request.reason,
+            "choices": ["Allow for this request", "Decline"],
+        }
 
     @app.get("/api/chat/conversations")
     async def list_conversations(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -65,39 +444,171 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         return {"messages": await repo.list_messages(conversation_id)}
 
+    # ---------------------------------------------------------------- chats
+    @app.get("/api/chats")
+    async def list_chats(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        await repo.ensure_default_chat(project_id)
+        return {"chats": await repo.list_chats(project_id)}
+
+    @app.post("/api/chats")
+    async def create_chat(request: ChatCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"chat": await repo.create_chat(request.project_id, request.name)}
+
+    @app.patch("/api/chats/{chat_id}")
+    async def update_chat(chat_id: str, request: ChatUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        chat = await repo.update_chat(chat_id, name=request.name, archived=request.archived)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return {"chat": chat}
+
+    @app.get("/api/chats/search")
+    async def search_chats(project_id: str = "default", q: str = "", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"chats": await repo.search_chats(project_id, q)}
+
+    @app.get("/api/chats/{chat_id}/messages")
+    async def list_chat_messages(chat_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"messages": await repo.list_chat_messages(chat_id)}
+
+    @app.post("/api/chats/{chat_id}/export")
+    async def export_chat(chat_id: str, request: ChatExportRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        chat = await repo.get_chat(chat_id)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        messages = await repo.list_chat_messages(chat_id)
+        if request.message_ids:
+            selected = [m for m in messages if m["id"] in set(request.message_ids)]
+        else:
+            selected = messages
+        path = write_chat_artifact(hydra_project_root(), chat, selected)
+        await repo.add_event("chat.exported", f"Exported chat {chat['name']} to {path.name}")
+        return {"path": str(path.relative_to(hydra_project_root())), "message_count": len(selected)}
+
     @app.post("/api/chat/completions")
     async def chat_completions(request: ChatCompletionRequest, session: AsyncSession = Depends(get_session)) -> StreamingResponse:
         repo = Repository(session)
-        conv_id = request.conversation_id
-        if not conv_id:
-            conv = await repo.create_conversation(request.message[:40] or "New Chat")
-            conv_id = conv["id"]
-        
-        await repo.add_message(conv_id, "user", request.message)
-        
+        chat_id = request.chat_id
+        if chat_id:
+            chat = await repo.get_chat(chat_id)
+            if chat is None:
+                raise HTTPException(status_code=404, detail="Chat not found")
+        else:
+            chat = await repo.ensure_default_chat(request.project_id)
+            chat_id = chat["id"]
+
+        context_refs = [ref.model_dump() for ref in request.context_refs]
+        await repo.add_chat_message(chat_id, "user", request.message, context_refs=context_refs)
+        assistant_row = await repo.add_chat_message(chat_id, "assistant", "", trust_origin="assistant")
+        assistant_message_id = assistant_row["id"]
+        service = _build_assistant_service(secret_store)
+
+        async def persist_delta(delta: str) -> None:
+            async with async_session_maker() as bg_session:
+                await Repository(bg_session).append_chat_message_content(assistant_message_id, delta)
+
         async def stream() -> AsyncIterator[str]:
-            yield f"data: {json.dumps({'type': 'status', 'content': 'reading request...'})}\n\n"
-            
-            # Use isolated background session to avoid closed event loop or session access
-            async with async_session_maker() as background_session:
-                bg_repo = Repository(background_session)
-                await bg_repo.add_event("chat.status", "Thinking about the user query...")
-            
-            yield f"data: {json.dumps({'type': 'status', 'content': 'searching memory...'})}\n\n"
-            
-            answer = f"I received your message: '{request.message}'. This is a mock response."
-            
-            async with async_session_maker() as background_session:
-                bg_repo = Repository(background_session)
-                await bg_repo.add_message(conv_id, "assistant", answer)
-            
-            # Stream the answer in chunks
-            for word in answer.split(" "):
-                yield f"data: {json.dumps({'type': 'message', 'content': word + ' '})}\n\n"
-            
-            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conv_id})}\n\n"
+            async for event in service.stream_reply(request.message, context_refs=context_refs, on_delta=persist_delta):
+                payload = dict(event)
+                if event.get("type") == "done":
+                    payload["chat_id"] = chat_id
+                    payload["message_id"] = assistant_message_id
+                yield f"data: {json.dumps(payload)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/api/assistant/send-scope")
+    async def preview_send_scope(request: SendScopeRequest) -> dict[str, object]:
+        service = _build_assistant_service(secret_store)
+        scope = service.resolve_scope([ref.model_dump() for ref in request.context_refs])
+        if scope.has_hard_block:
+            raise HTTPException(
+                status_code=403,
+                detail={"reason": scope.blocked[0]["reason"], "blocked": scope.blocked, "kind": "hard-blocked"},
+            )
+        return {"included": scope.included, "excluded": scope.excluded, "blocked": scope.blocked}
+
+    @app.get("/api/assistant/modes")
+    async def assistant_modes() -> dict[str, object]:
+        privacy = _assistant_privacy()
+        return {
+            "default_mode": privacy["default_mode"],
+            "modes": [
+                {"id": "passive", "label": "Passive (Suggest-only)", "enabled": True, "phase": 1},
+                {"id": "copilot", "label": "Co-pilot (Approve-to-apply)", "enabled": False, "phase": 2},
+                {"id": "full_access", "label": "Full Access (YOLO)", "enabled": False, "phase": 2},
+            ],
+            "offline_only": privacy["offline_only"],
+            "g3_provider_send": privacy["g3_enabled"],
+        }
+
+    @app.post("/api/assistant/offline")
+    async def set_offline_only(enabled: bool = True) -> dict[str, object]:
+        settings_path = app_data_root() / "settings.toml"
+        settings = load_settings(settings_path).data
+        settings.setdefault("privacy", {})["offline_only"] = bool(enabled)
+        settings.setdefault("general", {})["offline_only"] = bool(enabled)
+        save_settings(settings_path, settings)
+        if enabled:
+            _PROVIDER_CACHE.purge()
+        return {"offline_only": bool(enabled), "cache_purged": bool(enabled), "status": "offline-blocked" if enabled else "online"}
+
+    # ---------------------------------------------------------------- skills
+    @app.get("/api/skills")
+    async def list_skills() -> dict[str, object]:
+        registry = load_skill_registry(project_dir=hydra_project_root() / ".hydralab" / "skills")
+        return {
+            "skills": [s.to_api() for s in registry.skills],
+            "rejected_plugins": registry.rejected_plugins,
+        }
+
+    # ------------------------------------------------------ context files / memory
+    @app.get("/api/context-files")
+    async def get_context_files(project_id: str = "default") -> dict[str, object]:
+        profile = init_app_data("default")
+        ensure_hydra_md(hydra_project_root())
+        global_files = load_global_context(profile.profile_root, profile.profile_id)
+        project_file = load_project_context(hydra_project_root())
+        return {
+            "profile_id": profile.profile_id,
+            "global_files": [vars(f) for f in global_files],
+            "project_file": vars(project_file),
+        }
+
+    @app.put("/api/context-files/{file_name}")
+    async def save_context_file(file_name: str, request: ContextFileSaveRequest, project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        profile = init_app_data("default")
+        memory = ContextFileMemory(session, hydra_project_root(), profile.profile_root, profile.profile_id)
+        try:
+            result = await memory.manual_edit(file=file_name, new_content=request.content, project_id=project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"written": result.written, "file": result.file, "change_id": result.change_id}
+
+    @app.get("/api/context-files/changes")
+    async def context_file_changes(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        profile = init_app_data("default")
+        memory = ContextFileMemory(session, hydra_project_root(), profile.profile_root, profile.profile_id)
+        return {"changes": await memory.list_changes(project_id=project_id)}
+
+    @app.post("/api/memory/candidates")
+    async def create_memory_candidate(request: MemoryCandidateRequest, project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        profile = init_app_data("default")
+        memory = ContextFileMemory(session, hydra_project_root(), profile.profile_root, profile.profile_id)
+        candidate = await memory.route_memory_candidate(
+            fact=request.fact,
+            destination=request.destination,
+            category=request.category,
+            confidence=request.confidence,
+            source_ref=request.source_ref,
+            trust_origin=request.trust_origin,
+            project_id=project_id,
+        )
+        return {"candidate": candidate}
 
     @app.post("/api/chat/research")
     async def research_chat(request: ResearchRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -116,6 +627,170 @@ def create_app() -> FastAPI:
         await repo.add_event("sources.search.completed", f"Found {len(sources)} source candidates")
         return {"sources": sources}
 
+    @app.get("/api/project/objects")
+    async def project_objects(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        sources = await repo.list_sources()
+        notes = await repo.search_notes()
+        claims = await repo.list_claims()
+        tasks = await repo.list_tasks()
+        citations = await repo.list_citations()
+        evidence = await repo.list_evidence()
+
+        if project_id:
+            sources = [item for item in sources if item.get("project_id") in (None, project_id)]
+            notes = [item for item in notes if item.get("project_id") in (None, project_id)]
+            claims = [item for item in claims if item.get("project_id") in (None, project_id)]
+            tasks = [item for item in tasks if item.get("project_id") in (None, project_id)]
+            citations = [item for item in citations if item.get("project_id") in (None, project_id)]
+
+        return {
+            "project_id": project_id or "default",
+            "objects": {
+                "notes": notes,
+                "sources": sources,
+                "claims": claims,
+                "tasks": tasks,
+                "citations": citations,
+                "evidence": evidence,
+            },
+            "counts": {
+                "notes": len(notes),
+                "sources": len(sources),
+                "claims": len(claims),
+                "tasks": len(tasks),
+                "citations": len(citations),
+                "evidence": len(evidence),
+            },
+        }
+
+    @app.get("/api/project/tree")
+    async def project_tree() -> dict[str, object]:
+        root = hydra_project_root().resolve()
+        nodes = []
+        for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root)).lower()):
+            relative = path.relative_to(root)
+            if is_project_tree_excluded(relative):
+                continue
+            stat = path.stat()
+            nodes.append(
+                {
+                    "id": str(relative),
+                    "path": str(relative),
+                    "name": path.name,
+                    "type": "directory" if path.is_dir() else "file",
+                    "parent": str(relative.parent) if str(relative.parent) != "." else "",
+                    "depth": len(relative.parts) - 1,
+                    "size": stat.st_size if path.is_file() else 0,
+                    "modified_at": stat.st_mtime,
+                    "index_status": project_tree_index_status(relative, is_dir=path.is_dir()),
+                }
+            )
+        return {"root": str(root), "nodes": nodes, "excluded": [".git", ".hydralab/temp", ".hydralab/cache"]}
+
+    @app.get("/api/review-inbox")
+    async def review_inbox(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        review_items = await repo.list_review_items()
+        if project_id:
+            review_items = [item for item in review_items if item.get("project_id") in (None, project_id)]
+
+        recovery_items = []
+        for journal in NoteFileService(session, hydra_project_root()).list_recovery_journals():
+            recovery_items.append(
+                {
+                    "id": f"recovery:{journal['id']}",
+                    "item_type": "note-recovery",
+                    "title": f"Recovery draft: {journal.get('note_id') or journal['id']}",
+                    "summary": "Unsaved note recovery journal is pending review.",
+                    "origin_type": "note-files",
+                    "origin_id": journal["id"],
+                    "target_type": "note",
+                    "target_id": journal.get("note_id"),
+                    "status": "pending",
+                    "payload": journal,
+                    "created_at": journal.get("updated_at") or 0,
+                }
+            )
+
+        pending = [item for item in [*review_items, *recovery_items] if item.get("status", "pending") == "pending"]
+        return {"items": pending, "counts": {"pending": len(pending), "review_items": len(review_items), "recovery": len(recovery_items)}}
+
+    @app.post("/api/sources/discovery/search")
+    async def source_discovery_search(request: SourceDiscoveryRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        posture = _resolve_discovery_posture(request)
+        coordinator = DiscoveryCoordinator(
+            providers=default_providers(),
+            cache=discovery_cache,
+            limiter=_discovery_limiter_from_settings(),
+            config=SourceProviderConfig(contact_email=request.contact_email),
+        )
+        payload = await coordinator.search(
+            request.query,
+            offline_only=posture["offline_only"],
+            scholarly_apis_enabled=posture["scholarly_apis_enabled"],
+            existing_sources=await repo.list_sources(),
+        )
+        for item in payload["review_items"]:
+            await repo.create_review_item(item)
+        await repo.add_event("sources.discovery.completed", f"Discovery search for {request.query}: {payload['state']}")
+        return payload
+
+    @app.post("/api/sources/save")
+    async def save_discovered_source(request: SourceSaveRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        result = result_from_dict(request.result).with_query(request.query)
+        metadata = result.to_dict()
+        metadata["source_origin"] = request.source_origin
+        metadata["trust_level"] = TRUST_LEVEL_UNTRUSTED
+        metadata["metadata_provenance"] = metadata["metadata_sources"]
+        if request.browser_context_event_id:
+            metadata["browser_context_event_id"] = request.browser_context_event_id
+        pdf_policy = evaluate_pdf_download_policy(
+            pdf_url=result.pdf_url,
+            expected_size_bytes=result.expected_size_bytes,
+            automatic_download=request.automatic_pdf_download,
+            explicit_save_with_pdf=request.save_pdf,
+            allowed_domains=request.allowed_pdf_domains,
+        )
+        metadata["pdf_download_policy"] = pdf_policy
+
+        if not request.user_initiated:
+            review = await repo.create_review_item(
+                {
+                    "project_id": request.project_id,
+                    "item_type": "source-save-proposal",
+                    "title": f"Review source save: {result.title}",
+                    "summary": "Untrusted provider or page text proposed a source save. User action is required.",
+                    "origin_type": request.source_origin,
+                    "target_type": "source",
+                    "payload": metadata,
+                }
+            )
+            raise HTTPException(status_code=403, detail={"reason": "user-initiated-save-required", "review_item_id": review["id"]})
+
+        source = await repo.upsert_source(
+            {
+                "id": source_id_from_discovery_result(metadata),
+                "project_id": request.project_id,
+                "title": result.title,
+                "authors": author_string(result.authors),
+                "year": str(result.year or ""),
+                "url": result.url or result.pdf_url or "",
+                "abstract": result.abstract,
+                "kind": "paper",
+                "source_type": "paper",
+                "doi": result.doi,
+                "arxiv_id": result.arxiv_id,
+                "metadata_json": json.dumps(metadata, sort_keys=True),
+                "metadata_sources_json": json.dumps(metadata["metadata_provenance"], sort_keys=True),
+                "trust_origin": "user-curated",
+            }
+        )
+        await repo.add_event("sources.saved", f"Saved source {result.title}")
+        return {"source": source, "pdf_policy": pdf_policy}
+
     @app.post("/api/sources/ingest")
     async def ingest_source(
         file: UploadFile | None = File(None),
@@ -127,19 +802,50 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         if file:
             raw = await file.read()
-            text = extract_upload_text(raw, file.content_type or "", file.filename or "paper")
             final_title = title or file.filename or "Uploaded paper"
+            project_root = hydra_project_root()
+            original_path = write_uploaded_original(project_root, file.filename or "paper", raw)
             kind = "pdf"
             url_ref = url or doi or ""
+            declared_mime = file.content_type or ""
+            try:
+                validate_source_file(original_path, declared_mime=declared_mime)
+            except QuarantineError as exc:
+                job = IngestionJob(
+                    source_id=f"quarantine:{sha256_bytes(raw)[:16]}",
+                    source_path=str(original_path),
+                    status="quarantined",
+                    progress=0,
+                    original_content_hash=sha256_bytes(raw),
+                    failure_reason=str(exc),
+                )
+                session.add(job)
+                await session.commit()
+                await session.refresh(job)
+                return JSONResponse(
+                    {
+                        "state": "quarantined",
+                        "job_id": job.id,
+                        "reason": str(exc),
+                        "source": None,
+                        "artifacts": [],
+                    },
+                    status_code=422,
+                )
         elif url or doi:
-            final_title = title or f"Ingested {url or doi}"
-            url_ref = url or doi or ""
-            text = f"This is mocked extracted text from {url_ref}."
-            kind = "url"
+            raise HTTPException(
+                status_code=501,
+                detail="url/doi ingestion arrives with discovery auto-download; no artifacts are created by this endpoint yet",
+            )
         else:
             raise HTTPException(status_code=400, detail="Must provide file, url, or doi")
-        
-        summary = f"Mocked summary for {final_title}. Text length: {len(text)} characters."
+
+        metadata = {
+            "original_path": str(original_path.relative_to(project_root)),
+            "original_content_hash": sha256_bytes(original_path.read_bytes()),
+            "trust_level": TRUST_LEVEL_UNTRUSTED,
+        }
+        summary = f"Ingestion accepted for {final_title}."
         
         source = await repo.upsert_source(
             {
@@ -148,29 +854,41 @@ def create_app() -> FastAPI:
                 "abstract": summary,
                 "url": url_ref,
                 "kind": kind,
+                "metadata_json": json.dumps(metadata, sort_keys=True),
+                "trust_origin": "user-curated",
             }
         )
-        note = await repo.add_note(f"Notes & Summary for {source['title']}", f"Summary: {summary}\n\nFull text: {text[:3800]}", source["id"])
+        ingestion = await IngestionService().ingest(
+            session,
+            source_id=source["id"],
+            title=source["title"],
+            source_path=original_path,
+            project_root=project_root,
+            declared_mime=declared_mime,
+        )
+        note_body = f"Summary: {summary}\n\nIngestion state: {ingestion['state']}\nArtifacts: {len(ingestion.get('artifacts', []))}"
+        note = await repo.add_note(f"Notes & Summary for {source['title']}", note_body, source["id"])
         await repo.add_event("source.ingested", f"Ingested {source['title']}")
-        return {"source": source, "note": note}
+        return {"source": source, "note": note, "ingestion": ingestion}
 
     @app.get("/api/sources/retrieve")
     async def retrieve_rag(query: str, source_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
         await repo.add_event("rag.retrieval", f"Retrieving answers for query '{query}'")
         
-        # Mock simple RAG chunking and summarization
-        chunks = [f"Mocked relevant passage for '{query}'"]
+        # Placeholder until the real retrieval branch replaces this endpoint.
+        chunks = [f"Placeholder relevant passage for '{query}'"]
         if source_id:
             chunks.append(f"Passage specifically from source_id={source_id}")
             
-        answer = f"Based on the ingested sources, here is a synthesized answer for '{query}'. This is a mock RAG generation."
+        answer = f"Placeholder retrieval response for '{query}'."
         
         return {
             "query": query,
             "answer": answer,
             "chunks": chunks,
-            "source_id": source_id
+            "source_id": source_id,
+            "placeholder": True,
         }
 
     @app.post("/api/writing/review")
@@ -180,12 +898,238 @@ def create_app() -> FastAPI:
         await repo.add_event("writing.review.completed", "Reviewed draft text")
         return result
 
+    @app.get("/api/writing/format-defaults")
+    async def get_format_defaults() -> dict[str, object]:
+        return {"defaults": _writing_global_defaults()}
+
+    @app.get("/api/writing/manuscripts")
+    async def get_manuscripts() -> dict[str, object]:
+        return {"manuscripts": list_manuscripts(hydra_project_root())}
+
+    @app.get("/api/writing/manuscripts/{manuscript}/format")
+    async def get_manuscript_format(manuscript: str) -> dict[str, object]:
+        resolved = resolve_manuscript_format(hydra_project_root(), manuscript, _writing_global_defaults())
+        return {
+            "manuscript": manuscript,
+            "format": resolved.format.model_dump(),
+            "validation_error": resolved.validation_error,
+            "source": resolved.source,
+        }
+
+    @app.get("/api/writing/latex/availability")
+    async def get_latex_availability() -> dict[str, object]:
+        return detect_latex_toolchain()
+
+    @app.get("/api/writing/docx/availability")
+    async def get_docx_availability(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        availability = DocxService().detect()
+        await repo.record_docx_artifact(
+            kind="availability",
+            converter_adapter=availability.adapter,
+            converter_version=availability.version,
+            availability_status=availability.status,
+            setup_error=availability.setup_error,
+            status=availability.status,
+        )
+        return {
+            "adapter": availability.adapter,
+            "version": availability.version,
+            "availability_status": availability.status,
+            "available": availability.available,
+            "setup_error": availability.setup_error,
+        }
+
+    @app.post("/api/writing/docx/import")
+    async def import_docx(
+        file: UploadFile = File(...),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        temp_dir = project_root / ".hydralab" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(c for c in (file.filename or "import.docx") if c.isalnum() or c in {".", "-", "_"}) or "import.docx"
+        staged = temp_dir / f"{secrets.token_hex(6)}-{safe_name}"
+        staged.write_bytes(await file.read())
+        try:
+            result = DocxService().import_docx(staged)
+        finally:
+            staged.unlink(missing_ok=True)
+        await repo.record_docx_artifact(
+            kind="import",
+            converter_adapter=result.converter.adapter if result.converter else "none",
+            converter_version=result.converter.version if result.converter else "",
+            availability_status=result.converter.status if result.converter else "unavailable",
+            setup_error=result.converter.setup_error if result.converter else "",
+            status=result.status,
+            source_path=file.filename,
+            error_detail=result.error_detail,
+            flags_json=json.dumps(result.flagged_active_content),
+            metadata_json=json.dumps(result.metadata),
+        )
+        if result.status == "unavailable":
+            raise HTTPException(status_code=503, detail={"reason": "converter-unavailable", "message": result.error_detail})
+        if result.status == "rejected":
+            raise HTTPException(status_code=422, detail={"reason": "package-validation", "message": result.error_detail})
+        if result.status == "failed":
+            raise HTTPException(status_code=422, detail={"reason": "import-failed", "message": result.error_detail})
+        return {
+            "status": result.status,
+            "content": result.content,
+            "metadata": result.metadata,
+            "flagged_active_content": result.flagged_active_content,
+        }
+
+    @app.post("/api/writing/manuscripts/{manuscript}/export")
+    async def export_manuscript(
+        manuscript: str,
+        request: ManuscriptExportRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        resolved = resolve_manuscript_format(project_root, manuscript, _writing_global_defaults())
+
+        bibliography: list[str] | None = None
+        if request.include_bibliography:
+            sources = await repo.list_sources()
+            items = [s["csl_json"] for s in sources if isinstance(s.get("csl_json"), dict) and s.get("csl_json")]
+            if items:
+                renderer = CslRenderer(default_style=_resolve_default_citation_style())
+                try:
+                    bibliography = renderer.render_bibliography(items, resolved.format.citation_style)
+                except CslRenderError:
+                    bibliography = None
+
+        result = DocxService().export_manuscript(
+            project_root,
+            manuscript,
+            request.source_file,
+            resolved.format,
+            bibliography=bibliography,
+            output_name=request.output_name,
+        )
+        await repo.record_docx_artifact(
+            kind="export",
+            manuscript=manuscript,
+            project_id=request.project_id,
+            converter_adapter=result.converter.adapter if result.converter else "none",
+            converter_version=result.converter.version if result.converter else "",
+            availability_status=result.converter.status if result.converter else "unavailable",
+            setup_error=result.converter.setup_error if result.converter else "",
+            status=result.status,
+            source_path=request.source_file,
+            output_path=result.output_path,
+            error_detail=result.error_detail,
+        )
+        if result.status == "unavailable":
+            raise HTTPException(status_code=503, detail={"reason": "converter-unavailable", "message": result.error_detail})
+        if result.status == "failed":
+            raise HTTPException(status_code=422, detail={"reason": "export-failed", "message": result.error_detail})
+        await repo.add_event("writing.docx.exported", f"Exported manuscript {manuscript} to DOCX")
+        return {"status": result.status, "output_path": result.output_path, "format": resolved.format.model_dump()}
+
     @app.post("/api/evidence")
     async def create_evidence(request: EvidenceCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
         evidence = await repo.add_evidence(**request.model_dump())
         await repo.add_event("evidence.linked", f"Linked evidence for claim: {request.claim_id}")
         return evidence
+
+    @app.post("/api/sources/import")
+    async def import_sources(request: SourceImportRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            result = await repo.import_sources(request.content, request.format, request.project_id)
+        except CitationParseError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "parse-error", "entry": exc.entry, "message": str(exc)}) from exc
+        await repo.add_event("sources.imported", f"Imported {result['count']} source(s) from {result['format']}")
+        return result
+
+    @app.get("/api/sources/export")
+    async def export_sources(fmt: str = "bibtex", session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
+        repo = Repository(session)
+        try:
+            text = await repo.export_sources(fmt)
+        except CitationParseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return PlainTextResponse(text)
+
+    @app.post("/api/sources/merge")
+    async def merge_sources(request: SourceMergeRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            result = await repo.merge_sources(request.source_ids, reason=request.reason, merge_confidence=request.merge_confidence)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        await repo.add_event("sources.merged", f"Merged into survivor {result['survivor_id']}")
+        return result
+
+    @app.post("/api/sources/unmerge")
+    async def unmerge_sources(request: SourceUnmergeRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            result = await repo.unmerge_sources(request.merge_record_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        await repo.add_event("sources.unmerged", f"Reversed merge {request.merge_record_id}")
+        return result
+
+    @app.post("/api/sources/duplicates")
+    async def detect_source_duplicates(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        verdicts = await repo.detect_duplicates(project_id)
+        return {"duplicates": verdicts}
+
+    @app.post("/api/sources/dedupe")
+    async def dedupe_sources(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        merges = await repo.dedupe_by_citation_key(project_id)
+        return {"merges": merges}
+
+    @app.post("/api/sources/{source_id}/trash")
+    async def trash_source(source_id: str, request: SourceTrashRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.trash_source(source_id, confirmed=request.confirmed)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/sources/{source_id}/restore")
+    async def restore_source(source_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.restore_source(source_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/refint/scan")
+    async def refint_scan(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        findings = await repo.scan_referential_integrity(project_id)
+        return {"findings": findings, "count": len(findings)}
+
+    @app.post("/api/citations/render")
+    async def render_citations(request: CitationRenderRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        sources = await repo.list_sources()
+        wanted = set(request.source_ids) if request.source_ids else None
+        items = []
+        for source in sources:
+            if wanted is not None and source["id"] not in wanted:
+                continue
+            csl = source.get("csl_json")
+            if isinstance(csl, dict) and csl:
+                items.append(csl)
+        global_default = _resolve_default_citation_style()
+        style = resolve_manuscript_style(hydra_project_root(), request.manuscript, request.style or global_default)
+        renderer = CslRenderer(default_style=global_default)
+        try:
+            entries = renderer.render_bibliography_html(items, style) if request.html else renderer.render_bibliography(items, style)
+        except CslRenderError as exc:
+            raise HTTPException(status_code=422, detail={"reason": "render-error", "message": str(exc)}) from exc
+        return {"style": style, "processor": CSL_PROCESSOR, "entries": entries}
 
     @app.get("/api/evidence")
     async def list_evidence(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -195,7 +1139,10 @@ def create_app() -> FastAPI:
     @app.post("/api/claims")
     async def create_claim(request: ClaimCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        claim = await repo.add_claim(**request.model_dump())
+        try:
+            claim = await repo.add_claim(**request.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         await repo.add_event("claim.created", "Created new claim")
         return claim
 
@@ -204,37 +1151,59 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         return {"claims": await repo.list_claims()}
 
+    @app.patch("/api/claims/{claim_id}")
+    async def promote_claim(claim_id: str, request: ClaimPromoteRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            claim = await repo.promote_claim(claim_id, request.status, reviewed=request.reviewed)
+        except ValueError as exc:
+            message = str(exc)
+            if message == "claim not found":
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=422, detail=message) from exc
+        await repo.add_event("claim.status.changed", f"Claim {claim_id} -> {request.status}")
+        return claim
+
+    @app.get("/api/claims/{claim_id}/location")
+    async def resolve_claim_location(claim_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        claim = await session.get(Claim, claim_id)
+        if claim is None:
+            raise HTTPException(status_code=404, detail="Claim not found")
+        return await repo.resolve_claim_location(claim.location_type, claim.location_id)
+
     @app.post("/api/claims/detect")
     async def detect_claims(request: ClaimDetectRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        """Suggestion-only claim extraction (HL-CITE-07/08).
+
+        By default no claim row is committed; the passage is returned as a
+        suggestion for the researcher to accept/reject. When the opt-in
+        ``auto_create`` flag is on, a single ``draft`` claim is created with
+        ``extraction_mode=auto_draft`` (never a supported status, HL-CITE-08).
+        """
         repo = Repository(session)
-        claim1 = await repo.add_claim("Hydra reduces hallucinated citations.")
-        claim2 = await repo.add_claim("LLMs always tell the truth.")
-        
-        # Link some evidence mock
-        sources = await repo.list_sources()
-        source_id = sources[0]["id"] if sources else (await repo.upsert_source({"title": "Mock Source"}))["id"]
-        
-        await repo.add_evidence(
-            claim_id=claim1["id"],
-            source_id=source_id,
-            passage="Hydra architecture aims to reduce hallucinations.",
-            support="supported",
-            confidence=0.9
-        )
-        await repo.add_evidence(
-            claim_id=claim2["id"],
-            source_id=source_id,
-            passage="Some LLMs have hallucination problems.",
-            support="unsupported",
-            confidence=0.2
-        )
-        
-        await repo.add_event("claims.detected", "Detected mock claims from draft text")
-        
-        return {
-            "claims": [claim1, claim2],
-            "evidence": await repo.list_evidence()
-        }
+        suggestions = extract_claim_suggestions(request.text, request)
+        created: list[dict[str, object]] = []
+        if request.auto_create and suggestions:
+            top = suggestions[0]
+            claim = await repo.add_claim(
+                text=top["claim_text"],
+                project_id=None,
+                location_type=request.location_type,
+                location_id=request.location_id,
+                status="draft",
+                created_from="extraction",
+                origin_ref=request.origin_ref,
+                origin_quote=top["origin_quote"],
+                extraction_confidence=top["extraction_confidence"],
+                extraction_mode="auto_draft",
+                trust_origin="user",
+            )
+            created.append(claim)
+            await repo.add_event("claims.auto_draft", "Auto-created draft claim from opt-in extraction")
+        else:
+            await repo.add_event("claims.suggested", f"Suggested {len(suggestions)} claim candidate(s) (no commit)")
+        return {"suggestions": suggestions, "created_claims": created, "committed": bool(created)}
 
     @app.post("/api/citations")
     async def create_citation(request: CitationCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -296,6 +1265,118 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         return await repo.get_note_links(note_id)
 
+    @app.get("/api/note-files")
+    async def open_note_file(
+        path: str,
+        project_id: str = "default",
+        trust_origin: str = "user",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            return await NoteFileService(session, hydra_project_root()).open_note(
+                path,
+                project_id=project_id,
+                trust_origin=trust_origin,
+            )
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Note file not found") from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.put("/api/note-files/{note_id}")
+    async def save_note_file(
+        note_id: str,
+        request: NoteFileSaveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            return await NoteFileService(session, hydra_project_root()).save_note(note_id, request.content)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Note file not indexed") from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/note-files/{note_id}/backlinks")
+    async def list_note_file_backlinks(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return {"backlinks": await NoteFileService(session, hydra_project_root()).list_backlinks(note_id)}
+
+    @app.post("/api/note-files/{note_id}/suggestions")
+    async def propose_note_file_suggestion(
+        note_id: str,
+        request: NoteSuggestionRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            return await NoteFileService(session, hydra_project_root()).propose_inline_suggestion(
+                note_id,
+                suggestion_id=request.suggestion_id,
+                replacement=request.replacement,
+                auto_apply=request.auto_apply,
+                origin_excerpt=request.origin_excerpt,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Note file not indexed") from None
+
+    @app.get("/api/note-files/recovery/pending")
+    async def list_note_recovery_journals(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return {"journals": NoteFileService(session, hydra_project_root()).list_recovery_journals()}
+
+    @app.post("/api/note-files/recovery/{journal_id}/accept")
+    async def accept_note_recovery(journal_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        journal_path = hydra_project_root() / ".hydralab" / "temp" / f"{journal_id}.note-recovery.json"
+        if not journal_path.exists():
+            raise HTTPException(status_code=404, detail="Recovery journal not found")
+        return await NoteFileService(session, hydra_project_root()).accept_recovery(journal_id)
+
+    @app.get("/api/annotations/{source_id}")
+    async def list_annotations(source_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        annotations = (
+            await session.exec(
+                select(Annotation).where(Annotation.source_id == source_id).order_by(Annotation.page.asc(), Annotation.created_at.asc())
+            )
+        ).all()
+        indexer = AnnotationIndexer(session, hydra_project_root())
+        if read_sidecar_records(hydra_project_root(), source_id) and (not annotations or await indexer.sidecar_index_stale(source_id)):
+            annotations = await indexer.rebuild_from_sidecars(source_id)
+        return {"annotations": [annotation_to_api(row) for row in annotations]}
+
+    @app.post("/api/annotations/{source_id}")
+    async def create_annotation(source_id: str, request: AnnotationCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        project_root = hydra_project_root()
+        records = read_sidecar_records(project_root, source_id)
+        record = create_annotation_record(
+            source_id=source_id,
+            page=request.page,
+            text=request.text,
+            quad_points=request.quad_points,
+            annotation_type=request.type,
+            linked_claim_ids=request.linked_claim_ids,
+            linked_note_ids=request.linked_note_ids,
+            color=request.color,
+        )
+        records.append(record)
+        write_sidecar_records(project_root, source_id, records)
+        await AnnotationIndexer(session, project_root).rebuild_from_sidecars(source_id)
+        row = await session.get(Annotation, record["sidecar_record_id"])
+        if row is None:
+            raise HTTPException(status_code=500, detail="Annotation was written but not indexed")
+        return {"annotation": annotation_to_api(row), "sidecar_record_id": record["sidecar_record_id"]}
+
+    @app.post("/api/annotations/{sidecar_record_id}/claim")
+    async def create_annotation_claim(
+        sidecar_record_id: str,
+        request: AnnotationClaimRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return await AnnotationIndexer(session, hydra_project_root()).create_or_suggest_claim(
+            sidecar_record_id,
+            auto_create=request.auto_create,
+        )
+
     @app.post("/api/tasks")
     async def create_task(request: TaskCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
@@ -305,20 +1386,34 @@ def create_app() -> FastAPI:
             detail=request.detail,
             progress=request.progress,
             phase_indicator=request.phase_indicator,
-            position=request.position
+            position=request.position,
+            project_id=request.project_id,
+            due=request.due,
+            priority=request.priority,
+            tags=request.tags,
         )
         await repo.add_event("task.created", f"Created task {request.title}")
         return task
 
     @app.get("/api/tasks")
-    async def list_tasks(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+    async def list_tasks(
+        state: str | None = None,
+        project_id: str | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
         repo = Repository(session)
-        return {"tasks": await repo.list_tasks()}
+        return {"tasks": await repo.list_tasks(state=state, project_id=project_id)}
+
+    def _task_updates(request: TaskUpdateRequest) -> dict[str, object]:
+        updates = request.model_dump(exclude_unset=True)
+        if "tags" in updates and updates["tags"] is not None:
+            updates["tags"] = json.dumps(updates["tags"])
+        return updates
 
     @app.put("/api/tasks/{task_id}")
     async def update_task_put(task_id: str, request: TaskUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        task = await repo.update_task(task_id, request.model_dump(exclude_unset=True))
+        task = await repo.update_task(task_id, _task_updates(request))
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         await repo.add_event("task.updated", f"Updated task {task['title']}")
@@ -327,7 +1422,7 @@ def create_app() -> FastAPI:
     @app.patch("/api/tasks/{task_id}")
     async def update_task_patch(task_id: str, request: TaskUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
-        task = await repo.update_task(task_id, request.model_dump(exclude_unset=True))
+        task = await repo.update_task(task_id, _task_updates(request))
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found")
         await repo.add_event("task.updated", f"Updated task {task['title']}")
@@ -341,6 +1436,74 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Task not found")
         await repo.add_event("task.deleted", f"Deleted task {task_id}")
         return {"status": "success"}
+
+    @app.post("/api/tasks/{task_id}/links")
+    async def create_task_link(task_id: str, request: TaskLinkCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        if await session.get(Task, task_id) is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        link = await repo.create_task_link(
+            task_id=task_id,
+            target_type=request.target_type,
+            target_id_or_path=request.target_id_or_path,
+            link_role=request.link_role,
+        )
+        return link
+
+    @app.get("/api/tasks/{task_id}/links")
+    async def list_task_links(task_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        return {"links": await repo.list_task_links(task_id)}
+
+    @app.post("/api/tasks/suggest")
+    async def suggest_task(request: TaskSuggestRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        settings = await repo.list_settings()
+        auto_draft_enabled = str(settings.get("auto_draft_tasks", "false")).lower() == "true"
+        result = await propose_task(
+            repo,
+            TaskProposal(
+                title=request.title,
+                project_id=request.project_id,
+                origin=request.origin,
+                category=request.category,
+                trust_origin=request.trust_origin,
+                summary=request.summary,
+                detail=request.detail,
+                origin_type=request.origin_type,
+                origin_id=request.origin_id,
+                link=request.link,
+                tags=request.tags,
+            ),
+            auto_draft_enabled=auto_draft_enabled,
+        )
+        await repo.add_event("task.suggested", f"Task proposal processed: {request.title}")
+        return result
+
+    @app.post("/api/tasks/{task_id}/accept")
+    async def accept_task(task_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        task = await repo.accept_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        await repo.add_event("task.accepted", f"Accepted task {task['title']}")
+        return task
+
+    @app.post("/api/tasks/{task_id}/dismiss")
+    async def dismiss_task(task_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        task = await repo.dismiss_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        await repo.add_event("task.dismissed", f"Dismissed task {task['title']}")
+        return task
+
+    @app.post("/api/tasks/dismiss-drafts")
+    async def dismiss_draft_tasks(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        count = await repo.bulk_dismiss_draft_tasks(project_id)
+        await repo.add_event("task.drafts.dismissed", f"Bulk-dismissed {count} draft tasks")
+        return {"dismissed": count}
 
     @app.get("/api/events")
     async def events(request: Request, session: AsyncSession = Depends(get_session)) -> object:
@@ -362,6 +1525,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/settings/provider")
     async def save_provider_settings(request: ProviderSettingsRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        _validate_secret_ref(request.provider, request.api_key_ref)
         repo = Repository(session)
         settings = await repo.save_provider_settings(
             request.provider,
@@ -371,27 +1535,53 @@ def create_app() -> FastAPI:
         await repo.add_event("settings.provider.saved", f"Saved settings for {request.provider}")
         return settings
 
+    @app.post("/api/settings/provider/secret")
+    async def save_provider_secret(request: ProviderSecretRequest) -> dict[str, object]:
+        service = ProviderSecretService(secret_store)
+        settings_path = app_data_root() / "settings.toml"
+        service.save_provider_secret(settings_path, request.provider, "api_key", request.secret)
+        return {"secret_ref": f"keychain:hydralab/{request.provider}"}
+
     @app.get("/api/settings")
     async def get_settings(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
+        settings_path = app_data_root() / "settings.toml"
+        global_settings = load_settings(settings_path).data
         return {
-            "provider_settings": await repo.list_provider_settings(),
+            "provider_settings": _provider_settings_with_resolution(
+                await repo.list_provider_settings(),
+                secret_store,
+            ),
             "workspace_preferences": await repo.list_settings(),
+            "global_settings": global_settings,
         }
 
     @app.post("/api/settings")
     async def post_settings(request: SettingsUpdateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
+        settings_path = app_data_root() / "settings.toml"
+        global_settings = load_settings(settings_path).data
         if request.provider_settings is not None:
             for p in request.provider_settings:
+                _validate_secret_ref(p.provider, p.api_key_ref)
                 await repo.save_provider_settings(p.provider, p.model, p.api_key_ref)
+                account = global_settings.setdefault("providers", {}).setdefault("accounts", {}).setdefault(p.provider, {})
+                account["provider_id"] = p.provider
+                account["model"] = p.model
+                account["secret_ref"] = p.api_key_ref
         if request.workspace_preferences is not None:
             for k, v in request.workspace_preferences.items():
                 await repo.save_setting(k, v)
+                global_settings.setdefault("workspace", {})[k] = v
+        save_settings(settings_path, global_settings)
         await repo.add_event("settings.updated", "Saved settings and workspace preferences")
         return {
-            "provider_settings": await repo.list_provider_settings(),
+            "provider_settings": _provider_settings_with_resolution(
+                await repo.list_provider_settings(),
+                secret_store,
+            ),
             "workspace_preferences": await repo.list_settings(),
+            "global_settings": global_settings,
         }
 
     @app.get("/api/export/preview")
@@ -498,7 +1688,467 @@ def create_app() -> FastAPI:
         from hydra.writing import review_text
         return review_text(request.text)
 
+    # -- Notes trash/restore (task-link referential integrity, HL-UX-08) -----
+    @app.post("/api/notes/{note_id}/trash")
+    async def trash_note_endpoint(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.trash_note(note_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/notes/{note_id}/restore")
+    async def restore_note_endpoint(note_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        try:
+            return await repo.restore_note(note_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # -- Git panel (HL-GIT-01..05) -------------------------------------------
+    @app.get("/api/git/status")
+    async def git_status() -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "branch": None, "changed_files": [], "clean": True}
+        status = service.status()
+        status["is_repo"] = True
+        return status
+
+    @app.get("/api/git/diff")
+    async def git_diff(path: str | None = None) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "diff": ""}
+        return {"is_repo": True, "diff": service.diff(path)}
+
+    @app.get("/api/git/log")
+    async def git_log(limit: int = 50) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "commits": []}
+        return {"is_repo": True, "commits": service.log(limit=limit), "branch": service.current_branch()}
+
+    @app.get("/api/git/suggest-commits")
+    async def git_suggest_commits() -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        if not service.is_repo():
+            return {"is_repo": False, "suggestions": []}
+        status = service.status()
+        return {"is_repo": True, "suggestions": suggest_grouped_commits(status["changed_files"])}
+
+    @app.post("/api/git/init")
+    async def git_init(request: GitInitRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        root = hydra_project_root()
+        service = GitService(root)
+        if service.is_repo():
+            return {"action": "reuse", "reason": "Existing Git repository detected.", "branch": service.current_branch()}
+        # Existing non-Git folder: never silently init; require explicit confirm.
+        decision = evaluate_git_init(root, created_by_hydralab=False, git_enabled=True)
+        if decision.action == "ask" and not request.confirm:
+            return {"action": "ask", "reason": decision.reason, "initialized": False}
+        service._run(["init"])
+        repo = Repository(session)
+        await repo.add_event("git.init", "Initialized Git repository after explicit confirmation")
+        return {"action": "init", "initialized": True, "branch": service.current_branch()}
+
+    @app.post("/api/git/commit")
+    async def git_commit(request: GitCommitRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        try:
+            result = service.commit(request.message, request.paths)
+        except GitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        repo = Repository(session)
+        await repo.add_event("git.commit", f"Committed: {request.message}")
+        return result
+
+    @app.post("/api/git/restore")
+    async def git_restore(request: GitRestoreRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        settings = await repo.list_settings()
+        auto_checkpoint = str(settings.get("auto_checkpoint", "false")).lower() == "true"
+        service = GitService(hydra_project_root())
+        try:
+            result = service.restore_previous_version(request.path, ref=request.ref, auto_checkpoint=auto_checkpoint)
+        except GitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await repo.add_event("git.restore", f"Restored {request.path} to {request.ref}")
+        return result
+
+    @app.post("/api/git/destructive")
+    async def git_destructive(request: GitDestructiveRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        service = GitService(hydra_project_root())
+        try:
+            result = service.destructive(request.subcommand, request.args, approved=request.approved)
+        except GitError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        repo = Repository(session)
+        await repo.add_event("git.destructive", f"Ran approved destructive op: {request.subcommand}")
+        return result
+
+    # -- Safe command console (HL-SAFE-02 / HL-SAFE-03) ----------------------
+    @app.post("/api/console/run")
+    async def console_run(request: ConsoleRunRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        service = ConsoleService(hydra_project_root(), offline=_offline_posture())
+        approved_setting = (await repo.get_setting("console_verify_approved")) or {}
+        approved = set(filter(None, str(approved_setting.get("value", "")).split(","))) if approved_setting else set()
+        result = service.run(
+            request.command,
+            trigger=request.trigger,
+            approve=request.approve,
+            approved_commands=approved,
+        )
+        if result.get("approved_now"):
+            approved.add(str(result["approved_now"]))
+            await repo.save_setting("console_verify_approved", ",".join(sorted(approved)))
+        await repo.add_event("console.run", f"Console command '{result.get('command')}' -> {result.get('status')}")
+        return result
+
+    @app.get("/api/console/allowlist")
+    async def console_allowlist() -> dict[str, object]:
+        from hydra.services.console import GIT_CONSOLE_COMMANDS, VERIFICATION_COMMANDS
+        return {
+            "git_inspection": sorted(GIT_CONSOLE_COMMANDS.keys()),
+            "verification": sorted(VERIFICATION_COMMANDS),
+            "offline": _offline_posture(),
+        }
+
+    # -- Exports & backup (HL-EXPORT-01..06) ---------------------------------
+    @app.get("/api/export/options")
+    async def export_options_endpoint() -> dict[str, object]:
+        return export_options()
+
+    @app.post("/api/export/citations")
+    async def export_citations(request: CitationExportRequest, session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
+        repo = Repository(session)
+        sources = await repo.list_sources()
+        if request.source_ids:
+            wanted = set(request.source_ids)
+            sources = [s for s in sources if s["id"] in wanted]
+        serializer = {"bibtex": to_bibtex, "csl": to_csl_json, "ris": to_ris}[request.format]
+        media = "application/json" if request.format == "csl" else "text/plain"
+        return PlainTextResponse(serializer(sources), media_type=media)
+
+    @app.post("/api/export/project-zip")
+    async def export_project_zip(request: ProjectZipRequest, session: AsyncSession = Depends(get_session)) -> StreamingResponse:
+        options = ExportOptions(
+            include_chats=request.include_chats,
+            include_agent_logs=request.include_agent_logs,
+            include_browser_snapshots=request.include_browser_snapshots,
+            include_annotations=request.include_annotations,
+        )
+        data = build_project_zip(hydra_project_root(), selected_files=request.selected_files, options=options)
+        repo = Repository(session)
+        await repo.add_event("export.project-zip", "Exported clean project ZIP")
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type="application/zip",
+            headers={"Content-Disposition": "attachment; filename=hydralab_project.zip"},
+        )
+
+    @app.post("/api/backup/sqlite")
+    async def backup_sqlite(request: BackupRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        from hydra.database.session import get_db_url
+
+        db_url = get_db_url()
+        source_db = Path(db_url.removeprefix("sqlite+aiosqlite:///"))
+        dest = hydra_project_root() / ".hydralab" / "backups" / f"backup-{int(time.time())}.db"
+        result = safe_sqlite_backup(source_db, dest)
+        repo = Repository(session)
+        await repo.add_event("backup.sqlite", f"SQLite backup created (integrity_ok={result['integrity_ok']})")
+        return result
+
+    @app.post("/api/restore")
+    async def restore_endpoint(request: RestoreRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        root = hydra_project_root()
+
+        async def _reindex() -> list[str]:
+            return await reindex_notes_from_canonical_files(root, session, request.project_id)
+
+        result = await restore_project(root, reindex=_reindex if request.reindex else None)
+        repo = Repository(session)
+        await repo.add_event("restore.project", f"Restored project reindexed={request.reindex}")
+        return result
+
     return app
+
+async def persist_browser_capture(request: BrowserCaptureRequest, session: AsyncSession, create_source: bool) -> dict[str, object]:
+    repo = Repository(session)
+    decision = should_capture(request)
+    if not decision.captured:
+        return {
+            "captured": False,
+            "state": decision.state,
+            "reason": decision.reason,
+            "provider_eligible": False,
+            "event": None,
+            "source": None,
+        }
+
+    metadata = detect_source_metadata(request.url, request.title, request.page_text)
+    metadata.update(request.metadata)
+    metadata["trust_level"] = TRUST_LEVEL_UNTRUSTED
+    metadata["browser_page_text_to_provider"] = bool(request.browser_page_text_to_provider)
+    event = await repo.upsert_browser_event(
+        {
+            "project_id": request.project_id,
+            "url": request.url,
+            "title": request.title,
+            "page_text": request.page_text,
+            "selection": request.selection,
+            "event_type": request.event_type,
+            "detected_metadata": metadata,
+        }
+    )
+
+    source: dict[str, Any] | None = None
+    if create_source and source_should_promote(metadata, request.source_policy):
+        source_metadata = {
+            **metadata,
+            "origin_browser_event_id": event["id"],
+            "origin_url": request.url,
+            "trust_level": TRUST_LEVEL_UNTRUSTED,
+        }
+        source = await repo.upsert_source(
+            {
+                "id": source_id_from_metadata(metadata, request.url),
+                "project_id": request.project_id,
+                "title": request.title or request.url,
+                "url": request.url,
+                "abstract": request.page_text[:800],
+                "kind": "browser-source",
+                "source_type": "web",
+                "doi": metadata.get("doi"),
+                "arxiv_id": metadata.get("arxiv_id"),
+                "metadata_json": json.dumps(source_metadata, sort_keys=True),
+                "trust_origin": TRUST_LEVEL_UNTRUSTED,
+            }
+        )
+
+    return {
+        "captured": True,
+        "state": "captured",
+        "provider_eligible": decision.provider_eligible,
+        "event": event,
+        "source": source,
+    }
+
+def write_chat_artifact(project_root: Path, chat: dict[str, Any], messages: list[dict[str, Any]]) -> Path:
+    """Write a readable Markdown snapshot under work/chats/ (non-authoritative export).
+
+    Editing this file MUST NOT mutate SQLite (HL-ASSIST-04); it embeds chat id, message
+    range, timestamp and model/provider for traceability only.
+    """
+    chats_dir = project_root / "work" / "chats"
+    chats_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(c for c in str(chat.get("name") or "chat") if c.isalnum() or c in (" ", "_", "-")).strip() or "chat"
+    stamp = int(time.time())
+    path = chats_dir / f"{safe_name}-{stamp}.md"
+    ids = [m["id"] for m in messages]
+    model = next((m.get("model") for m in messages if m.get("model")), "")
+    provider = next((m.get("provider") for m in messages if m.get("provider")), "")
+    lines = [
+        "---",
+        f"chat_id: {chat.get('id')}",
+        f"chat_name: {chat.get('name')}",
+        f"message_range: {ids[0] if ids else ''}..{ids[-1] if ids else ''}",
+        f"message_count: {len(messages)}",
+        f"exported_at: {stamp}",
+        f"model: {model}",
+        f"provider: {provider}",
+        "authoritative: false",
+        "note: Snapshot only. Editing this file does not change the canonical SQLite chat.",
+        "---",
+        "",
+        f"# {chat.get('name')}",
+        "",
+    ]
+    for message in messages:
+        lines.append(f"## {message.get('role')}")
+        lines.append("")
+        lines.append(str(message.get("content") or ""))
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def motivating_excerpt(text: str) -> str:
+    normalized = " ".join(text.split())
+    match = re_search_case_insensitive(r"[^.?!]*save this as a source[^.?!]*[.?!]?", normalized)
+    return (match or normalized)[:500]
+
+
+def _secret_store() -> SecretStore:
+    if os.environ.get("HYDRALAB_SECRET_STORE") == "memory" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return _MEMORY_SECRET_STORE
+    return KeyringSecretStore()
+
+
+def _validate_secret_ref(provider: str, value: str) -> None:
+    if not _is_secret_ref(value):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider '{provider}' credentials must be saved as keychain:* or env:* references. "
+                "Send raw secrets to POST /api/settings/provider/secret first."
+            ),
+        )
+
+
+def _is_secret_ref(value: str) -> bool:
+    if not value:
+        return False
+    if value.startswith(RAW_SECRET_PREFIXES):
+        return False
+    if value.startswith("keychain:"):
+        suffix = value.removeprefix("keychain:")
+        return suffix.startswith("hydralab/") and bool(suffix.removeprefix("hydralab/"))
+    if value.startswith("env:"):
+        name = value.removeprefix("env:")
+        return name.replace("_", "").isalnum() and name[0].isalpha()
+    return False
+
+
+def _provider_settings_with_resolution(settings: list[dict[str, Any]], store: SecretStore) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in settings:
+        provider = str(row.get("provider") or "")
+        ref = str(row.get("api_key_ref") or row.get("secret_ref") or "")
+        copied = dict(row)
+        copied["api_key_ref"] = ref
+        copied["secret_ref"] = ref or None
+        copied["resolved"] = _secret_ref_resolved(ref, provider, store)
+        result.append(copied)
+    return result
+
+
+def _resolve_discovery_posture(request: SourceDiscoveryRequest) -> dict[str, bool]:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    privacy = settings.get("privacy", {})
+    general = settings.get("general", {})
+    offline_only = bool(privacy.get("offline_only") or general.get("offline_only") or request.offline_only)
+    stored_scholarly = bool(privacy.get("scholarly_apis_enabled", True))
+    scholarly_apis_enabled = bool(stored_scholarly and request.scholarly_apis_enabled and not offline_only)
+    return {"offline_only": offline_only, "scholarly_apis_enabled": scholarly_apis_enabled}
+
+
+def _offline_posture() -> bool:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    privacy = settings.get("privacy", {})
+    general = settings.get("general", {})
+    return bool(privacy.get("offline_only") or general.get("offline_only"))
+
+
+def _discovery_limiter_from_settings() -> ProviderRateLimiter:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    providers = settings.get("providers", {})
+    aggregate = int(providers.get("aggregate_rate", providers.get("aggregate_requests_per_second", 3)) or 3)
+    rates: dict[str, float] = {}
+    configured_rates = providers.get("rates", {})
+    if isinstance(configured_rates, dict):
+        for provider, rate in configured_rates.items():
+            try:
+                rates[str(provider)] = float(rate)
+            except (TypeError, ValueError):
+                continue
+    accounts = providers.get("accounts", {})
+    if isinstance(accounts, dict):
+        for provider, account in accounts.items():
+            if isinstance(account, dict) and "rate" in account:
+                try:
+                    rates[str(provider)] = float(account["rate"])
+                except (TypeError, ValueError):
+                    continue
+    return ProviderRateLimiter(aggregate_requests_per_second=aggregate, provider_requests_per_second=rates)
+
+
+def _secret_ref_resolved(ref: str, provider: str, store: SecretStore) -> bool:
+    if ref.startswith("env:"):
+        return os.environ.get(ref.removeprefix("env:")) is not None
+    if ref == f"keychain:hydralab/{provider}":
+        return ProviderSecretService(store).has_provider_secret(provider, "api_key")
+    return False
+
+
+def _hash_bridge_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _runtime_descriptor_path(root: Path) -> Path:
+    return Path(root) / "runtime" / "backend.json"
+
+
+def _ensure_runtime_nonce(root: Path) -> dict[str, Any]:
+    path = _runtime_descriptor_path(root)
+    try:
+        descriptor = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError:
+        descriptor = {}
+    now = time.time()
+    if not descriptor.get("handshake_nonce"):
+        descriptor["handshake_nonce"] = secrets.token_urlsafe(32)
+        descriptor["handshake_nonce_issued_at"] = now
+    descriptor.setdefault("host", HYDRALAB_BIND_HOST)
+    descriptor.setdefault("port", int(os.environ.get("HYDRALAB_PORT", str(DEFAULT_PORT))))
+    descriptor.setdefault("scheme", "http")
+    descriptor.setdefault("base_url", f"http://{descriptor['host']}:{descriptor['port']}")
+    descriptor.setdefault("api_version", "v1")
+    descriptor.setdefault("started_at", now)
+    descriptor.setdefault("health_url", f"{descriptor['base_url']}/healthz")
+    _write_owner_only_json(path, descriptor)
+    return descriptor
+
+
+def _consume_runtime_nonce(root: Path, presented_nonce: str) -> bool:
+    descriptor = _ensure_runtime_nonce(root)
+    expected = str(descriptor.get("handshake_nonce") or "")
+    issued_at = float(descriptor.get("handshake_nonce_issued_at") or 0)
+    if not expected or time.time() - issued_at > BRIDGE_NONCE_TTL_SECONDS:
+        _rotate_runtime_nonce(root, descriptor)
+        return False
+    if not hmac.compare_digest(expected, presented_nonce):
+        return False
+    _rotate_runtime_nonce(root, descriptor)
+    return True
+
+
+def _rotate_runtime_nonce(root: Path, descriptor: dict[str, Any] | None = None) -> str:
+    descriptor = descriptor or _ensure_runtime_nonce(root)
+    nonce = secrets.token_urlsafe(32)
+    descriptor["handshake_nonce"] = nonce
+    descriptor["handshake_nonce_issued_at"] = time.time()
+    _write_owner_only_json(_runtime_descriptor_path(root), descriptor)
+    return nonce
+
+
+def _write_owner_only_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.chmod(path, 0o600)
+
+def re_search_case_insensitive(pattern: str, text: str) -> str | None:
+    import re
+
+    found = re.search(pattern, text, re.I)
+    return found.group(0).strip() if found else None
+
+
+def source_id_from_discovery_result(metadata: dict[str, Any]) -> str:
+    for key in ("doi", "arxiv_id", "openalex_id", "s2_id", "url"):
+        value = metadata.get(key)
+        if value:
+            digest = hashlib.sha256(str(value).lower().encode("utf-8")).hexdigest()[:16]
+            return f"src_{key}_{digest}"
+    digest = hashlib.sha256(str(metadata.get("title") or "source").lower().encode("utf-8")).hexdigest()[:16]
+    return f"src_title_{digest}"
 
 
 def extract_upload_text(raw: bytes, content_type: str, filename: str) -> str:
@@ -511,6 +2161,123 @@ def extract_upload_text(raw: bytes, content_type: str, filename: str) -> str:
         except Exception:
             return ""
     return raw.decode("utf-8", errors="ignore").strip()
+
+
+def hydra_project_root() -> Path:
+    from hydra.database.session import get_db_url
+
+    db_url = get_db_url()
+    if db_url.startswith("sqlite+aiosqlite:///"):
+        return Path(db_url.removeprefix("sqlite+aiosqlite:///")).parent
+    return Path.cwd() / ".hydra"
+
+
+def is_project_tree_excluded(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    if not parts:
+        return False
+    if parts[0] in {".git", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules", ".venv"}:
+        return True
+    if parts[0] == ".hydralab" and len(parts) > 1 and parts[1] in {"cache", "temp", "runtime"}:
+        return True
+    return False
+
+
+def project_tree_index_status(relative_path: Path, *, is_dir: bool) -> str:
+    parts = relative_path.parts
+    suffix = relative_path.suffix.lower()
+    if parts and parts[0] == ".hydralab":
+        return "excluded"
+    if any(part in {"code", "browser", "chats"} for part in parts):
+        return "needs-consent" if is_dir else "excluded"
+    if suffix in {".md", ".markdown", ".pdf", ".docx", ".bib", ".ris", ".json", ".yaml", ".yml", ".txt"}:
+        return "indexed"
+    return "needs-consent" if is_dir else "excluded"
+
+
+def write_uploaded_original(project_root: Path, filename: str, raw: bytes) -> Path:
+    safe_name = "".join(char for char in filename if char.isalnum() or char in {".", "-", "_"}).strip(".") or "source"
+    digest = sha256_bytes(raw)[:12]
+    target = project_root / "sources" / "originals" / f"{digest}-{safe_name}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+    return target
+
+
+def sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def annotation_to_api(annotation: Annotation) -> dict[str, object]:
+    return {
+        "sidecar_record_id": annotation.sidecar_record_id,
+        "source_id": annotation.source_id,
+        "page": annotation.page,
+        "text": annotation.text,
+        "quad_points": json.loads(annotation.quad_points or "[]"),
+        "bbox": json.loads(annotation.bbox or "{}"),
+        "type": annotation.type,
+        "linked_claim_ids": json.loads(annotation.linked_claim_ids or "[]"),
+        "linked_note_ids": json.loads(annotation.linked_note_ids or "[]"),
+        "color": annotation.color,
+        "rev": annotation.rev,
+        "content_hash": annotation.content_hash,
+        "link_state": annotation.link_state,
+        "trust_origin": annotation.trust_origin,
+    }
+
+
+def extract_claim_suggestions(text: str, request: "ClaimDetectRequest") -> list[dict[str, object]]:
+    """Heuristic, suggestion-only claim candidate extraction.
+
+    Untrusted text is treated as data, not instructions (DEC-11): this only ever
+    proposes candidates and never commits a claim by itself.
+    """
+    import re as _re
+
+    sentences = [segment.strip() for segment in _re.split(r"(?<=[.!?])\s+", text) if segment.strip()]
+    suggestions: list[dict[str, object]] = []
+    for sentence in sentences:
+        words = sentence.split()
+        if len(words) < 4:
+            continue
+        confidence = min(0.9, 0.4 + 0.02 * len(words))
+        suggestions.append(
+            {
+                "claim_text": sentence,
+                "origin_quote": sentence,
+                "origin_ref": request.origin_ref,
+                "location_type": request.location_type,
+                "location_id": request.location_id,
+                "extraction_confidence": round(confidence, 3),
+                "extraction_mode": "suggested",
+                "user_selected": False,
+            }
+        )
+    return suggestions
+
+
+def _resolve_default_citation_style() -> str:
+    try:
+        settings = load_settings(app_data_root() / "settings.toml").data
+    except Exception:
+        return DEFAULT_STYLE_ID
+    citation = settings.get("citation", {}) if isinstance(settings, dict) else {}
+    workspace = settings.get("workspace", {}) if isinstance(settings, dict) else {}
+    for source in (citation, workspace):
+        if isinstance(source, dict):
+            value = source.get("default_citation_style") or source.get("citation_style")
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+    return DEFAULT_STYLE_ID
+
+
+def _writing_global_defaults() -> dict[str, object]:
+    try:
+        settings = load_settings(app_data_root() / "settings.toml").data
+    except Exception:
+        settings = None
+    return global_defaults_from_settings(settings)
 
 
 def format_bibliography(sources: list[dict[str, object]], style: str) -> str:

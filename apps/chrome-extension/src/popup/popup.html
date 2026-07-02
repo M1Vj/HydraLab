@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HydraLab Browser Bridge</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <strong>HydraLab</strong>
+        <span id="status">not-running</span>
+      </header>
+
+      <section class="permission-list" aria-label="Permission rationale">
+        <p><strong>activeTab</strong> captures only the current tab after you click Save.</p>
+        <p><strong>optional host access</strong> is requested per host when you allow it.</p>
+        <p><strong>storage</strong> keeps local host choices and the loopback runtime descriptor.</p>
+      </section>
+
+      <button id="save" class="primary">Save to HydraLab</button>
+      <label>
+        Save subset
+        <select id="subset">
+          <option value="smart-save">Smart save</option>
+          <option value="source-only">Save source only</option>
+          <option value="citation">Save as citation</option>
+          <option value="snapshot">Save page snapshot</option>
+          <option value="pdf">Save PDF</option>
+          <option value="note">Create note from page</option>
+          <option value="summarize-then-save">Summarize then save</option>
+          <option value="task">Create task from page</option>
+          <option value="full-research-packet">Save full research packet</option>
+        </select>
+      </label>
+      <button id="configure">Connect to local HydraLab</button>
+      <pre id="result" aria-live="polite"></pre>
+    </main>
+    <script type="module" src="../../dist/popup/popup.js"></script>
+  </body>
+</html>
