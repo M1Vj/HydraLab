@@ -3,14 +3,19 @@ import type { ApiClient } from "../../lib/api";
 import {
   BUILTIN_RECIPE_IDS,
   CANONICAL_STAGE_IDS,
+  ADVANCED_RUN_PRESETS,
+  buildAdvancedRunConfig,
   buildLiteratureReviewPayload,
   buildStartRunPayload,
+  buildStartAutopilotPayload,
   fetchOrchestratorStages,
   fetchRecipes,
+  startAutopilotRun,
   startLiteratureReviewRun,
   startOrchestratorRun,
   summarizeRunState,
   toggleStage,
+  validateAdvancedRunConfig,
 } from "./agentRunsController";
 
 function fakeClient(handler: (path: string, body?: unknown) => unknown): ApiClient {
@@ -169,6 +174,71 @@ describe("agent runs controller", () => {
       depth: "quick",
       semantic_search: false,
     });
+  });
+
+  test("buildAdvancedRunConfig expands presets losslessly", () => {
+    const deep = buildAdvancedRunConfig("deep");
+
+    expect(deep).toEqual(ADVANCED_RUN_PRESETS.deep);
+    expect(Object.keys(deep)).toEqual([
+      "candidate_count",
+      "population_size",
+      "compare_enabled",
+      "ranking_method",
+      "review_depth",
+      "evolution_method",
+      "validation_rules",
+      "max_loop_iterations",
+      "stop_conditions",
+      "budget_policy",
+      "checkpoint_frequency",
+    ]);
+  });
+
+  test("validateAdvancedRunConfig rejects bad values with field and allowed set within 200ms", () => {
+    const started = performance.now();
+    const result = validateAdvancedRunConfig({ ...buildAdvancedRunConfig(), population_size: 1001 });
+    const elapsed = performance.now() - started;
+
+    expect(result.state).toBe("failure");
+    expect(result.error?.field).toBe("population_size");
+    expect(result.error?.allowed).toBe("1..100");
+    expect(elapsed).toBeLessThan(200);
+  });
+
+  test("validateAdvancedRunConfig reports permission denied when Autopilot is unavailable", () => {
+    const result = validateAdvancedRunConfig(buildAdvancedRunConfig(), { autopilotEnabled: false });
+
+    expect(result.state).toBe("permission-denied");
+  });
+
+  test("buildStartAutopilotPayload includes advanced config without changing stage toggles", () => {
+    const advanced = buildAdvancedRunConfig("strict_evidence", { ranking_method: "elo" });
+    const payload = buildStartAutopilotPayload("default", { compare: false }, advanced, "strict_evidence");
+
+    expect(payload.enabled_stages.compare).toBe(false);
+    expect(payload.advanced_preset_id).toBe("strict_evidence");
+    expect(payload.advanced_config?.ranking_method).toBe("elo");
+    expect(payload.advanced_config?.validation_rules).toEqual(["typecheck", "lint", "test", "build"]);
+  });
+
+  test("startAutopilotRun posts the advanced payload when supplied", async () => {
+    const advanced = buildAdvancedRunConfig("balanced", { ranking_method: "rubric" });
+    const captured: { path: string; body: unknown } = { path: "", body: null };
+    const client = fakeClient((path, body) => {
+      captured.path = path;
+      captured.body = body;
+      return {
+        run: { id: "run-auto", status: "completed", state: "completed", project_id: "default", mode: "full_access", paused: false },
+        trace: { run_id: "run-auto", steps: [] },
+        artifacts: [],
+      };
+    });
+
+    await startAutopilotRun("default", { compare: true }, client, advanced);
+
+    expect(captured.path).toBe("/api/autonomy/runs");
+    expect(captured.body).toEqual(buildStartAutopilotPayload("default", { compare: true }, advanced));
   });
 
   test("summarizeRunState surfaces budget and offline stops", () => {
