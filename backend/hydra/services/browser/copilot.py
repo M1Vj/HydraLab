@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +19,7 @@ from hydra.services.browser.actions import (
     browser_copilot_tool_descriptors,
 )
 from hydra.services.browser.repository import BrowserActionLogRepository, BrowserHostPermissionRepository
+from hydra.services.browser.trust import route_untrusted_browser_proposal
 
 
 @dataclass
@@ -35,11 +35,6 @@ class BrowserActionResult:
     artifact: dict[str, Any] | None = None
     public_log_text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-def motivating_excerpt(text: str, limit: int = 280) -> str:
-    compact = re.sub(r"\s+", " ", text or "").strip()
-    return compact[:limit]
 
 
 class BrowserCopilotService:
@@ -222,34 +217,15 @@ class BrowserCopilotService:
         proposed_action: str,
         mode: str,
     ) -> BrowserActionResult:
-        decision = evaluate_write(
-            WriteRequest(
-                mode=mode,
-                action_kind=f"browser.{proposed_action}",
-                target_kind="browser_page",
-                target_ref=url,
-                trust_origin=TRUST_LEVEL_UNTRUSTED,
-                justification_trust=TRUST_LEVEL_UNTRUSTED,
-            )
+        reason, item = await route_untrusted_browser_proposal(
+            self.repo,
+            project_id=project_id,
+            url=url,
+            page_text=page_text,
+            proposed_action=proposed_action,
+            mode=mode,
         )
-        item = await self.repo.create_review_item(
-            {
-                "project_id": project_id,
-                "item_type": "browser-untrusted-proposal",
-                "title": "Review browser page proposal",
-                "summary": decision.reason,
-                "origin_type": "browser",
-                "origin_id": url,
-                "target_type": "browser-action",
-                "payload": {
-                    "proposed_action": proposed_action,
-                    "origin_url": url,
-                    "trust_level": TRUST_LEVEL_UNTRUSTED,
-                    "motivating_excerpt": motivating_excerpt(page_text),
-                },
-            }
-        )
-        return BrowserActionResult(outcome="review_inbox", reason=decision.reason, review_item=item)
+        return BrowserActionResult(outcome="review_inbox", reason=reason, review_item=item)
 
     async def _execute(self, request: BrowserActionRequest) -> dict[str, Any]:
         if request.action not in ACTION_BY_NAME:
