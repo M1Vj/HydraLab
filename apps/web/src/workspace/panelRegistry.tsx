@@ -11,6 +11,7 @@ import {
   Globe2,
   Inbox,
   ListTodo,
+  PenLine,
   ScrollText,
   Settings,
   Terminal,
@@ -25,6 +26,7 @@ export type PanelId =
   | "markdown-editor"
   | "pdf-reader"
   | "browser"
+  | "writing"
   | "citation-evidence"
   | "tasks"
   | "settings"
@@ -73,6 +75,7 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
   "markdown-editor": { id: "markdown-editor", title: "Markdown Editor", icon: FileText, defaultLocation: "center", singleton: false, allowMultiple: true },
   "pdf-reader": { id: "pdf-reader", title: "PDF Reader", icon: ScrollText, defaultLocation: "center", singleton: false, allowMultiple: true },
   browser: { id: "browser", title: "Browser", icon: Globe2, defaultLocation: "center", singleton: false, allowMultiple: true },
+  writing: { id: "writing", title: "Writing & Formats", icon: PenLine, defaultLocation: "center", singleton: true, allowMultiple: false },
   "citation-evidence": {
     id: "citation-evidence",
     title: "Citation & Evidence",
@@ -141,7 +144,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 76,
           selected: 0,
           enableMaximize: true,
-          children: [tab("research-chat"), tab("markdown-editor"), tab("pdf-reader"), tab("browser")],
+          children: [tab("research-chat"), tab("markdown-editor"), tab("writing"), tab("pdf-reader"), tab("browser")],
         },
         {
           type: "tabset",

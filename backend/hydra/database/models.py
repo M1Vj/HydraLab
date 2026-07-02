@@ -483,6 +483,26 @@ class SourceMergeRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class DocxArtifact(SQLModel, table=True):
+    __tablename__ = "docx_artifacts"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    manuscript: str = Field(default="", index=True)
+    kind: str = Field(default="export")  # import | export | availability
+    converter_adapter: str = Field(default="")
+    converter_version: str = Field(default="")
+    availability_status: str = Field(default="unavailable")  # available | unavailable
+    setup_error: str = Field(default="")
+    status: str = Field(default="")  # success | failed | rejected | unavailable
+    source_path: Optional[str] = Field(default=None)
+    output_path: Optional[str] = Field(default=None)
+    error_detail: str = Field(default="")
+    flags_json: str = Field(default="[]")
+    metadata_json: str = Field(default="{}")
+    trust_origin: str = Field(default="user")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class MigrationIdMap(SQLModel, table=True):
     __tablename__ = "migration_id_maps"
     id: str = Field(default_factory=uuid_text, primary_key=True)

@@ -43,6 +43,7 @@ from hydra.schemas import (
     SourceMergeRequest,
     SourceTrashRequest,
     SourceUnmergeRequest,
+    ManuscriptExportRequest,
     NoteCreateRequest,
     NoteFileSaveRequest,
     NoteSuggestionRequest,
@@ -81,6 +82,12 @@ from hydra.services.citations import (
     CslRenderer,
     CslRenderError,
     resolve_manuscript_style,
+)
+from hydra.services.docx import DocxPackageError, DocxService, detect_latex_toolchain
+from hydra.services.writing import (
+    global_defaults_from_settings,
+    list_manuscripts,
+    resolve_manuscript_format,
 )
 from hydra.services.ingestion import IngestionService
 from hydra.services.ingestion.safety import validate_source_file
@@ -638,6 +645,138 @@ def create_app() -> FastAPI:
         result = review_text(request.text)
         await repo.add_event("writing.review.completed", "Reviewed draft text")
         return result
+
+    @app.get("/api/writing/format-defaults")
+    async def get_format_defaults() -> dict[str, object]:
+        return {"defaults": _writing_global_defaults()}
+
+    @app.get("/api/writing/manuscripts")
+    async def get_manuscripts() -> dict[str, object]:
+        return {"manuscripts": list_manuscripts(hydra_project_root())}
+
+    @app.get("/api/writing/manuscripts/{manuscript}/format")
+    async def get_manuscript_format(manuscript: str) -> dict[str, object]:
+        resolved = resolve_manuscript_format(hydra_project_root(), manuscript, _writing_global_defaults())
+        return {
+            "manuscript": manuscript,
+            "format": resolved.format.model_dump(),
+            "validation_error": resolved.validation_error,
+            "source": resolved.source,
+        }
+
+    @app.get("/api/writing/latex/availability")
+    async def get_latex_availability() -> dict[str, object]:
+        return detect_latex_toolchain()
+
+    @app.get("/api/writing/docx/availability")
+    async def get_docx_availability(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        availability = DocxService().detect()
+        await repo.record_docx_artifact(
+            kind="availability",
+            converter_adapter=availability.adapter,
+            converter_version=availability.version,
+            availability_status=availability.status,
+            setup_error=availability.setup_error,
+            status=availability.status,
+        )
+        return {
+            "adapter": availability.adapter,
+            "version": availability.version,
+            "availability_status": availability.status,
+            "available": availability.available,
+            "setup_error": availability.setup_error,
+        }
+
+    @app.post("/api/writing/docx/import")
+    async def import_docx(
+        file: UploadFile = File(...),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        temp_dir = project_root / ".hydralab" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(c for c in (file.filename or "import.docx") if c.isalnum() or c in {".", "-", "_"}) or "import.docx"
+        staged = temp_dir / f"{secrets.token_hex(6)}-{safe_name}"
+        staged.write_bytes(await file.read())
+        try:
+            result = DocxService().import_docx(staged)
+        finally:
+            staged.unlink(missing_ok=True)
+        await repo.record_docx_artifact(
+            kind="import",
+            converter_adapter=result.converter.adapter if result.converter else "none",
+            converter_version=result.converter.version if result.converter else "",
+            availability_status=result.converter.status if result.converter else "unavailable",
+            setup_error=result.converter.setup_error if result.converter else "",
+            status=result.status,
+            source_path=file.filename,
+            error_detail=result.error_detail,
+            flags_json=json.dumps(result.flagged_active_content),
+            metadata_json=json.dumps(result.metadata),
+        )
+        if result.status == "unavailable":
+            raise HTTPException(status_code=503, detail={"reason": "converter-unavailable", "message": result.error_detail})
+        if result.status == "rejected":
+            raise HTTPException(status_code=422, detail={"reason": "package-validation", "message": result.error_detail})
+        if result.status == "failed":
+            raise HTTPException(status_code=422, detail={"reason": "import-failed", "message": result.error_detail})
+        return {
+            "status": result.status,
+            "content": result.content,
+            "metadata": result.metadata,
+            "flagged_active_content": result.flagged_active_content,
+        }
+
+    @app.post("/api/writing/manuscripts/{manuscript}/export")
+    async def export_manuscript(
+        manuscript: str,
+        request: ManuscriptExportRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        project_root = hydra_project_root()
+        resolved = resolve_manuscript_format(project_root, manuscript, _writing_global_defaults())
+
+        bibliography: list[str] | None = None
+        if request.include_bibliography:
+            sources = await repo.list_sources()
+            items = [s["csl_json"] for s in sources if isinstance(s.get("csl_json"), dict) and s.get("csl_json")]
+            if items:
+                renderer = CslRenderer(default_style=_resolve_default_citation_style())
+                try:
+                    bibliography = renderer.render_bibliography(items, resolved.format.citation_style)
+                except CslRenderError:
+                    bibliography = None
+
+        result = DocxService().export_manuscript(
+            project_root,
+            manuscript,
+            request.source_file,
+            resolved.format,
+            bibliography=bibliography,
+            output_name=request.output_name,
+        )
+        await repo.record_docx_artifact(
+            kind="export",
+            manuscript=manuscript,
+            project_id=request.project_id,
+            converter_adapter=result.converter.adapter if result.converter else "none",
+            converter_version=result.converter.version if result.converter else "",
+            availability_status=result.converter.status if result.converter else "unavailable",
+            setup_error=result.converter.setup_error if result.converter else "",
+            status=result.status,
+            source_path=request.source_file,
+            output_path=result.output_path,
+            error_detail=result.error_detail,
+        )
+        if result.status == "unavailable":
+            raise HTTPException(status_code=503, detail={"reason": "converter-unavailable", "message": result.error_detail})
+        if result.status == "failed":
+            raise HTTPException(status_code=422, detail={"reason": "export-failed", "message": result.error_detail})
+        await repo.add_event("writing.docx.exported", f"Exported manuscript {manuscript} to DOCX")
+        return {"status": result.status, "output_path": result.output_path, "format": resolved.format.model_dump()}
 
     @app.post("/api/evidence")
     async def create_evidence(request: EvidenceCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -1567,6 +1706,14 @@ def _resolve_default_citation_style() -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip().lower()
     return DEFAULT_STYLE_ID
+
+
+def _writing_global_defaults() -> dict[str, object]:
+    try:
+        settings = load_settings(app_data_root() / "settings.toml").data
+    except Exception:
+        settings = None
+    return global_defaults_from_settings(settings)
 
 
 def format_bibliography(sources: list[dict[str, object]], style: str) -> str:

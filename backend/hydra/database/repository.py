@@ -31,6 +31,7 @@ from hydra.database.models import (
     Annotation,
     BrowserEvent,
     Chat,
+    DocxArtifact,
     KgEdge,
     LexicalIndexEntry,
     ReviewItem,
@@ -899,6 +900,30 @@ class Repository:
         await self.session.commit()
         await self.session.refresh(event)
         return self._to_dict(event)
+
+    async def record_docx_artifact(self, **fields: Any) -> dict[str, Any]:
+        artifact = DocxArtifact(**fields)
+        self.session.add(artifact)
+        await self.session.commit()
+        await self.session.refresh(artifact)
+        return self._to_dict(artifact)
+
+    async def list_docx_artifacts(
+        self, manuscript: Optional[str] = None, kind: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        q = select(DocxArtifact)
+        if manuscript:
+            q = q.where(DocxArtifact.manuscript == manuscript)
+        if kind:
+            q = q.where(DocxArtifact.kind == kind)
+        q = q.order_by(DocxArtifact.created_at.desc())
+        res = await self.session.exec(q)
+        return self._to_dict_list(res.all())
+
+    async def latest_docx_availability(self) -> Optional[dict[str, Any]]:
+        q = select(DocxArtifact).where(DocxArtifact.kind == "availability").order_by(DocxArtifact.created_at.desc())
+        res = await self.session.exec(q)
+        return self._to_dict(res.first())
 
     async def upsert_browser_event(self, event_data: dict[str, Any]) -> dict[str, Any]:
         q = select(BrowserEvent).where(

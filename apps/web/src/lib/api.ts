@@ -431,3 +431,90 @@ export function scanReferentialIntegrity(projectId?: string, client: ApiClient =
   const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
   return client.post(`/api/refint/scan${query}`);
 }
+
+// --- Writing / manuscript formats / DOCX (branch 01-12) ---------------------
+
+export type ManuscriptFormat = {
+  citation_style: string;
+  font_family: string;
+  font_size: string;
+  line_spacing: number;
+  paragraph_spacing: string;
+  margins: string;
+  page_size: string;
+  orientation: string;
+  heading_numbering: boolean;
+  title_page: boolean;
+  abstract: boolean;
+  columns: number;
+  figure_caption: string;
+  table_caption: string;
+  reference_format: string;
+  page_numbers: boolean;
+  headers_footers: boolean;
+  manuscript_template: string;
+  docx_template: string;
+};
+
+export type ManuscriptFormatResponse = {
+  manuscript: string;
+  format: ManuscriptFormat;
+  validation_error: { key: string; message: string } | null;
+  source: "global" | "merged" | string;
+};
+
+export type DocxAvailabilityResponse = {
+  adapter: string;
+  version: string;
+  availability_status: "available" | "unavailable" | string;
+  available: boolean;
+  setup_error: string;
+};
+
+export type LatexAvailabilityResponse = {
+  available: boolean;
+  toolchain: string;
+  path: string;
+  setup_error: string;
+};
+
+export type DocxImportResponse = {
+  status: string;
+  content: string;
+  metadata: Record<string, string>;
+  flagged_active_content: string[];
+};
+
+export type ManuscriptExportResponse = {
+  status: string;
+  output_path: string | null;
+  format: ManuscriptFormat;
+};
+
+export function listManuscripts(client: ApiClient = api): Promise<{ manuscripts: string[] }> {
+  return client.get("/api/writing/manuscripts");
+}
+
+export function getFormatDefaults(client: ApiClient = api): Promise<{ defaults: ManuscriptFormat }> {
+  return client.get("/api/writing/format-defaults");
+}
+
+export function getManuscriptFormat(manuscript: string, client: ApiClient = api): Promise<ManuscriptFormatResponse> {
+  return client.get(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/format`);
+}
+
+export function getDocxAvailability(client: ApiClient = api): Promise<DocxAvailabilityResponse> {
+  return client.get("/api/writing/docx/availability");
+}
+
+export function getLatexAvailability(client: ApiClient = api): Promise<LatexAvailabilityResponse> {
+  return client.get("/api/writing/latex/availability");
+}
+
+export function exportManuscript(
+  manuscript: string,
+  input: { source_file: string; output_name?: string; include_bibliography?: boolean; project_id?: string | null },
+  client: ApiClient = api,
+): Promise<ManuscriptExportResponse> {
+  return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/export`, input);
+}
