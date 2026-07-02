@@ -841,6 +841,92 @@ export type ManuscriptExportResponse = {
   format: ManuscriptFormat;
 };
 
+export type ManuscriptSection = {
+  title: string;
+  content: string;
+  authorship: "human" | "assistant" | string;
+};
+
+export type ManuscriptFigure = {
+  id: string;
+  path: string;
+  caption: string;
+  number: number;
+  label?: string;
+};
+
+export type ManuscriptTable = {
+  id: string;
+  caption: string;
+  markdown: string;
+  number: number;
+  label?: string;
+};
+
+export type ManuscriptDocumentModel = {
+  manuscript_id: string;
+  source_dir: string;
+  format: ManuscriptFormat;
+  template_id: string;
+  sections: ManuscriptSection[];
+  figures: ManuscriptFigure[];
+  tables: ManuscriptTable[];
+  citation_keys: string[];
+  references: Record<string, Record<string, unknown>>;
+  source_files: string[];
+  include_paths: string[];
+  authorship_ledger: Array<{ section: string; authorship: string }>;
+};
+
+export type ManuscriptValidation = {
+  unresolved_citation_keys: string[];
+  missing_metadata: Array<{ citation_key: string; missing_fields: string }>;
+  has_issues: boolean;
+};
+
+export type ManuscriptRedactionItem = {
+  id: string;
+  category: string;
+  path: string;
+  reason: string;
+  decision: string;
+};
+
+export type ManuscriptRedaction = {
+  items: ManuscriptRedactionItem[];
+  has_unresolved: boolean;
+};
+
+export type ManuscriptPackageOutput = {
+  target: string;
+  status: string;
+  path: string | null;
+  message: string;
+  download_path: string | null;
+};
+
+export type ManuscriptGateResult = {
+  status: string;
+  applied: boolean;
+  risk_level: string;
+  reason: string;
+  audit_id: string;
+  checkpoint_id?: string | null;
+  review_item_id?: string | null;
+  approval_id?: string | null;
+};
+
+export type ManuscriptPackageResponse = {
+  status: string;
+  document: ManuscriptDocumentModel;
+  validation: ManuscriptValidation;
+  redaction: ManuscriptRedaction;
+  outputs: Record<string, ManuscriptPackageOutput>;
+  package_dir: string | null;
+  manifest_path: string;
+  gate: ManuscriptGateResult | null;
+};
+
 export function listManuscripts(client: ApiClient = api): Promise<{ manuscripts: string[] }> {
   return client.get("/api/writing/manuscripts");
 }
@@ -867,6 +953,38 @@ export function exportManuscript(
   client: ApiClient = api,
 ): Promise<ManuscriptExportResponse> {
   return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/export`, input);
+}
+
+export function getManuscriptExportPreview(
+  manuscript: string,
+  projectId = "default",
+  client: ApiClient = api,
+): Promise<ManuscriptPackageResponse> {
+  return client.get(
+    `/api/writing/manuscripts/${encodeURIComponent(manuscript)}/export-preview?project_id=${encodeURIComponent(projectId)}`,
+  );
+}
+
+export function createManuscriptPackage(
+  manuscript: string,
+  input: {
+    approval_id?: string | null;
+    targets?: Array<"docx" | "latex" | "html" | "pdf">;
+    acknowledge_citation_issues?: boolean;
+    acknowledged_redaction_item_ids?: string[];
+    project_id?: string;
+  },
+  client: ApiClient = api,
+): Promise<ManuscriptPackageResponse> {
+  return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/package`, input);
+}
+
+export function submitManuscriptPackage(
+  manuscript: string,
+  input: { venue: string; approval_id?: string | null; project_id?: string },
+  client: ApiClient = api,
+): Promise<{ status: string; gate: ManuscriptGateResult }> {
+  return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/submit`, input);
 }
 
 // --- DOCX OpenXML assisted edits (branch 02-08, Phase 2) --------------------

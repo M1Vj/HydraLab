@@ -6,7 +6,9 @@ import {
   API_BASE_URL,
   HydraApiError,
   applyDocxEditPlan,
+  createManuscriptPackage,
   exportManuscript,
+  getManuscriptExportPreview,
   getDocxAvailability,
   getDocxEditPlan,
   getFormatDefaults,
@@ -22,15 +24,18 @@ import {
   type LatexAvailabilityResponse,
   type ManuscriptFormat,
   type ManuscriptFormatResponse,
+  type ManuscriptPackageResponse,
 } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
 import { EmptyState, FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import {
   allowedDocxActions,
   docxActionState,
+  exportPreviewState,
   formatRows,
   formatValidationMessage,
   latexCompileState,
+  manuscriptPackageBlockers,
 } from "./writingFormats";
 import {
   approvedOperations,
@@ -70,12 +75,23 @@ export function WritingPanel({ announce }: PanelComponentProps) {
   const [planError, setPlanError] = useState<Error | null>(null);
   const [planNotice, setPlanNotice] = useState("");
 
+  const [preview, setPreview] = useState<ManuscriptPackageResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<Error | null>(null);
+  const [ackCitationIssues, setAckCitationIssues] = useState(false);
+  const [ackRedactions, setAckRedactions] = useState<string[]>([]);
+  const [approvalId, setApprovalId] = useState("");
+  const [packageNotice, setPackageNotice] = useState("");
+
   useEffect(() => {
     void bootstrap();
   }, []);
 
   useEffect(() => {
-    if (active) void loadFormat(active);
+    if (active) {
+      void loadFormat(active);
+      void loadExportPreview(active);
+    }
   }, [active]);
 
   useEffect(() => {
@@ -120,6 +136,22 @@ export function WritingPanel({ announce }: PanelComponentProps) {
       setFormatResponse(await getManuscriptFormat(name));
     } catch (caught) {
       setError(caught instanceof Error ? caught : new Error(String(caught)));
+    }
+  }
+
+  async function loadExportPreview(name: string) {
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setPackageNotice("");
+    setAckCitationIssues(false);
+    setAckRedactions([]);
+    try {
+      setPreview(await getManuscriptExportPreview(name));
+    } catch (caught) {
+      setPreview(null);
+      setPreviewError(caught instanceof Error ? caught : new Error(String(caught)));
+    } finally {
+      setPreviewLoading(false);
     }
   }
 
@@ -211,6 +243,35 @@ export function WritingPanel({ announce }: PanelComponentProps) {
     }
   }
 
+  async function onCreatePackage() {
+    if (!active) return;
+    setPackageNotice("");
+    try {
+      const result = await createManuscriptPackage(active, {
+        approval_id: approvalId.trim() || null,
+        targets: ["docx", "latex", "html", "pdf"],
+        acknowledge_citation_issues: ackCitationIssues,
+        acknowledged_redaction_item_ids: ackRedactions,
+      });
+      setPreview(result);
+      if (result.status === "created") {
+        setPackageNotice(`Package created at ${result.package_dir}`);
+        announce("Manuscript package created");
+      } else if (result.status === "approval_required") {
+        setPackageNotice(`Approval required${result.gate?.approval_id ? `: ${result.gate.approval_id}` : ""}`);
+      } else if (result.status === "validation_blocked") {
+        setPackageNotice("Package blocked by citation validation.");
+      } else if (result.status === "redaction_blocked") {
+        setPackageNotice("Package blocked by redaction decisions.");
+      } else {
+        setPackageNotice(`Package status: ${result.status}`);
+      }
+    } catch (caught) {
+      const message = caught instanceof HydraApiError ? caught.message : String(caught);
+      setPackageNotice(`Package failed: ${message}`);
+    }
+  }
+
   function stageRelatedWorkSuggestion(detail?: RelatedWorkSuggestionDetail) {
     const traceLinks = detail?.trace_links ?? [
       {
@@ -234,6 +295,14 @@ export function WritingPanel({ announce }: PanelComponentProps) {
 
   const converterState = useMemo(() => docxActionState(docx), [docx]);
   const compileState = useMemo(() => latexCompileState(latex), [latex]);
+  const manuscriptPreviewState = useMemo(
+    () => exportPreviewState({ active, loading: previewLoading, error: previewError, preview }),
+    [active, previewLoading, previewError, preview],
+  );
+  const packageBlockers = useMemo(
+    () => manuscriptPackageBlockers(preview, ackCitationIssues, ackRedactions),
+    [preview, ackCitationIssues, ackRedactions],
+  );
   const planState = useMemo(
     () => docxPlanUiState({ loading: planLoading, error: planError, plan }),
     [planLoading, planError, plan],
@@ -409,6 +478,131 @@ export function WritingPanel({ announce }: PanelComponentProps) {
               <pre className="docx-content" style={{ whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto" }}>
                 {imported.content}
               </pre>
+            </div>
+          )}
+        </section>
+
+        <section aria-label="Export package preview">
+          <h3>Export package preview</h3>
+          {manuscriptPreviewState === "loading" && <LoadingState title="Loading export preview" />}
+          {manuscriptPreviewState === "failure" && previewError && (
+            <FailureState error={previewError} onRetry={() => active && void loadExportPreview(active)} />
+          )}
+          {manuscriptPreviewState === "empty" && (
+            <EmptyState title="No export preview" message="Select a manuscript with working sources to preview its package." />
+          )}
+          {manuscriptPreviewState === "ready" && preview && (
+            <div className="manuscript-export-preview" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="docx-plan-meta" role="status">
+                <span>Template: {preview.document.template_id}</span>
+                <span> · Sections: {preview.document.sections.length}</span>
+                <span> · Figures: {preview.document.figures.length}</span>
+                <span> · Tables: {preview.document.tables.length}</span>
+                <span> · Citations: {preview.document.citation_keys.length}</span>
+              </div>
+
+              {preview.validation.has_issues ? (
+                <div className="panel-state failure" role="alert">
+                  <AlertTriangle size={16} aria-hidden />
+                  <div>
+                    <strong>Citation validation</strong>
+                    {preview.validation.unresolved_citation_keys.length > 0 && (
+                      <div>Unresolved: {preview.validation.unresolved_citation_keys.join(", ")}</div>
+                    )}
+                    {preview.validation.missing_metadata.length > 0 && (
+                      <div>
+                        Missing metadata:{" "}
+                        {preview.validation.missing_metadata.map((item) => `${item.citation_key} (${item.missing_fields})`).join(", ")}
+                      </div>
+                    )}
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={ackCitationIssues}
+                        onChange={(event) => setAckCitationIssues(event.target.checked)}
+                      />{" "}
+                      Acknowledge citation issues
+                    </label>
+                  </div>
+                </div>
+              ) : (
+                <div className="panel-state" role="status">
+                  <Check size={16} aria-hidden /> Citation validation clear
+                </div>
+              )}
+
+              <div className="redaction-list" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <strong>Redaction decisions</strong>
+                {preview.redaction.items.length === 0 ? (
+                  <span>No redaction hazards detected.</span>
+                ) : (
+                  preview.redaction.items.map((item) => (
+                    <label key={item.id} className="panel-state failure">
+                      <input
+                        type="checkbox"
+                        checked={ackRedactions.includes(item.id)}
+                        onChange={(event) => {
+                          setAckRedactions((current) =>
+                            event.target.checked ? [...current, item.id] : current.filter((id) => id !== item.id),
+                          );
+                        }}
+                      />
+                      <span>
+                        {item.category}: {item.path} — {item.reason}
+                      </span>
+                    </label>
+                  ))
+                )}
+              </div>
+
+              <div className="authorship-ledger" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <strong>Authorship ledger</strong>
+                {preview.document.authorship_ledger.map((entry) => (
+                  <span key={entry.section}>
+                    {entry.section}: {entry.authorship}
+                  </span>
+                ))}
+              </div>
+
+              {preview.outputs && Object.keys(preview.outputs).length > 0 && (
+                <div className="docx-view" aria-label="Package outputs">
+                  <h4>Package outputs</h4>
+                  <dl>
+                    {Object.values(preview.outputs).map((output) => (
+                      <div key={output.target}>
+                        <dt>{output.target}</dt>
+                        <dd>
+                          {output.status}
+                          {output.message ? ` · ${output.message}` : ""}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                  {preview.manifest_path && <small>Manifest: {preview.manifest_path}</small>}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <label>
+                  Approval id{" "}
+                  <input
+                    type="text"
+                    value={approvalId}
+                    placeholder={preview.gate?.approval_id ?? "pending approval id"}
+                    onChange={(event) => setApprovalId(event.target.value)}
+                    aria-label="Package approval id"
+                  />
+                </label>
+                <button onClick={() => void onCreatePackage()} disabled={packageBlockers.length > 0}>
+                  <Download size={14} aria-hidden /> {approvalId.trim() ? "Create package" : "Request package approval"}
+                </button>
+                {packageBlockers.length > 0 && <span className="status-pill">blocked: {packageBlockers.join(", ")}</span>}
+              </div>
+              {packageNotice && (
+                <div className="panel-state" role="status">
+                  <span>{packageNotice}</span>
+                </div>
+              )}
             </div>
           )}
         </section>
