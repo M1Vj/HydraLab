@@ -40,6 +40,14 @@ This register is the operational home of the spec Section 37 dependency licensin
 | FlexLayout (flexlayout-react) | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Docking workbench layout (Sections 4.2, 6). |
 | Radix primitives | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Accessible UI primitives (Section 6). |
 | shadcn | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Used as codegen patterns/components, not a fixed theme (Section 6). |
+| zustand | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Workbench layout persistence store (`hydralab-workspace`) with versioned migrate fallback. |
+| cmdk | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Keyboard-first command palette surface inside Radix dialog. |
+| Tailwind CSS / @tailwindcss/vite | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Utility/CSS build integration for HydraLab-owned design tokens. |
+| class-variance-authority | Apache-2.0 | none | bundled-dependency | Permissive; ships freely. | cleared | Small utility for variant-driven UI classes where needed. |
+| clsx | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Conditional class-name utility. |
+| tailwind-merge | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Tailwind class merge helper for local UI primitives. |
+| @tanstack/react-virtual | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Virtualized Explorer rows for large project trees. |
+| @playwright/test | Apache-2.0 | none | dev-tool | Test runner only; not shipped. | cleared | Browser E2E verification for workbench docking, persistence and command flows. |
 | pypdf | BSD-3-Clause | none | bundled-dependency | Permissive; ships freely. | cleared | Default permissive text-extraction lib (Section 37.6). |
 | pdfminer.six | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Default permissive text-extraction lib. |
 | pdfplumber | MIT | none | bundled-dependency | Permissive; ships freely. | cleared | Default permissive text/table/page-utility lib. |
