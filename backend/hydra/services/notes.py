@@ -231,6 +231,18 @@ class NoteFileService:
         rel_path = _safe_relative_path(row.relative_path)
         self._assert_note_path_allowed(rel_path)
         path = self.project_root / rel_path
+
+        # Conflict guard: if the file on disk changed since we last synced it
+        # (an external editor or process wrote it), overwriting would silently
+        # destroy those changes. Preserve the on-disk version in a recovery
+        # journal first so nothing is lost, then let the explicit save proceed.
+        recovery_journal_id: str | None = None
+        if row.content_hash and path.exists():
+            on_disk = path.read_text()
+            if _sha256_text(on_disk) != row.content_hash and on_disk != content:
+                journal = self.write_recovery_journal(note_id, rel_path, on_disk)
+                recovery_journal_id = journal.name.split(".", 1)[0]
+
         _atomic_write(path, content)
         frontmatter, frontmatter_body, _rest = _split_frontmatter(content)
         object_type = "draft" if _is_draft_path(row.relative_path) else "note"
@@ -244,7 +256,9 @@ class NoteFileService:
         await self.session.commit()
         await self.session.refresh(row)
         await self.reindex_note(row.id)
-        return self._note_payload(row, content, object_type)
+        payload = self._note_payload(row, content, object_type)
+        payload["recovery_journal_id"] = recovery_journal_id
+        return payload
 
     async def reindex_note(self, note_id: str) -> list[KgEdge]:
         row = await self.session.get(Note, note_id)

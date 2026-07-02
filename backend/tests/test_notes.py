@@ -189,6 +189,43 @@ async def test_accept_recovery_rejects_traversal_journal_id(session: AsyncSessio
 
 
 @pytest.mark.asyncio
+async def test_save_note_journals_external_change_before_overwriting(session: AsyncSession, tmp_path: Path):
+    path = tmp_path / "knowledge" / "Methods.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nnote_id: n-methods\ntitle: Methods\n---\n\nOriginal\n")
+    service = NoteFileService(session, tmp_path)
+    opened = await service.open_note("knowledge/Methods.md", project_id="p1")
+
+    # An external editor rewrites the file after it was opened here.
+    path.write_text("---\nnote_id: n-methods\ntitle: Methods\n---\n\nExternal edit\n")
+
+    saved = await service.save_note(
+        opened["id"], "---\nnote_id: n-methods\ntitle: Methods\n---\n\nMy buffer\n"
+    )
+
+    # The explicit save wins on disk, but the external version is preserved.
+    assert path.read_text().endswith("My buffer\n")
+    assert saved["recovery_journal_id"]
+    journals = service.list_recovery_journals()
+    assert any("External edit" in journal["content"] for journal in journals)
+
+
+@pytest.mark.asyncio
+async def test_save_note_writes_no_journal_when_disk_is_unchanged(session: AsyncSession, tmp_path: Path):
+    path = tmp_path / "knowledge" / "Notes.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nnote_id: n-notes\ntitle: Notes\n---\n\nOriginal\n")
+    service = NoteFileService(session, tmp_path)
+    opened = await service.open_note("knowledge/Notes.md", project_id="p1")
+
+    saved = await service.save_note(
+        opened["id"], "---\nnote_id: n-notes\ntitle: Notes\n---\n\nEdited normally\n"
+    )
+    assert saved["recovery_journal_id"] is None
+    assert service.list_recovery_journals() == []
+
+
+@pytest.mark.asyncio
 async def test_hl_trust_08_untrusted_buffer_routes_suggestion_to_review_inbox(session: AsyncSession, tmp_path: Path):
     service = NoteFileService(session, tmp_path)
     note_path = tmp_path / "knowledge" / "Captured.md"
