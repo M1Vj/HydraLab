@@ -59,6 +59,11 @@ from hydra.schemas import (
     NoteUpdateRequest,
     ProviderSettingsRequest,
     ProviderSecretRequest,
+    ExperimentRunCreateRequest,
+    ExperimentApprovalRequest,
+    ExperimentStartRequest,
+    ExperimentEnableExecutionRequest,
+    ExperimentCloudBudgetRequest,
     McpServerRegisterRequest,
     McpServerEnableRequest,
     McpToolPermissionRequest,
@@ -192,9 +197,13 @@ from hydra.agents.policy import InvalidModeError, VALID_MODES, normalize_mode
 from hydra.agents.runs import RunBudget as AgentRunBudget
 from hydra.agents.runs import RunRepository
 from hydra.agents.approvals import ApprovalService, to_contract
-from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
+from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun, ExperimentRun
 from hydra.autonomy.audit import AuditLedger
 from hydra.autonomy.loop import AutopilotLoop
+from hydra.compute.registry import BackendNotSelectableError, ComputeRegistry
+from hydra.experiments.approval import ExperimentExecutionGate
+from hydra.experiments.logs import RunLogStore
+from hydra.experiments.runner import ExperimentRunner, RunLifecycleError
 from hydra.autonomy.policy import (
     AutonomyPolicy,
     AutonomyPolicyError,
@@ -1595,6 +1604,184 @@ def create_app() -> FastAPI:
             },
             "trace": trace.public_dict(),
             "artifacts": json.loads(run.artifacts or "[]"),
+        }
+
+    # --- Phase-3 experiment execution & compute (branch 03-03) --------------
+    def _experiment_run_dict(run: ExperimentRun) -> dict[str, object]:
+        return {
+            "id": run.id,
+            "project_id": run.project_id,
+            "backend_id": run.backend_id,
+            "label": run.label,
+            "status": run.status,
+            "reason": run.reason,
+            "config": json.loads(run.config_json or "{}"),
+            "checkpoint_ref": run.checkpoint_ref,
+            "metrics": json.loads(run.metrics_json or "{}"),
+            "artifact_manifest": json.loads(run.artifact_manifest_json or "{}"),
+            "trust_origin": run.trust_origin,
+            "enforcement": run.enforcement,
+            "exit_code": run.exit_code,
+            "approval_id": run.approval_id,
+            "review_item_id": run.review_item_id,
+            "created_at": run.created_at.timestamp(),
+            "ended_at": run.ended_at.timestamp() if run.ended_at else None,
+        }
+
+    @app.get("/api/compute/backends")
+    async def list_compute_backends(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        backends = await ComputeRegistry(session).list_backends()
+        return {
+            "backends": [
+                {
+                    "id": backend.id,
+                    "kind": backend.kind,
+                    "display_name": backend.display_name,
+                    "enabled": backend.enabled,
+                    "capabilities": json.loads(backend.capabilities_json or "{}"),
+                    "default_limits": json.loads(backend.default_limits_json or "{}"),
+                }
+                for backend in backends
+            ]
+        }
+
+    @app.get("/api/experiments/execution")
+    async def get_experiment_execution(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        setting = await ExperimentExecutionGate(session).get_setting(project_id)
+        return {
+            "project_id": project_id,
+            "execution_enabled": setting.execution_enabled,
+            "cloud_budget_usd": setting.cloud_budget_usd,
+            "cloud_spend_approved": setting.cloud_spend_approved,
+        }
+
+    @app.post("/api/experiments/execution/enable")
+    async def enable_experiment_execution(
+        request: ExperimentEnableExecutionRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        setting = await ExperimentExecutionGate(session).enable_execution(request.project_id, request.enabled)
+        return {"project_id": request.project_id, "execution_enabled": setting.execution_enabled}
+
+    @app.post("/api/experiments/cloud-budget")
+    async def set_experiment_cloud_budget(
+        request: ExperimentCloudBudgetRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        setting = await ExperimentExecutionGate(session).set_cloud_budget(
+            request.project_id, budget_usd=request.budget_usd, spend_approved=request.spend_approved
+        )
+        return {
+            "project_id": request.project_id,
+            "cloud_budget_usd": setting.cloud_budget_usd,
+            "cloud_spend_approved": setting.cloud_spend_approved,
+        }
+
+    @app.get("/api/experiments/runs")
+    async def list_experiment_runs(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        res = await session.exec(
+            select(ExperimentRun)
+            .where(ExperimentRun.project_id == project_id)
+            .order_by(ExperimentRun.created_at.desc())
+        )
+        return {"runs": [_experiment_run_dict(run) for run in res.all()]}
+
+    @app.post("/api/experiments/runs")
+    async def create_experiment_run(
+        request: ExperimentRunCreateRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        proposal = await runner.create_run(
+            project_id=request.project_id,
+            backend_id=request.backend_id,
+            config=request.config,
+            label=request.label,
+            trust_origin=request.trust_origin,
+            justification_trust=request.justification_trust,
+        )
+        return {
+            "run": _experiment_run_dict(proposal.run),
+            "approval_id": proposal.approval_id,
+            "review_item_id": proposal.review_item_id,
+        }
+
+    @app.get("/api/experiments/runs/{run_id}")
+    async def get_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await session.get(ExperimentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="experiment run not found")
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/approve")
+    async def approve_experiment_run(
+        run_id: str, request: ExperimentApprovalRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            await runner.approve_run(run_id, decision=request.decision)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        run = await session.get(ExperimentRun, run_id)
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/start")
+    async def start_experiment_run(
+        run_id: str, request: ExperimentStartRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.start_run(run_id, argv=request.argv)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except BackendNotSelectableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/pause")
+    async def pause_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.pause_run(run_id)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/cancel")
+    async def cancel_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.cancel_run(run_id)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/rollback")
+    async def rollback_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.rollback_run(run_id)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.get("/api/experiments/runs/{run_id}/logs")
+    async def get_experiment_run_logs(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        rows = await RunLogStore(session).read(run_id)
+        return {
+            "logs": [
+                {
+                    "id": row.id,
+                    "run_id": row.run_id,
+                    "stream": row.stream,
+                    "seq": row.seq,
+                    "content": row.content,
+                    "truncated": row.truncated,
+                    "created_at": row.created_at.timestamp(),
+                }
+                for row in rows
+            ]
         }
 
     # ------------------------------------------- idea recipe (02-06, HL-ASSIST-*)
