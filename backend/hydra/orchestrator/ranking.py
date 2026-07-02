@@ -36,6 +36,18 @@ _ELO_BASE = 1000.0
 _ELO_K = 32.0
 
 
+def _as_float(*values: Any) -> float:
+    """First value coercible to float, else 0.0 — never raises on bad input."""
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def _stable_unit(seed: str) -> float:
     """Deterministic value in [0, 100) derived from a string (no RNG)."""
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
@@ -46,7 +58,7 @@ def _criteria(candidate: dict[str, Any]) -> dict[str, float]:
     """Three deterministic, intentionally non-collinear criteria in [0, 100]."""
     candidate_id = str(candidate.get("id") or "")
     title = str(candidate.get("title") or "")
-    impact = float(candidate.get("base_score") or candidate.get("score") or 0)
+    impact = _as_float(candidate.get("base_score"), candidate.get("score"))
     # Feasibility rewards concise, actionable titles; novelty is a stable hash so
     # it is uncorrelated with impact/feasibility, which is what lets the methods
     # disagree on order.

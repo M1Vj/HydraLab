@@ -45,9 +45,9 @@ class SyncExclusionFilter:
         name = PurePosixPath(path).name
         lower_path = path.lower()
         lower_content = candidate.content.lower()
-        if path.startswith(".hydralab/") or "/.hydralab/" in path:
+        if lower_path.startswith(".hydralab/") or "/.hydralab/" in lower_path:
             return ExclusionDecision(False, ".hydralab private cache")
-        if path.startswith("outputs/") or "/outputs/" in path:
+        if lower_path.startswith("outputs/") or "/outputs/" in lower_path:
             return ExclusionDecision(False, "outputs are not collaborative targets")
         if name in PROTECTED_CONTEXT_NAMES:
             return ExclusionDecision(False, "protected context file")
