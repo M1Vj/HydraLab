@@ -220,6 +220,34 @@ async def test_hl_mode_02_approving_copilot_edit_applies_once(session):
     assert result.applied is True
     assert applied["count"] == 1
 
+    # Idempotency: a repeat approve returns the recorded outcome and never runs
+    # apply_fn again, so the side effect fires exactly once (HL-MODE-02).
+    again = await service.resolve(approval.id, decision="approved", apply_fn=apply_fn)
+    assert again.applied is True
+    assert again.reason == "already resolved"
+    assert applied["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_hl_mode_02_rejected_approval_cannot_be_resurrected(session):
+    service = ApprovalService(session)
+    applied = {"count": 0}
+    approval = await service.request(action_kind="file_edit", mode=COPILOT, project_id="default")
+
+    async def apply_fn():
+        applied["count"] += 1
+
+    rejected = await service.resolve(approval.id, decision="rejected", apply_fn=apply_fn)
+    assert rejected.applied is False
+
+    # A follow-up "approve" must NOT flip the researcher's rejection into an
+    # applied write — the decision is final and apply_fn never runs.
+    resurrect = await service.resolve(approval.id, decision="approved", apply_fn=apply_fn)
+    assert resurrect.applied is False
+    assert resurrect.status == "rejected"
+    assert applied["count"] == 0
+    assert (await service.get(approval.id)).status == "rejected"
+
 
 # --------------------------------------------------------------------------- MODE-03
 def test_hl_mode_03_full_access_low_risk_applies_with_checkpoint():

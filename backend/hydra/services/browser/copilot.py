@@ -167,6 +167,13 @@ class BrowserCopilotService:
         if not approval.action_kind.startswith("browser."):
             return BrowserActionResult(outcome="refused", reason="not a browser approval")
 
+        # Idempotency: a resolved browser approval is never re-executed or
+        # re-logged. Returning the recorded outcome keeps a double-submit from
+        # firing the browser action twice or appending a duplicate event.
+        if approval.status != ApprovalStatus.PENDING.value:
+            outcome = "applied" if approval.status == ApprovalStatus.APPROVED.value else approval.status
+            return BrowserActionResult(outcome=outcome, reason="already resolved", approval_id=approval_id)
+
         normalized = str(decision or "").strip().lower()
         payload = json.loads(approval.payload_json or "{}")
         request = BrowserActionRequest(

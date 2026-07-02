@@ -89,6 +89,18 @@ class ApprovalService:
         if approval is None:
             return ApplyResult(applied=False, status="missing", reason="approval not found")
 
+        # Idempotency (HL-MODE-02): an approval is resolved exactly once. A repeat
+        # call returns the recorded outcome without re-running apply_fn, so a
+        # double-submit can never apply a side effect twice, and a second
+        # "approve" can never resurrect an already-rejected item into an applied
+        # write — reversing a researcher's rejection.
+        if approval.status != ApprovalStatus.PENDING.value:
+            return ApplyResult(
+                applied=approval.status == ApprovalStatus.APPROVED.value,
+                status=approval.status,
+                reason="already resolved",
+            )
+
         normalized = str(decision or "").strip().lower()
         if normalized in {"approve", "approved", "accept", "accepted"}:
             if apply_fn is not None:
