@@ -11,6 +11,7 @@ import {
 import { useApiResource, type ResourceState } from "./useApiResource";
 
 type WorkspaceDataContextValue = {
+  projectId: string;
   objects: ResourceState<ProjectObjectsResponse> & { reload: () => void };
   tree: ResourceState<ProjectTreeResponse> & { reload: () => void };
   review: ResourceState<{ items: ReviewItem[]; counts: { pending: number; review_items: number; recovery: number } }> & { reload: () => void };
@@ -33,6 +34,7 @@ export function WorkspaceDataProvider({ children, projectId }: { children: React
 
   const value = useMemo(
     () => ({
+      projectId,
       objects,
       tree,
       review,
@@ -46,7 +48,7 @@ export function WorkspaceDataProvider({ children, projectId }: { children: React
         settings.reload();
       },
     }),
-    [objects.status, tree.status, review.status, events.status, settings.status],
+    [projectId, objects.status, tree.status, review.status, events.status, settings.status],
   );
 
   return <WorkspaceDataContext.Provider value={value}>{children}</WorkspaceDataContext.Provider>;

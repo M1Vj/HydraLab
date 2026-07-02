@@ -41,6 +41,26 @@ def test_project_objects_aggregates_repository_records(tmp_path, monkeypatch):
     assert payload["objects"]["tasks"][0]["id"] == task["id"]
 
 
+def test_create_citation_honors_project_id_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    source = client.post("/api/sources/search", json={"query": "workspace shell"}).json()["sources"][0]
+
+    scoped = client.post(
+        "/api/citations",
+        json={"source_id": source["id"], "text": "Scoped citation.", "project_id": "alpha"},
+    )
+
+    assert scoped.status_code == 200
+    citation = scoped.json()
+    assert citation["project_id"] == "alpha"
+
+    alpha = client.get("/api/citations", params={"project_id": "alpha"}).json()["citations"]
+    default = client.get("/api/citations", params={"project_id": "default"}).json()["citations"]
+    assert [row["id"] for row in alpha] == [citation["id"]]
+    assert citation["id"] not in {row["id"] for row in default}
+
+
 def test_project_tree_lists_files_and_honors_runtime_exclusions(tmp_path, monkeypatch):
     monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
     (tmp_path / "knowledge").mkdir()

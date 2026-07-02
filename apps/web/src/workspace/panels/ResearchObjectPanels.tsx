@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { Download, GitCommitHorizontal, RotateCcw } from "lucide-react";
 import {
   api,
+  createCitation,
   type BrowserEventRecord,
   type SourceRecord,
   type GitCommit,
@@ -33,22 +34,104 @@ function StatusPill({ badge }: { badge: StatusBadge }) {
   );
 }
 
-export function CitationEvidencePanel({ openPanel }: PanelComponentProps) {
-  const { objects, review } = useWorkspaceData();
+function CiteSourceForm({
+  sources,
+  projectId,
+  onCreated,
+  announce,
+}: {
+  sources: SourceRecord[];
+  projectId: string;
+  onCreated: () => void;
+  announce: (message: string) => void;
+}) {
+  const [sourceId, setSourceId] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const activeSourceId = sources.some((source) => source.id === sourceId) ? sourceId : sources[0]?.id ?? "";
+  const canSubmit = activeSourceId !== "" && text.trim() !== "" && !busy;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!canSubmit) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await createCitation({ source_id: activeSourceId, text: text.trim(), project_id: projectId });
+      setText("");
+      announce("Citation added");
+      onCreated();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="cite-source-form" onSubmit={submit} aria-label="Cite a saved source">
+      <label>
+        <span>Cite a saved source</span>
+        <select value={activeSourceId} onChange={(event) => setSourceId(event.target.value)} disabled={busy}>
+          {sources.map((source) => (
+            <option key={source.id} value={source.id}>
+              {source.title || source.id}
+              {source.year ? ` (${source.year})` : ""}
+            </option>
+          ))}
+        </select>
+      </label>
+      <textarea
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        placeholder="Citation text or pin-cite (e.g. p. 12, §3)"
+        rows={2}
+        disabled={busy}
+        aria-label="Citation text"
+      />
+      {error && (
+        <small className="status-pill tone-danger" role="alert" data-tone="danger">
+          <span aria-hidden="true">✗</span> {error}
+        </small>
+      )}
+      <button type="submit" disabled={!canSubmit}>
+        {busy ? "Adding…" : "Add citation"}
+      </button>
+    </form>
+  );
+}
+
+export function CitationEvidencePanel({ openPanel, announce }: PanelComponentProps) {
+  const { projectId, objects, review } = useWorkspaceData();
   if (objects.status === "loading" && !objects.data) return <LoadingState title="Loading evidence graph" />;
   if (objects.status === "failure") return <FailureState error={objects.error} onRetry={objects.reload} />;
   const data = objects.data;
   const summary = data
     ? summarizeCitationEvidence(data.objects)
     : { claims: 0, citations: 0, evidence: 0, unsupportedClaims: 0, isEmpty: true };
+  const citableSources = (data?.objects.sources ?? []).filter((source) => !source.trashed);
   if (!data || summary.isEmpty) {
+    if (citableSources.length === 0) {
+      return (
+        <EmptyState
+          title="No citations yet"
+          message="Save or import a source first — then you can cite it here."
+          action="Open source discovery"
+          onAction={() => openPanel("source-discovery")}
+        />
+      );
+    }
     return (
-      <EmptyState
-        title="No citations yet"
-        message="Claims, citations and evidence links will appear after sources are saved or imported."
-        action="Add from source library"
-        onAction={() => openPanel("source-discovery")}
-      />
+      <PanelScaffold title="Citation & Evidence">
+        <div className="object-list">
+          <p className="panel-hint" role="status">
+            No citations yet. Cite one of your {citableSources.length} saved source(s) to begin.
+          </p>
+          <CiteSourceForm sources={citableSources} projectId={projectId} onCreated={objects.reload} announce={announce} />
+        </div>
+      </PanelScaffold>
     );
   }
   const reviewItems = review.data?.items ?? [];
@@ -57,6 +140,9 @@ export function CitationEvidencePanel({ openPanel }: PanelComponentProps) {
   return (
     <PanelScaffold title="Citation & Evidence">
       <div className="object-list">
+        {citableSources.length > 0 && (
+          <CiteSourceForm sources={citableSources} projectId={projectId} onCreated={objects.reload} announce={announce} />
+        )}
         {summary.unsupportedClaims > 0 && (
           <p className="panel-hint" role="status">
             {summary.unsupportedClaims} of {summary.claims} claim(s) are not yet supported by reviewed evidence.

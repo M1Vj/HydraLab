@@ -295,6 +295,7 @@ class RestoreRequest(BaseModel):
 class CitationCreateRequest(BaseModel):
     source_id: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=4000)
+    project_id: str = Field(default="default", max_length=200)
 
 
 class CitationRenderRequest(BaseModel):

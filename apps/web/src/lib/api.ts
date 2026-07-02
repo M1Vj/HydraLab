@@ -842,6 +842,13 @@ export function renderCitations(
   return client.post<CitationRenderResponse>("/api/citations/render", input);
 }
 
+export function createCitation(
+  input: { source_id: string; text: string; project_id?: string },
+  client: ApiClient = api,
+): Promise<CitationRecord> {
+  return client.post<CitationRecord>("/api/citations", input);
+}
+
 export function detectClaimCandidates(
   input: { text: string; location_type?: string; location_id?: string; origin_ref?: string; auto_create?: boolean },
   client: ApiClient = api,

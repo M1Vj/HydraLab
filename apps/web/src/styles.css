@@ -831,6 +831,44 @@ select:focus-visible,
   resize: vertical;
 }
 
+.cite-source-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-panel-raised);
+  margin-bottom: 10px;
+}
+
+.cite-source-form label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.cite-source-form select,
+.cite-source-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text-active);
+  padding: 7px 8px;
+  font: inherit;
+}
+
+.cite-source-form textarea {
+  resize: vertical;
+}
+
+.cite-source-form button {
+  justify-self: start;
+}
+
 .literature-review-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 120px;
