@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "HydraLab",
+  "version": "0.1.0",
+  "identifier": "dev.hydralab.app",
+  "build": {
+    "beforeDevCommand": "cd ../../apps/web && bun run dev",
+    "beforeBuildCommand": "cd ../../apps/web && bun run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../../apps/web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "HydraLab",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
+    "category": "Productivity",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "[NEEDS CLARIFICATION: signing-key provenance and production updater public key]",
+      "endpoints": [
+        "https://updates.hydralab.invalid/{{target}}/{{arch}}/{{current_version}}"
+      ]
+    }
+  }
+}
