@@ -74,7 +74,13 @@ class AutopilotLoop:
             # (a separate request flipping the run row) actually stops the loop
             # before the next iteration (M2), and the token ceiling is enforced
             # against the run's real consumption, not a hardcoded zero (M1).
-            current = await self.session.get(AgentRun, run_id) if run_id else None
+            # populate_existing forces a fresh read past the identity map so an
+            # out-of-band cancel committed by ANOTHER session (the cancel request
+            # runs on its own session) is actually observed here (M2). Without it,
+            # expire_on_commit=False returns the stale in-loop row.
+            current = (
+                await self.session.get(AgentRun, run_id, populate_existing=True) if run_id else None
+            )
             if self.cancelled or (current is not None and current.status == RunStatus.CANCELLED.value):
                 self.stop_reason = self.stop_reason or "cancelled by user"
                 break

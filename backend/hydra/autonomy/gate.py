@@ -93,27 +93,12 @@ class ActionGate:
 
         # Only the chokepoint's own APPLY outcome auto-applies. A human approval
         # is honoured ONLY through a persisted, approved AgentApproval row whose
-        # action_kind/target match — an inbound bool is never trusted (H1).
+        # project/action_kind/target match — an inbound bool is never trusted (H1).
+        # The row is CONSUMED on use so a single approval cannot be replayed
+        # across loop iterations.
         should_apply = dispatch.applied
         if not should_apply and action.approval_id and dispatch.status == "approval_required":
-            should_apply = await self._approval_authorises(action)
-
-        if dispatch.decision.outcome == Outcome.BLOCKED.value:
-            approval_state = "blocked"
-        elif should_apply:
-            approval_state = "applied"
-        else:
-            approval_state = dispatch.status
-
-        audit = await self.audit.append(
-            project_id=action.project_id,
-            run_id=action.run_id,
-            actor=action.actor,
-            action=action.action_kind,
-            risk_level=risk,
-            target=target,
-            approval_state=approval_state,
-        )
+            should_apply = await self._consume_approval(action)
 
         checkpoint_id: str | None = None
         if should_apply:
@@ -128,6 +113,17 @@ class ActionGate:
             runner = apply_fn or action.apply_fn
             if runner is not None:
                 await runner()
+            # Audit is written AFTER a successful checkpoint + apply so the ledger
+            # never records "applied" for an action that a CheckpointError aborted.
+            audit = await self.audit.append(
+                project_id=action.project_id,
+                run_id=action.run_id,
+                actor=action.actor,
+                action=action.action_kind,
+                risk_level=risk,
+                target=target,
+                approval_state="applied",
+            )
             return GateResult(
                 status="applied",
                 applied=True,
@@ -139,6 +135,16 @@ class ActionGate:
                 approval_id=dispatch.approval_id,
             )
 
+        approval_state = "blocked" if dispatch.decision.outcome == Outcome.BLOCKED.value else dispatch.status
+        audit = await self.audit.append(
+            project_id=action.project_id,
+            run_id=action.run_id,
+            actor=action.actor,
+            action=action.action_kind,
+            risk_level=risk,
+            target=target,
+            approval_state=approval_state,
+        )
         return GateResult(
             status=dispatch.status,
             applied=False,
@@ -150,14 +156,22 @@ class ActionGate:
             approval_id=dispatch.approval_id,
         )
 
-    async def _approval_authorises(self, action: GovernedAction) -> bool:
+    async def _consume_approval(self, action: GovernedAction) -> bool:
         approval = await self.session.get(AgentApproval, action.approval_id)
-        return (
+        authorised = (
             approval is not None
             and approval.status == ApprovalStatus.APPROVED.value
             and approval.action_kind == action.action_kind
             and (approval.target_ref or None) == (action.target_ref or None)
+            and (approval.project_id or None) in (None, action.project_id)
         )
+        if authorised:
+            # Consume: a used approval can never authorise a second apply.
+            approval.status = "consumed"
+            approval.decision = "applied"
+            self.session.add(approval)
+            await self.session.commit()
+        return authorised
 
     def _payload(self, action: GovernedAction, risk: str) -> dict[str, Any]:
         payload = dict(action.payload)

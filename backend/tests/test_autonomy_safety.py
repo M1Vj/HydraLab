@@ -42,6 +42,8 @@ from hydra.orchestrator.dispatch import PrivacyPosture
 from hydra.orchestrator.run import RunConfig, RunExecutionResult, RunStateMachine
 from hydra.orchestrator.stages import StageContext, StageEnum, StageResult
 
+INJECTION_CASES = Path(__file__).parent / "fixtures" / "injection" / "autonomy_injection_cases.json"
+
 @pytest_asyncio.fixture
 async def engine():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False, future=True)
@@ -340,7 +342,7 @@ async def test_h2_arbitrary_code_execution_is_blocked(session):
 async def test_h2_injection_tagging_from_trusted_input_is_classified_untrusted(session):
     """An action carrying untrusted-provenance content is routed/tagged untrusted
     even though the run's mode is Full Access — provenance, not the caller, drives it."""
-    cases = json.loads(Path("backend/tests/fixtures/injection/autonomy_injection_cases.json").read_text())
+    cases = json.loads(INJECTION_CASES.read_text())
     spoof = next((c for c in cases if "boundary" in c["id"] or "spoof" in c["id"]), cases[0])
     result = await gate(session, []).govern(
         GovernedAction(
@@ -500,18 +502,21 @@ async def test_hl_mode_36_cancel_records_stop_reason(session):
     assert refreshed.stop_reason == "cancelled by user"
 
 @pytest.mark.asyncio
-async def test_m2_db_cancel_stops_loop_before_next_iteration(session):
-    """An out-of-band cancel (a separate request flipping the run row) stops the
-    loop at the next-iteration DB re-read, not just via the in-process flag (M2)."""
+async def test_m2_db_cancel_stops_loop_before_next_iteration(engine, session):
+    """An out-of-band cancel — committed by a SEPARATE session, as the real cancel
+    request is — stops the loop at the next-iteration DB re-read (M2). Proves the
+    populate_existing read defeats the identity-map stale value."""
     repo = RunRepository(session)
+    other_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     calls = {"n": 0}
 
     async def fake_start(*, project_id, mode, recipe="autopilot-loop", inputs=None, data=None):
         calls["n"] += 1
         run = await repo.create_run(project_id=project_id, mode=mode, recipe=recipe, inputs=inputs)
         await repo.complete_run(run.id)
-        # Simulate a cancel request arriving during this iteration.
-        await repo.cancel_run(run.id, stop_reason="cancelled by user")
+        # Cancel through a DIFFERENT session, exactly like the cancel endpoint.
+        async with other_maker() as other:
+            await RunRepository(other).cancel_run(run.id, stop_reason="cancelled by user")
         return RunExecutionResult(run_id=run.id, state="completed")
 
     class FakeRunner:
@@ -527,6 +532,30 @@ async def test_m2_db_cancel_stops_loop_before_next_iteration(session):
     assert calls["n"] == 1  # stopped after the first iteration, did not reach loop 2/3
     assert loop.loop_count == 1
     assert loop.stop_reason == "cancelled by user"
+
+@pytest.mark.asyncio
+async def test_h1_approval_is_consumed_and_cannot_be_replayed(session):
+    """A single approved row authorises exactly one apply; a second attempt with
+    the same approval id is denied (anti-replay)."""
+    events: list[str] = []
+    approval = await _approved_row(session, action_kind="delete_file", target_ref="sources/once.md")
+
+    def action() -> GovernedAction:
+        return GovernedAction(
+            mode=FULL_ACCESS,
+            action_kind="delete_file",
+            target_ref="sources/once.md",
+            full_access_enabled=True,
+            project_id="default",
+            approval_id=approval.id,
+            apply_fn=lambda: _record(events, "applied"),
+        )
+
+    first = await gate(session, events).govern(action())
+    assert first.applied is True
+    second = await gate(session, events).govern(action())
+    assert second.applied is False
+    assert events.count("applied") == 1
 
 @pytest.mark.asyncio
 async def test_m1_token_budget_stops_loop(session):
@@ -676,7 +705,7 @@ async def test_hl_mode_37_offline_only_g3_external_send_hard_blocks(session):
 
 @pytest.mark.asyncio
 async def test_hl_trust_32_prompt_injection_corpus_never_auto_applies(session):
-    cases = json.loads(Path("backend/tests/fixtures/injection/autonomy_injection_cases.json").read_text())
+    cases = json.loads(INJECTION_CASES.read_text())
     for case in cases:
         result = await gate(session, []).govern(
             GovernedAction(

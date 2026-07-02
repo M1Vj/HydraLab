@@ -183,8 +183,10 @@ class RunStateMachine:
             action.mode = mode
             action.project_id = project_id
             action.run_id = run_id
-            if not getattr(action, "full_access_enabled", False):
-                action.full_access_enabled = self.full_access_enabled
+            # Authoritative: the run's full-access flag is the ONLY source. A stage
+            # must never keep a self-set full_access_enabled=True — that is the
+            # policy input that flips approval -> auto-apply, i.e. scope widening.
+            action.full_access_enabled = self.full_access_enabled
             gate_result = await self.action_gate.govern(action, apply_fn=getattr(action, "apply_fn", None))
             result.governed.append(gate_result)
 
