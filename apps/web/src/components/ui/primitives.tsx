@@ -64,6 +64,35 @@ export function ContextMenu({ children }: WithChildren) {
   );
 }
 
+/**
+ * Resolve the tab index a keyboard event should move focus to, or null when the
+ * key is not a tablist navigation key. Arrows wrap around the ends; Home/End
+ * jump to the first/last tab. Pure so it can be unit-tested without a DOM.
+ */
+export function nextTabIndex(current: number, key: string, count: number): number | null {
+  if (count === 0) return null;
+  let target: number;
+  switch (key) {
+    case "ArrowRight":
+    case "ArrowDown":
+      target = current + 1;
+      break;
+    case "ArrowLeft":
+    case "ArrowUp":
+      target = current - 1;
+      break;
+    case "Home":
+      target = 0;
+      break;
+    case "End":
+      target = count - 1;
+      break;
+    default:
+      return null;
+  }
+  return (target + count) % count;
+}
+
 export function Tabs({
   tabs,
   value,
@@ -73,14 +102,29 @@ export function Tabs({
   value: string;
   onChange: (id: string) => void;
 }) {
+  const listRef = React.useRef<HTMLDivElement>(null);
+
+  // WAI-ARIA tabs pattern: the tablist is a single tab stop (roving tabindex),
+  // and Arrow/Home/End move between tabs with selection following focus.
+  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const current = tabs.findIndex((tab) => tab.id === value);
+    const target = nextTabIndex(current, event.key, tabs.length);
+    if (target === null) return;
+    event.preventDefault();
+    onChange(tabs[target].id);
+    const buttons = listRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    buttons?.[target]?.focus();
+  }
+
   return (
-    <div className="ui-tabs" role="tablist">
+    <div className="ui-tabs" role="tablist" ref={listRef} onKeyDown={onKeyDown}>
       {tabs.map((tab) => (
         <button
           key={tab.id}
           className={`ui-tab ${value === tab.id ? "active" : ""}`}
           role="tab"
           aria-selected={value === tab.id}
+          tabIndex={value === tab.id ? 0 : -1}
           onClick={() => onChange(tab.id)}
         >
           {tab.label}
