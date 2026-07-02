@@ -99,8 +99,6 @@ def create_app() -> FastAPI:
         allow_origins=[
             "http://localhost:5173",
             "http://127.0.0.1:5173",
-            "http://localhost:8000",
-            "http://127.0.0.1:8000",
             HYDRALAB_EXTENSION_ORIGIN,
         ],
         allow_methods=["*"],
@@ -304,6 +302,95 @@ def create_app() -> FastAPI:
         sources = [await repo.upsert_source(source) for source in await search_academic_sources(request.query)]
         await repo.add_event("sources.search.completed", f"Found {len(sources)} source candidates")
         return {"sources": sources}
+
+    @app.get("/api/project/objects")
+    async def project_objects(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        sources = await repo.list_sources()
+        notes = await repo.search_notes()
+        claims = await repo.list_claims()
+        tasks = await repo.list_tasks()
+        citations = await repo.list_citations()
+        evidence = await repo.list_evidence()
+
+        if project_id:
+            sources = [item for item in sources if item.get("project_id") in (None, project_id)]
+            notes = [item for item in notes if item.get("project_id") in (None, project_id)]
+            claims = [item for item in claims if item.get("project_id") in (None, project_id)]
+            tasks = [item for item in tasks if item.get("project_id") in (None, project_id)]
+            citations = [item for item in citations if item.get("project_id") in (None, project_id)]
+
+        return {
+            "project_id": project_id or "default",
+            "objects": {
+                "notes": notes,
+                "sources": sources,
+                "claims": claims,
+                "tasks": tasks,
+                "citations": citations,
+                "evidence": evidence,
+            },
+            "counts": {
+                "notes": len(notes),
+                "sources": len(sources),
+                "claims": len(claims),
+                "tasks": len(tasks),
+                "citations": len(citations),
+                "evidence": len(evidence),
+            },
+        }
+
+    @app.get("/api/project/tree")
+    async def project_tree() -> dict[str, object]:
+        root = hydra_project_root().resolve()
+        nodes = []
+        for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root)).lower()):
+            relative = path.relative_to(root)
+            if is_project_tree_excluded(relative):
+                continue
+            stat = path.stat()
+            nodes.append(
+                {
+                    "id": str(relative),
+                    "path": str(relative),
+                    "name": path.name,
+                    "type": "directory" if path.is_dir() else "file",
+                    "parent": str(relative.parent) if str(relative.parent) != "." else "",
+                    "depth": len(relative.parts) - 1,
+                    "size": stat.st_size if path.is_file() else 0,
+                    "modified_at": stat.st_mtime,
+                    "index_status": project_tree_index_status(relative, is_dir=path.is_dir()),
+                }
+            )
+        return {"root": str(root), "nodes": nodes, "excluded": [".git", ".hydralab/temp", ".hydralab/cache"]}
+
+    @app.get("/api/review-inbox")
+    async def review_inbox(project_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        review_items = await repo.list_review_items()
+        if project_id:
+            review_items = [item for item in review_items if item.get("project_id") in (None, project_id)]
+
+        recovery_items = []
+        for journal in NoteFileService(session, hydra_project_root()).list_recovery_journals():
+            recovery_items.append(
+                {
+                    "id": f"recovery:{journal['id']}",
+                    "item_type": "note-recovery",
+                    "title": f"Recovery draft: {journal.get('note_id') or journal['id']}",
+                    "summary": "Unsaved note recovery journal is pending review.",
+                    "origin_type": "note-files",
+                    "origin_id": journal["id"],
+                    "target_type": "note",
+                    "target_id": journal.get("note_id"),
+                    "status": "pending",
+                    "payload": journal,
+                    "created_at": journal.get("updated_at") or 0,
+                }
+            )
+
+        pending = [item for item in [*review_items, *recovery_items] if item.get("status", "pending") == "pending"]
+        return {"items": pending, "counts": {"pending": len(pending), "review_items": len(review_items), "recovery": len(recovery_items)}}
 
     @app.post("/api/sources/discovery/search")
     async def source_discovery_search(request: SourceDiscoveryRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -1001,6 +1088,29 @@ def hydra_project_root() -> Path:
     if db_url.startswith("sqlite+aiosqlite:///"):
         return Path(db_url.removeprefix("sqlite+aiosqlite:///")).parent
     return Path.cwd() / ".hydra"
+
+
+def is_project_tree_excluded(relative_path: Path) -> bool:
+    parts = relative_path.parts
+    if not parts:
+        return False
+    if parts[0] in {".git", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules", ".venv"}:
+        return True
+    if parts[0] == ".hydralab" and len(parts) > 1 and parts[1] in {"cache", "temp", "runtime"}:
+        return True
+    return False
+
+
+def project_tree_index_status(relative_path: Path, *, is_dir: bool) -> str:
+    parts = relative_path.parts
+    suffix = relative_path.suffix.lower()
+    if parts and parts[0] == ".hydralab":
+        return "excluded"
+    if any(part in {"code", "browser", "chats"} for part in parts):
+        return "needs-consent" if is_dir else "excluded"
+    if suffix in {".md", ".markdown", ".pdf", ".docx", ".bib", ".ris", ".json", ".yaml", ".yml", ".txt"}:
+        return "indexed"
+    return "needs-consent" if is_dir else "excluded"
 
 
 def write_uploaded_original(project_root: Path, filename: str, raw: bytes) -> Path:
