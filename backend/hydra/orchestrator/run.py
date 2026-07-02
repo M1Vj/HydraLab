@@ -27,7 +27,7 @@ class OrchestratorConfigError(ValueError):
 @dataclass(frozen=True)
 class RunConfig:
     enabled_stages: dict[StageEnum, bool]
-    scoring_method: str = "rubric"
+    scoring_method: str = "pairwise"
     stage_toggles: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
@@ -36,7 +36,7 @@ class RunConfig:
         *,
         global_enabled: dict[str, bool] | None = None,
         stage_overrides: dict[str, bool] | None = None,
-        scoring_method: str = "rubric",
+        scoring_method: str = "pairwise",
         loop_count: int = 1,
         stage_toggles: dict[str, dict[str, Any]] | None = None,
     ) -> "RunConfig":
@@ -57,7 +57,7 @@ class RunConfig:
         )
 
     @classmethod
-    def all_enabled(cls, *, scoring_method: str = "rubric") -> "RunConfig":
+    def all_enabled(cls, *, scoring_method: str = "pairwise") -> "RunConfig":
         return cls.resolve(
             global_enabled={stage.value: True for stage in CANONICAL_STAGE_ORDER},
             scoring_method=scoring_method,

@@ -31,7 +31,9 @@ from hydra.recipes.idea_generation import (
     DEFAULT_RUBRIC_CRITERIA,
     DEFAULT_STAGE_TOGGLES,
     IDEA_RECIPE_ID,
+    REVIEW_CHECK_TYPES,
     IdeaCompareStage,
+    IdeaEvolveStage,
     IdeaGenerateStage,
     IdeaPromotionService,
     IdeaReviewStage,
@@ -42,6 +44,7 @@ from hydra.recipes.idea_generation import (
     run_idea_recipe,
     unresolved_evidence_links,
 )
+from hydra.database.models import LexicalIndexEntry
 
 
 @pytest_asyncio.fixture
@@ -189,11 +192,11 @@ async def test_hl_assist_03_runs_staged_pass_once_and_stops(session):
     assert ran.count("stage.evolve") == 1
 
 
-# --- HL-ASSIST-05 (merged critique per candidate) ---------------------------
+# --- HL-ASSIST-05 (typed reflection checks per candidate) -------------------
 
 
 @pytest.mark.asyncio
-async def test_hl_assist_05_review_attaches_one_merged_critique_per_candidate(session):
+async def test_hl_assist_05_review_attaches_typed_checks_per_candidate(session):
     await _seed_sources(session)
     result = await run_idea_recipe(session, run_input=_input())
     candidates = (
@@ -203,7 +206,16 @@ async def test_hl_assist_05_review_attaches_one_merged_critique_per_candidate(se
     ).all()
     for candidate in candidates:
         critique = json.loads(candidate.critique)
-        assert set(critique) == {"weaknesses", "risks", "missing_evidence"}
+        # Critique is now a LIST of typed check records, not a merged dict.
+        assert isinstance(critique, list) and critique
+        assert {record["check_type"] for record in critique} == set(REVIEW_CHECK_TYPES)
+        for record in critique:
+            assert record["verdict"] in {"pass", "flag", "reject"}
+            assert isinstance(record["evidence_refs"], list)
+            assert record["notes"]
+        # Well-grounded candidates are never rejected.
+        assert candidate.status != "rejected"
+        assert all(record["verdict"] != "reject" for record in critique)
 
 
 # --- HL-ASSIST-06 / 07 (normalized rubric) ----------------------------------
@@ -463,3 +475,232 @@ async def test_hl_assist_13_provider_error_mid_run_keeps_completed_stage_prefix(
     assert seeded
     candidates = (await session.exec(select(IdeaCandidate).where(IdeaCandidate.run_id == run.id))).all()
     assert candidates and all(c.status == "reviewed" for c in candidates)
+
+
+# --- Faithfulness enhancements ----------------------------------------------
+
+
+async def _ranking_artifact(session, run_id: str) -> dict:
+    run = await session.get(AgentRun, run_id)
+    for artifact in json.loads(run.artifacts or "[]"):
+        if artifact.get("kind") == "ranking":
+            return artifact
+    raise AssertionError("no ranking artifact persisted")
+
+
+# Enhancement 1: Compare -> real pairwise tournament + BTL matrix.
+@pytest.mark.asyncio
+async def test_compare_emits_pairwise_matrix_and_btl_ranking(session):
+    await _seed_sources(session)
+    result = await run_idea_recipe(session, run_input=_input())  # default is now "pairwise"
+    candidates = (
+        await session.exec(select(IdeaCandidate).where(IdeaCandidate.run_id == result.run_id))
+    ).all()
+    ids = {c.id for c in candidates}
+    n = len(candidates)
+    expected_pairs = n * (n - 1) // 2
+
+    artifact = await _ranking_artifact(session, result.run_id)
+    assert artifact["method"] == "pairwise"
+    matrix = artifact["pairwise_matrix"]
+    assert set(matrix) == set(DEFAULT_RUBRIC_CRITERIA)
+    for criterion, cell in matrix.items():
+        # Every pair yields exactly one winner per criterion.
+        assert sum(cell["wins"].values()) == expected_pairs
+    rationales = artifact["matchup_rationales"]
+    assert rationales and all(r["winner"] in ids for r in rationales)
+    assert len(rationales) == expected_pairs * len(DEFAULT_RUBRIC_CRITERIA)
+
+    # Ranking is a total order; #1 has the highest aggregate BTL strength.
+    ranking = artifact["ranking"]
+    assert [row["rank"] for row in ranking] == list(range(1, n + 1))
+    assert ranking[0]["score"] >= ranking[-1]["score"]
+
+    # RubricResults carry normalized [0,1] BTL strengths with pairwise rationale.
+    for candidate in candidates:
+        for record in json.loads(candidate.rubric_results):
+            assert 0.0 <= record["value"] <= 1.0
+            assert "pairwise" in record["rationale"]
+            assert record["stage_run_id"] == f"{result.run_id}:compare"
+
+
+# Enhancement 2a: Evolve offspring earn scores (never inherit parent scores).
+@pytest.mark.asyncio
+async def test_evolve_variants_earn_scores_and_are_not_copied(session):
+    await _seed_sources(session)
+    result = await run_idea_recipe(
+        session,
+        run_input=_input(),
+        stage_toggles={"generate": True, "review": True, "compare": True, "evolve": True},
+    )
+    candidates = (
+        await session.exec(select(IdeaCandidate).where(IdeaCandidate.run_id == result.run_id))
+    ).all()
+    variants = [c for c in candidates if c.generated_by_stage == "evolve"]
+    assert variants
+    for variant in variants:
+        results = json.loads(variant.rubric_results)
+        assert results  # offspring earned their own scores
+        # Earned in the Evolve re-ranking pass, NOT copied from the parent's
+        # main Compare pass (whose stage_run_id ends in ":compare").
+        assert all(r["stage_run_id"] == f"{result.run_id}:evolve:compare" for r in results)
+        assert variant.rank is not None
+        assert variant.status == "ranked"
+
+
+# Enhancement 2b: Evolve dedups near-identical offspring (Proximity-style).
+@pytest.mark.asyncio
+async def test_evolve_dedups_near_identical_offspring(session):
+    ids = await _seed_sources(session)
+    run = await RunRepository(session).create_run(project_id="default", mode="passive", recipe=IDEA_RECIPE_ID)
+    links = json.dumps([{"source_id": ids[0], "kind": "source"}], sort_keys=True)
+    parents = []
+    for rank in (1, 2):
+        parent = IdeaCandidate(
+            run_id=run.id,
+            project_id="default",
+            title=f"Parent {rank}",
+            short_hypothesis="Identical hypothesis about attention scaling.",
+            research_question="How does attention scale?",
+            motivation="grounded",
+            method_sketch="staged method",
+            expected_contribution="contribution",
+            required_sources=json.dumps([ids[0]], sort_keys=True),
+            evidence_links=links,
+            novelty_claim="novel",
+            feasibility_notes="feasible",
+            risks="risk",
+            estimated_effort="medium",
+            generated_by_stage="generate",
+            status="ranked",
+            critique=json.dumps([]),
+            rank=rank,
+        )
+        session.add(parent)
+        await session.commit()
+        await session.refresh(parent)
+        parents.append(parent)
+
+    grounding = await _load_grounding(session, "default")
+    common = dict(
+        session=session,
+        run_input=_input(),
+        grounding=grounding,
+        candidate_count=5,
+        criteria=DEFAULT_RUBRIC_CRITERIA,
+        scoring_method="pairwise",
+        trust_origin="user",
+    )
+    from hydra.orchestrator.stages import StageContext
+    ctx = StageContext(run_id=run.id, project_id="default", mode="passive", data={}, config=None)
+    await IdeaEvolveStage(**common).run(ctx)
+
+    variants = (
+        await session.exec(
+            select(IdeaCandidate).where(
+                IdeaCandidate.run_id == run.id, IdeaCandidate.generated_by_stage == "evolve"
+            )
+        )
+    ).all()
+    # Two identical parents would yield two identical repair variants; dedup keeps
+    # one repair + the (distinct) combine variant.
+    assert len(variants) == 2
+    hypotheses = [v.short_hypothesis for v in variants]
+    assert len(set(hypotheses)) == len(hypotheses)
+
+
+# Enhancement 3: Review reject verdict excludes the candidate from Compare.
+@pytest.mark.asyncio
+async def test_review_reject_excludes_candidate_from_compare(session):
+    ids = await _seed_sources(session)
+    run = await RunRepository(session).create_run(project_id="default", mode="passive", recipe=IDEA_RECIPE_ID)
+
+    def _candidate(title, links):
+        return IdeaCandidate(
+            run_id=run.id,
+            project_id="default",
+            title=title,
+            short_hypothesis=f"{title} hypothesis under constraints.",
+            research_question="How?",
+            motivation="grounded",
+            method_sketch="staged method",
+            expected_contribution="contribution",
+            required_sources=json.dumps([], sort_keys=True),
+            evidence_links=links,
+            novelty_claim="novel",
+            feasibility_notes="feasible",
+            risks="risk",
+            estimated_effort="medium",
+            generated_by_stage="generate",
+            status="draft",
+        )
+
+    grounded = _candidate("Grounded", json.dumps([{"source_id": ids[0], "kind": "source"}], sort_keys=True))
+    ungrounded = _candidate("Ungrounded", json.dumps([], sort_keys=True))
+    session.add(grounded)
+    session.add(ungrounded)
+    await session.commit()
+    await session.refresh(grounded)
+    await session.refresh(ungrounded)
+
+    grounding = await _load_grounding(session, "default")
+    common = dict(
+        session=session,
+        run_input=_input(),
+        grounding=grounding,
+        candidate_count=2,
+        criteria=DEFAULT_RUBRIC_CRITERIA,
+        scoring_method="pairwise",
+        trust_origin="user",
+    )
+    from hydra.orchestrator.stages import StageContext
+    ctx = StageContext(run_id=run.id, project_id="default", mode="passive", data={}, config=None)
+    await IdeaReviewStage(**common).run(ctx)
+
+    refreshed_ungrounded = await session.get(IdeaCandidate, ungrounded.id)
+    assert refreshed_ungrounded.status == "rejected"
+    critique = json.loads(refreshed_ungrounded.critique)
+    assert any(r["check_type"] == "novelty_grounding" and r["verdict"] == "reject" for r in critique)
+
+    compare_result = await IdeaCompareStage(**common).run(ctx)
+    ranked_ids = {row["id"] for row in compare_result.artifacts[0]["ranking"]}
+    assert grounded.id in ranked_ids
+    assert ungrounded.id not in ranked_ids  # rejected candidate excluded
+    refreshed_ungrounded = await session.get(IdeaCandidate, ungrounded.id)
+    assert refreshed_ungrounded.rank is None
+    assert json.loads(refreshed_ungrounded.rubric_results) == []
+
+
+# Enhancement 4: Generate assigns sources by retrieval relevance, not round-robin.
+@pytest.mark.asyncio
+async def test_generate_grounds_in_retrieval_relevant_source(session):
+    ids = await _seed_sources(session)
+    relevant = ids[1]
+    # Only the relevant source has an indexed chunk matching the topic terms, so
+    # retrieval returns it alone and every candidate must ground in it.
+    session.add(
+        LexicalIndexEntry(
+            source_id=relevant,
+            chunk_id="chunk-rel",
+            locator=json.dumps({"page": 1}),
+            text="Sub-quadratic attention scales to long documents efficiently.",
+            extraction_version=1,
+            index_version=1,
+        )
+    )
+    await session.commit()
+
+    result = await run_idea_recipe(
+        session,
+        run_input=_input(),
+        stage_toggles={"generate": True, "review": False, "compare": False, "evolve": False},
+    )
+    candidates = (
+        await session.exec(select(IdeaCandidate).where(IdeaCandidate.run_id == result.run_id))
+    ).all()
+    assert candidates
+    for candidate in candidates:
+        source_ids = {link["source_id"] for link in json.loads(candidate.evidence_links)}
+        assert source_ids == {relevant}
+        # And retrieval chunk provenance is carried on the link.
+        assert all(link.get("chunk_id") == "chunk-rel" for link in json.loads(candidate.evidence_links))

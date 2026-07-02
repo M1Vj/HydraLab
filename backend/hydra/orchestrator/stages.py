@@ -112,7 +112,7 @@ class CompareStage:
     id = StageEnum.COMPARE
     VALID_SCORING_METHODS = frozenset({"pairwise", "tournament", "elo", "rubric"})
 
-    def __init__(self, scoring_method: str = "rubric") -> None:
+    def __init__(self, scoring_method: str = "pairwise") -> None:
         if scoring_method not in self.VALID_SCORING_METHODS:
             allowed = ", ".join(sorted(self.VALID_SCORING_METHODS))
             raise ValueError(f"unsupported scoring_method {scoring_method!r}; must be one of {allowed}")
@@ -199,7 +199,7 @@ class LoopControlStage:
         )
 
 
-def default_stages(scoring_method: str = "rubric") -> dict[StageEnum, Stage]:
+def default_stages(scoring_method: str = "pairwise") -> dict[StageEnum, Stage]:
     return {
         StageEnum.GENERATE: GenerateStage(),
         StageEnum.REVIEW: ReviewStage(),

@@ -475,7 +475,7 @@ class ApprovalResolveRequest(BaseModel):
 class OrchestratorRunStartRequest(BaseModel):
     project_id: str = Field(default="default", max_length=200)
     enabled_stages: dict[str, bool] = Field(default_factory=dict)
-    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "rubric"
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "pairwise"
     recipe_id: str | None = Field(default=None, max_length=120)
     recipe_inputs: dict[str, Any] = Field(default_factory=dict)
 
@@ -501,7 +501,7 @@ class IdeaRunStartRequest(BaseModel):
     constraints: str = Field(default="", max_length=4_000)
     novelty_target: str = Field(default="medium", max_length=40)
     enabled_stages: dict[str, bool] = Field(default_factory=dict)
-    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "rubric"
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "pairwise"
 
 
 class IdeaPromoteRequest(BaseModel):
