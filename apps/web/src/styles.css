@@ -2041,10 +2041,35 @@ kbd {
   box-shadow: 0 0 0 1px var(--border-color);
 }
 
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-align: initial;
+  transform-origin: 0 0;
+  forced-color-adjust: none;
+  z-index: 1;
+}
+
+.pdf-text-layer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.pdf-text-layer ::selection {
+  background: rgba(120, 160, 255, 0.4);
+}
+
 .pdf-annotation-layer {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 2;
 }
 
 .pdf-annotation-mark {

@@ -5,7 +5,7 @@ import pdfWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import type { PanelComponentProps } from "../panelRegistry";
 import { EmptyState, FailureState, PanelScaffold } from "./PanelState";
 import { addHighlight, clampPage, clampScale, loadSourceAnnotations, PdfLifecycle, suggestClaim } from "./pdfController";
-import { annotationDraftFromSelection, viewportRectFromQuad, type PdfAnnotationRecord } from "../../lib/annotations/store";
+import { annotationDraftFromSelection, pageRectFromSelection, viewportRectFromQuad, type PdfAnnotationRecord } from "../../lib/annotations/store";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -16,6 +16,8 @@ export function PdfReaderPanel({ config, announce }: PanelComponentProps) {
   const sourceId = typeof config?.sourceId === "string" ? config.sourceId : null;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const textLayerInstance = useRef<pdfjsLib.TextLayer | null>(null);
   const lifecycle = useRef(new PdfLifecycle());
 
   const [readerState, setReaderState] = useState<ReaderState>("empty");
@@ -83,6 +85,23 @@ export function PdfReaderPanel({ config, announce }: PanelComponentProps) {
         const renderTask = pdfPage.render({ canvas, canvasContext: context, viewport });
         owner.trackRender(renderTask);
         await renderTask.promise;
+
+        // Overlay a selectable text layer so highlights capture the real text
+        // and geometry the user picked (a bare canvas has no selectable text).
+        const textLayerDiv = textLayerRef.current;
+        if (textLayerDiv) {
+          textLayerInstance.current?.cancel();
+          textLayerDiv.replaceChildren();
+          textLayerDiv.style.width = `${Math.round(viewport.width)}px`;
+          textLayerDiv.style.height = `${Math.round(viewport.height)}px`;
+          textLayerDiv.style.setProperty("--scale-factor", String(scale));
+          textLayerDiv.style.setProperty("--total-scale-factor", String(scale));
+          const textContent = await pdfPage.getTextContent();
+          if (disposed) return;
+          const textLayer = new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayerDiv, viewport });
+          textLayerInstance.current = textLayer;
+          await textLayer.render();
+        }
         if (!disposed) setReaderState("ready");
       })
       .catch((reason: unknown) => {
@@ -93,6 +112,7 @@ export function PdfReaderPanel({ config, announce }: PanelComponentProps) {
     return () => {
       disposed = true;
       owner.cancelRender();
+      textLayerInstance.current?.cancel();
     };
   }, [documentProxy, page, scale]);
 
@@ -128,11 +148,22 @@ export function PdfReaderPanel({ config, announce }: PanelComponentProps) {
       return;
     }
     setAnnotationError("");
-    const selection = window.getSelection()?.toString() ?? "";
+    const selection = window.getSelection();
+    const text = selection?.toString().trim() ?? "";
+    if (!selection || selection.rangeCount === 0 || !text || !canvasRef.current) {
+      setAnnotationError("Select the passage in the page, then choose Highlight.");
+      return;
+    }
+    const selectionRect = selection.getRangeAt(0).getBoundingClientRect();
+    const rect = pageRectFromSelection(selectionRect, canvasRef.current.getBoundingClientRect(), scale);
+    if (!rect) {
+      setAnnotationError("That selection is not inside the page. Select text on the page and try again.");
+      return;
+    }
     const draft = annotationDraftFromSelection({
       page,
-      text: selection,
-      rect: { left: 92, top: 112, width: 260, height: 24 },
+      text,
+      rect,
       pageWidth: pageSize.width,
       pageHeight: pageSize.height,
     });
@@ -213,6 +244,7 @@ export function PdfReaderPanel({ config, announce }: PanelComponentProps) {
             )}
             <div className={`pdf-page-host ${documentProxy ? "ready" : ""}`} aria-label={documentTitle || "PDF page"}>
               <canvas ref={canvasRef} />
+              <div ref={textLayerRef} className="pdf-text-layer" aria-hidden="true" />
               {documentProxy && (
                 <div className="pdf-annotation-layer" aria-label="PDF annotations">
                   {pageAnnotations.map((annotation) => {

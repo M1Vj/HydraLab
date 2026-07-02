@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { annotationDraftFromSelection, normalizedQuadFromRect, shouldAutoCreateClaim, viewportRectFromQuad } from "./store";
+import {
+  annotationDraftFromSelection,
+  normalizedQuadFromRect,
+  pageRectFromSelection,
+  shouldAutoCreateClaim,
+  viewportRectFromQuad,
+} from "./store";
 
 describe("PDF annotation helpers", () => {
   test("@HL-PDF-03 stores page anchors as normalized quad points", () => {
@@ -26,5 +32,22 @@ describe("PDF annotation helpers", () => {
 
     expect(draft).toMatchObject({ page: 2, text: "scaled attention", type: "highlight", color: "yellow" });
     expect(draft.quad_points.every((point) => point >= 0 && point <= 1)).toBe(true);
+  });
+
+  test("@HL-PDF-04 maps a real text selection to unscaled page coordinates", () => {
+    // Canvas rendered at 2x zoom, positioned at (100, 50) in the viewport.
+    const canvas = { left: 100, top: 50, width: 1224, height: 1584 };
+    const selection = { left: 300, top: 250, width: 200, height: 40 };
+
+    const rect = pageRectFromSelection(selection, canvas, 2);
+    // (300-100)/2, (250-50)/2, 200/2, 40/2
+    expect(rect).toEqual({ left: 100, top: 100, width: 100, height: 20 });
+  });
+
+  test("@HL-PDF-04 rejects an empty or off-page selection", () => {
+    const canvas = { left: 100, top: 50, width: 1224, height: 1584 };
+    expect(pageRectFromSelection({ left: 300, top: 250, width: 0, height: 40 }, canvas, 2)).toBeNull();
+    // A selection entirely to the left of the page does not overlap it.
+    expect(pageRectFromSelection({ left: 0, top: 250, width: 50, height: 40 }, canvas, 2)).toBeNull();
   });
 });

@@ -78,6 +78,27 @@ export function viewportRectFromQuad(quadPoints: number[], pageWidth: number, pa
   };
 }
 
+/**
+ * Convert a browser text-selection rectangle (viewport pixels) into an unscaled
+ * page-space rectangle suitable for {@link normalizedQuadFromRect}. `selection`
+ * and `canvas` are both getBoundingClientRect() results; `scale` is the current
+ * render zoom. Returns null when the selection is empty or does not overlap the
+ * rendered page, so a stray selection never produces a bogus highlight.
+ */
+export function pageRectFromSelection(selection: ViewportRect, canvas: ViewportRect, scale: number): ViewportRect | null {
+  const factor = scale > 0 ? scale : 1;
+  if (selection.width <= 0 || selection.height <= 0) return null;
+  const overlapsX = selection.left < canvas.left + canvas.width && selection.left + selection.width > canvas.left;
+  const overlapsY = selection.top < canvas.top + canvas.height && selection.top + selection.height > canvas.top;
+  if (!overlapsX || !overlapsY) return null;
+  return {
+    left: (selection.left - canvas.left) / factor,
+    top: (selection.top - canvas.top) / factor,
+    width: selection.width / factor,
+    height: selection.height / factor,
+  };
+}
+
 export function annotationDraftFromSelection(input: {
   page: number;
   text: string;
