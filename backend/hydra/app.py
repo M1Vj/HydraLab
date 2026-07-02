@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import secrets
+import hashlib
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
 
@@ -32,6 +33,8 @@ from hydra.schemas import (
     NoteUpdateRequest,
     ProviderSettingsRequest,
     SettingsUpdateRequest,
+    SourceDiscoveryRequest,
+    SourceSaveRequest,
     ResearchRequest,
     SourceSearchRequest,
     TaskCreateRequest,
@@ -41,6 +44,15 @@ from hydra.schemas import (
 )
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
+from hydra.services.discovery import (
+    DiscoveryCache,
+    DiscoveryCoordinator,
+    SourceProviderConfig,
+    author_string,
+    evaluate_pdf_download_policy,
+    result_from_dict,
+)
+from hydra.services.discovery.providers import default_providers
 from hydra.settings.toml_config import load_settings, save_settings
 from hydra.storage.app_data import app_data_root
 from hydra.storage.runtime import choose_bind_host
@@ -64,6 +76,7 @@ EXTENSION_BRIDGE_PATHS = {
 
 def create_app() -> FastAPI:
     bridge_tokens: set[str] = set()
+    discovery_cache = DiscoveryCache()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -281,6 +294,79 @@ def create_app() -> FastAPI:
         sources = [await repo.upsert_source(source) for source in await search_academic_sources(request.query)]
         await repo.add_event("sources.search.completed", f"Found {len(sources)} source candidates")
         return {"sources": sources}
+
+    @app.post("/api/sources/discovery/search")
+    async def source_discovery_search(request: SourceDiscoveryRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        coordinator = DiscoveryCoordinator(
+            providers=default_providers(),
+            cache=discovery_cache,
+            config=SourceProviderConfig(contact_email=request.contact_email),
+        )
+        payload = await coordinator.search(
+            request.query,
+            offline_only=request.offline_only,
+            scholarly_apis_enabled=request.scholarly_apis_enabled,
+            existing_sources=await repo.list_sources(),
+        )
+        for item in payload["review_items"]:
+            await repo.create_review_item(item)
+        await repo.add_event("sources.discovery.completed", f"Discovery search for {request.query}: {payload['state']}")
+        return payload
+
+    @app.post("/api/sources/save")
+    async def save_discovered_source(request: SourceSaveRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        repo = Repository(session)
+        result = result_from_dict(request.result).with_query(request.query)
+        metadata = result.to_dict()
+        metadata["source_origin"] = request.source_origin
+        metadata["trust_level"] = TRUST_LEVEL_UNTRUSTED
+        metadata["metadata_provenance"] = metadata["metadata_sources"]
+        if request.browser_context_event_id:
+            metadata["browser_context_event_id"] = request.browser_context_event_id
+        pdf_policy = evaluate_pdf_download_policy(
+            pdf_url=result.pdf_url,
+            expected_size_bytes=result.expected_size_bytes,
+            automatic_download=request.automatic_pdf_download,
+            explicit_save_with_pdf=request.save_pdf,
+            allowed_domains=request.allowed_pdf_domains,
+        )
+        metadata["pdf_download_policy"] = pdf_policy
+
+        if not request.user_initiated:
+            review = await repo.create_review_item(
+                {
+                    "project_id": request.project_id,
+                    "item_type": "source-save-proposal",
+                    "title": f"Review source save: {result.title}",
+                    "summary": "Untrusted provider or page text proposed a source save. User action is required.",
+                    "origin_type": request.source_origin,
+                    "target_type": "source",
+                    "payload": metadata,
+                }
+            )
+            raise HTTPException(status_code=403, detail={"reason": "user-initiated-save-required", "review_item_id": review["id"]})
+
+        source = await repo.upsert_source(
+            {
+                "id": source_id_from_discovery_result(metadata),
+                "project_id": request.project_id,
+                "title": result.title,
+                "authors": author_string(result.authors),
+                "year": str(result.year or ""),
+                "url": result.url or result.pdf_url or "",
+                "abstract": result.abstract,
+                "kind": "paper",
+                "source_type": "paper",
+                "doi": result.doi,
+                "arxiv_id": result.arxiv_id,
+                "metadata_json": json.dumps(metadata, sort_keys=True),
+                "metadata_sources_json": json.dumps(metadata["metadata_provenance"], sort_keys=True),
+                "trust_origin": "user-curated",
+            }
+        )
+        await repo.add_event("sources.saved", f"Saved source {result.title}")
+        return {"source": source, "pdf_policy": pdf_policy}
 
     @app.post("/api/sources/ingest")
     async def ingest_source(
@@ -749,6 +835,16 @@ def re_search_case_insensitive(pattern: str, text: str) -> str | None:
 
     found = re.search(pattern, text, re.I)
     return found.group(0).strip() if found else None
+
+
+def source_id_from_discovery_result(metadata: dict[str, Any]) -> str:
+    for key in ("doi", "arxiv_id", "openalex_id", "s2_id", "url"):
+        value = metadata.get(key)
+        if value:
+            digest = hashlib.sha256(str(value).lower().encode("utf-8")).hexdigest()[:16]
+            return f"src_{key}_{digest}"
+    digest = hashlib.sha256(str(metadata.get("title") or "source").lower().encode("utf-8")).hexdigest()[:16]
+    return f"src_title_{digest}"
 
 
 def extract_upload_text(raw: bytes, content_type: str, filename: str) -> str:

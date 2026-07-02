@@ -58,6 +58,8 @@ class Repository:
                 d["detected_metadata"] = json.loads(d["detected_metadata"] or "{}")
             if model.__tablename__ == "sources" and d.get("metadata_json"):
                 d["metadata_json"] = json.loads(d["metadata_json"] or "{}")
+            if model.__tablename__ == "sources" and d.get("metadata_sources_json"):
+                d["metadata_sources"] = json.loads(d["metadata_sources_json"] or "[]")
             if model.__tablename__ == "review_items" and d.get("payload_json"):
                 d["payload"] = json.loads(d["payload_json"] or "{}")
         return d
@@ -127,11 +129,13 @@ class Repository:
         abstract = source_data.get("abstract") or ""
         kind = source_data.get("kind") or "article"
         metadata_json = source_data.get("metadata_json")
+        metadata_sources_json = source_data.get("metadata_sources_json")
         workspace_id = source_data.get("workspace_id")
         project_id = source_data.get("project_id")
         trust_origin = source_data.get("trust_origin")
         doi = source_data.get("doi")
         arxiv_id = source_data.get("arxiv_id")
+        source_type = source_data.get("source_type")
 
         if source:
             source.title = title
@@ -142,6 +146,8 @@ class Repository:
             source.kind = kind
             if metadata_json is not None:
                 source.metadata_json = metadata_json
+            if metadata_sources_json is not None:
+                source.metadata_sources_json = metadata_sources_json
             if workspace_id is not None:
                 source.workspace_id = workspace_id
             if project_id is not None:
@@ -152,6 +158,8 @@ class Repository:
                 source.doi = doi
             if arxiv_id is not None:
                 source.arxiv_id = arxiv_id
+            if source_type is not None:
+                source.source_type = source_type
             source.updated_at = datetime.now(timezone.utc)
         else:
             source = Source(
@@ -164,7 +172,9 @@ class Repository:
                 url=url,
                 abstract=abstract,
                 kind=kind,
+                source_type=source_type or kind,
                 metadata_json=metadata_json,
+                metadata_sources_json=metadata_sources_json or "[]",
                 trust_origin=trust_origin or "user",
                 doi=doi,
                 arxiv_id=arxiv_id,
