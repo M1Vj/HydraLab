@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { Boxes, CheckCircle2, CircleDashed, FileText, ListRestart, PauseCircle, Play, RefreshCcw, RotateCcw, Save, SkipForward, XCircle } from "lucide-react";
+import { Boxes, CheckCircle2, CircleDashed, FileText, ListRestart, PauseCircle, Play, RefreshCcw, RotateCcw, Save, SkipForward, SlidersHorizontal, XCircle } from "lucide-react";
 import type { AgentRunArtifact, AgentTraceStep, AutonomyAuditEntry, AutonomyPendingAction, AutonomyPolicy, OrchestratorRunResponse, OrchestratorStage } from "../../lib/api";
 import type { PanelComponentProps } from "../panelRegistry";
 import { FailureState, LoadingState, PanelScaffold } from "./PanelState";
 import {
   CANONICAL_STAGE_IDS,
+  ADVANCED_EVOLUTION_METHODS,
+  ADVANCED_RANKING_METHODS,
+  ADVANCED_RUN_PRESETS,
+  ADVANCED_STOP_CONDITIONS,
+  ADVANCED_VALIDATION_RULES,
+  buildAdvancedRunConfig,
   cancelAgentRun,
   defaultStageToggles,
   cancelAutopilotRun,
@@ -26,6 +32,9 @@ import {
   startOrchestratorRun,
   summarizeRunState,
   toggleStage,
+  validateAdvancedRunConfig,
+  type AdvancedRunConfig,
+  type AdvancedValidationResult,
   type BuiltinRecipeId,
   type LiteratureDepth,
   type RecipeDescriptor,
@@ -67,6 +76,11 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
   const [pendingActions, setPendingActions] = useState<AutonomyPendingAction[]>([]);
   const [auditEntries, setAuditEntries] = useState<AutonomyAuditEntry[]>([]);
   const [governanceBusy, setGovernanceBusy] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedPreset, setAdvancedPreset] = useState("balanced");
+  const [advancedConfig, setAdvancedConfig] = useState<AdvancedRunConfig>(() => buildAdvancedRunConfig("balanced"));
+  const [advancedTouched, setAdvancedTouched] = useState(false);
+  const [advancedValidation, setAdvancedValidation] = useState<AdvancedValidationResult>({ state: "empty", error: null });
 
   const recipeOptions = useMemo<RecipeDescriptor[]>(() => {
     const base = recipes.length ? recipes : [{ id: "paper-critique", name: "Paper Critique", stages: [] }];
@@ -79,6 +93,16 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
   useEffect(() => {
     void loadStages();
   }, []);
+
+  useEffect(() => {
+    if (!advancedOpen) return;
+    setAdvancedValidation({ state: "loading", error: null });
+    const timer = window.setTimeout(() => {
+      const result = validateAdvancedRunConfig(advancedConfig, { autopilotEnabled: Boolean(autonomyPolicy?.autopilot_enabled) });
+      setAdvancedValidation(!advancedTouched && result.state === "ready" ? { state: "empty", error: null } : result);
+    }, 25);
+    return () => window.clearTimeout(timer);
+  }, [advancedConfig, advancedOpen, advancedTouched, autonomyPolicy?.autopilot_enabled]);
 
   async function loadStages() {
     setLoading(true);
@@ -129,7 +153,25 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
     try {
       const saved = await saveAutonomyPolicy({ ...autonomyPolicy, project_id: PROJECT_ID });
       setAutonomyPolicy(saved);
-      const started = await startAutopilotRun(PROJECT_ID, toggles);
+      const validation: AdvancedValidationResult = advancedOpen
+        ? validateAdvancedRunConfig(advancedConfig, { autopilotEnabled: Boolean(saved.autopilot_enabled) })
+        : { state: "ready", error: null };
+      if (validation.state === "failure") {
+        setAdvancedValidation(validation);
+        setError(new Error(`${validation.error?.field}: allowed ${validation.error?.allowed}`));
+        return;
+      }
+      if (validation.state === "permission-denied") {
+        setAdvancedValidation(validation);
+        return;
+      }
+      const started = await startAutopilotRun(
+        PROJECT_ID,
+        toggles,
+        undefined,
+        advancedOpen ? advancedConfig : undefined,
+        advancedPreset,
+      );
       setRun(started);
       await refreshGovernance(started.run.id);
       announce(`Autopilot ${summarizeRunState(started.run.status, started.run.state).toLowerCase()}`);
@@ -287,6 +329,25 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
     setAutonomyPolicy((current) => current ? { ...current, ...patch } : current);
   }
 
+  function updateAdvancedConfig(patch: Partial<AdvancedRunConfig>) {
+    setAdvancedTouched(true);
+    setAdvancedConfig((current) => buildAdvancedRunConfig(advancedPreset, { ...current, ...patch }));
+  }
+
+  function updateBudgetPolicy(patch: Partial<AdvancedRunConfig["budget_policy"]>) {
+    setAdvancedTouched(true);
+    setAdvancedConfig((current) => ({
+      ...current,
+      budget_policy: { ...current.budget_policy, ...patch },
+    }));
+  }
+
+  function updateAdvancedPreset(preset: string) {
+    setAdvancedPreset(preset);
+    setAdvancedConfig(buildAdvancedRunConfig(preset));
+    setAdvancedTouched(false);
+  }
+
   const steps = run?.trace.steps ?? [];
   const artifacts = run?.artifacts ?? [];
   const literatureArtifact = artifacts.find((artifact) => artifact.kind === "literature-review");
@@ -398,6 +459,19 @@ export function AgentRunsPanel({ announce }: PanelComponentProps) {
               <span>Semantic retrieval</span>
             </label>
           </section>
+        )}
+
+        {autonomyPolicy && (
+          <AdvancedRunDisclosure
+            open={advancedOpen}
+            onOpenChange={setAdvancedOpen}
+            preset={advancedPreset}
+            config={advancedConfig}
+            validation={advancedValidation}
+            onPresetChange={updateAdvancedPreset}
+            onConfigChange={updateAdvancedConfig}
+            onBudgetChange={updateBudgetPolicy}
+          />
         )}
 
         <div className={`agent-run-banner ${run?.run.status ?? "idle"}`} role="status">
@@ -625,10 +699,154 @@ function ArtifactRow({ artifact }: { artifact: AgentRunArtifact }) {
   );
 }
 
+function AdvancedRunDisclosure({
+  open,
+  onOpenChange,
+  preset,
+  config,
+  validation,
+  onPresetChange,
+  onConfigChange,
+  onBudgetChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  preset: string;
+  config: AdvancedRunConfig;
+  validation: AdvancedValidationResult;
+  onPresetChange: (preset: string) => void;
+  onConfigChange: (patch: Partial<AdvancedRunConfig>) => void;
+  onBudgetChange: (patch: Partial<AdvancedRunConfig["budget_policy"]>) => void;
+}) {
+  return (
+    <details className="advanced-run-config" open={open} onToggle={(event) => onOpenChange(event.currentTarget.open)}>
+      <summary>
+        <SlidersHorizontal size={14} aria-hidden />
+        <span>Advanced</span>
+        <small className={`advanced-state ${validation.state}`}>{advancedStateLabel(validation)}</small>
+      </summary>
+      <div className="advanced-run-grid">
+        <label>
+          <span>Preset</span>
+          <select value={preset} onChange={(event) => onPresetChange(event.target.value)}>
+            {Object.keys(ADVANCED_RUN_PRESETS).map((id) => (
+              <option key={id} value={id}>{id.replace("_", " ")}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Ranking</span>
+          <select value={config.ranking_method} onChange={(event) => onConfigChange({ ranking_method: event.target.value as AdvancedRunConfig["ranking_method"] })}>
+            {ADVANCED_RANKING_METHODS.map((method) => (
+              <option key={method} value={method}>{method}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Candidates</span>
+          <input type="number" min={1} max={20} value={config.candidate_count} onChange={(event) => onConfigChange({ candidate_count: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>Population</span>
+          <input type="number" min={1} max={100} value={config.population_size} onChange={(event) => onConfigChange({ population_size: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>Review depth</span>
+          <input type="number" min={1} max={5} value={config.review_depth} onChange={(event) => onConfigChange({ review_depth: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>Evolution</span>
+          <select value={config.evolution_method} onChange={(event) => onConfigChange({ evolution_method: event.target.value as AdvancedRunConfig["evolution_method"] })}>
+            {ADVANCED_EVOLUTION_METHODS.map((method) => (
+              <option key={method} value={method}>{method}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Loops</span>
+          <input type="number" min={1} max={100} value={config.max_loop_iterations} onChange={(event) => onConfigChange({ max_loop_iterations: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>Checkpoints</span>
+          <input type="number" min={1} max={25} value={config.checkpoint_frequency} onChange={(event) => onConfigChange({ checkpoint_frequency: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>Token budget</span>
+          <input type="number" min={1} max={200000} value={config.budget_policy.tokens} onChange={(event) => onBudgetChange({ tokens: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>Time budget</span>
+          <input type="number" min={1} max={3600} value={config.budget_policy.wall_clock_seconds} onChange={(event) => onBudgetChange({ wall_clock_seconds: Number(event.target.value) })} />
+        </label>
+        <label>
+          <span>Cost budget</span>
+          <input
+            type="number"
+            min={0}
+            max={1000}
+            value={config.budget_policy.cost_usd ?? ""}
+            onChange={(event) => onBudgetChange({ cost_usd: event.target.value === "" ? null : Number(event.target.value) })}
+          />
+        </label>
+        <label className="agent-inline-toggle advanced-inline">
+          <input type="checkbox" checked={config.compare_enabled} onChange={(event) => onConfigChange({ compare_enabled: event.target.checked })} />
+          <span>Compare</span>
+        </label>
+      </div>
+      <div className="advanced-check-grid">
+        <fieldset>
+          <legend>Validation</legend>
+          {ADVANCED_VALIDATION_RULES.map((rule) => (
+            <label key={rule} className="agent-inline-toggle">
+              <input
+                type="checkbox"
+                checked={config.validation_rules.includes(rule)}
+                onChange={(event) => onConfigChange({ validation_rules: toggleList(config.validation_rules, rule, event.target.checked) })}
+              />
+              <span>{rule}</span>
+            </label>
+          ))}
+        </fieldset>
+        <fieldset>
+          <legend>Stop</legend>
+          {ADVANCED_STOP_CONDITIONS.map((condition) => (
+            <label key={condition} className="agent-inline-toggle">
+              <input
+                type="checkbox"
+                checked={config.stop_conditions.includes(condition)}
+                onChange={(event) => onConfigChange({ stop_conditions: toggleList(config.stop_conditions, condition, event.target.checked) })}
+              />
+              <span>{condition.replace(/_/g, " ")}</span>
+            </label>
+          ))}
+        </fieldset>
+      </div>
+      {validation.state === "failure" && validation.error && (
+        <p className="advanced-validation-message" role="alert">
+          {validation.error.field}: allowed {validation.error.allowed}
+        </p>
+      )}
+    </details>
+  );
+}
+
 function parseSourceScope(value: string): Record<string, unknown> {
   const ids = value.split(",").map((item) => item.trim()).filter(Boolean);
   if (ids.length > 0) return { kind: "source-ids", source_ids: ids };
   return { kind: "all-project" };
+}
+
+function advancedStateLabel(validation: AdvancedValidationResult): string {
+  if (validation.state === "loading") return "Loading";
+  if (validation.state === "failure") return "Failure";
+  if (validation.state === "permission-denied") return "Permission denied";
+  if (validation.state === "empty") return "Empty";
+  return "Ready";
+}
+
+function toggleList<T extends string>(items: T[], item: T, enabled: boolean): T[] {
+  if (enabled) return items.includes(item) ? items : [...items, item];
+  return items.filter((current) => current !== item);
 }
 
 function previewMarkdown(markdown?: string): string {

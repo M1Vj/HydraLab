@@ -109,9 +109,20 @@ class AutopilotLoop:
 
         if run_id and self.loop_count >= self.policy.max_loop_count:
             self.stop_reason = "max_loop_count"
-            run = await self.session.get(AgentRun, run_id)
-            if run is not None and run.status == RunStatus.RUNNING.value:
-                await repo.complete_run(run_id, status=RunStatus.COMPLETED.value)
+            if self.config.block_on_loop_ceiling:
+                self.stop_reason = "max_loop_iterations"
+                await repo.append_step(
+                    run_id,
+                    kind="loop_control.blocked",
+                    status=RunStatus.BLOCKED.value,
+                    summary="max loop iterations reached; choose continue, raise the ceiling, or stop",
+                    payload={"state": "loop_blocked", "ceiling": "max_loop_iterations"},
+                )
+                run = await repo.block_on_budget(run_id)
+            else:
+                run = await self.session.get(AgentRun, run_id)
+                if run is not None and run.status == RunStatus.RUNNING.value:
+                    await repo.complete_run(run_id, status=RunStatus.COMPLETED.value)
             if run is not None:
                 run.stop_reason = self.stop_reason
                 self.session.add(run)

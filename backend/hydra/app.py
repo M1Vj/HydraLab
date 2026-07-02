@@ -87,6 +87,7 @@ from hydra.schemas import (
     AgentModeUpdateRequest,
     AutonomyPolicyRequest,
     AutopilotCancelRequest,
+    AdvancedRunConfigValidateRequest,
     AutopilotRunStartRequest,
     FullAccessUpdateRequest,
     SkillEnabledRequest,
@@ -191,6 +192,13 @@ from hydra.autonomy.policy import (
 )
 from hydra.orchestrator.run import OrchestratorConfigError, RunConfig, RunStateMachine
 from hydra.orchestrator.stages import StageEnum
+from hydra.orchestrator.advanced import (
+    ADVANCED_RUN_PRESETS,
+    AdvancedConfigValidationError,
+    advanced_validation_error_response,
+    build_advanced_run_config,
+    route_untrusted_advanced_preset,
+)
 from hydra.recipes.literature_review import (
     LiteratureReviewInput,
     LiteratureReviewSaveRequest,
@@ -1095,6 +1103,23 @@ def create_app() -> FastAPI:
         await session.refresh(stored)
         return {"project_id": request.project_id, "policy": resolved.public_dict()}
 
+    @app.get("/api/autonomy/advanced-config/presets")
+    async def list_advanced_run_presets() -> dict[str, object]:
+        return {
+            "presets": [
+                {"id": preset_id, "config": preset.model_dump()}
+                for preset_id, preset in ADVANCED_RUN_PRESETS.items()
+            ]
+        }
+
+    @app.post("/api/autonomy/advanced-config/validate")
+    async def validate_advanced_run_config(request: AdvancedRunConfigValidateRequest) -> dict[str, object]:
+        try:
+            config = build_advanced_run_config(preset_id=request.preset_id, overrides=request.overrides)
+        except AdvancedConfigValidationError as exc:
+            raise HTTPException(status_code=400, detail=advanced_validation_error_response(exc)) from exc
+        return {"valid": True, "config": config.model_dump()}
+
     @app.post("/api/autonomy/runs")
     async def start_autopilot_run(
         request: AutopilotRunStartRequest,
@@ -1103,10 +1128,54 @@ def create_app() -> FastAPI:
         stored = await _mode_policy(session, request.project_id)
         try:
             policy = resolve_autonomy_policy(stored)
-            config = RunConfig.resolve(
-                stage_overrides=request.enabled_stages or {stage.value: True for stage in StageEnum},
-                scoring_method=request.scoring_method,
-            )
+            if request.advanced_config is not None:
+                advanced = build_advanced_run_config(
+                    preset_id=request.advanced_preset_id,
+                    overrides=request.advanced_config,
+                )
+                if request.advanced_config_trust_origin == "untrusted-external":
+                    item = await route_untrusted_advanced_preset(
+                        session,
+                        project_id=request.project_id,
+                        config=advanced,
+                        provenance=request.advanced_config_trust_origin,
+                    )
+                    return {
+                        "run": {
+                            "id": "",
+                            "project_id": request.project_id,
+                            "mode": policy.mode,
+                            "status": "review_inbox",
+                            "state": "review_inbox",
+                            "paused": False,
+                        },
+                        "trace": {"run_id": "", "steps": []},
+                        "artifacts": [],
+                        "review_item_id": item.get("id"),
+                    }
+                config = advanced.to_run_config()
+                policy = AutonomyPolicy(
+                    mode=policy.mode,
+                    allowed_action_types=policy.allowed_action_types,
+                    blocked_action_types=policy.blocked_action_types,
+                    budget_limits=BudgetLimits(
+                        tokens=advanced.budget_policy.tokens,
+                        wall_clock_seconds=advanced.budget_policy.wall_clock_seconds,
+                    ),
+                    max_loop_count=advanced.max_loop_iterations,
+                    stop_conditions=advanced.stop_conditions,
+                    checkpoint_required=policy.checkpoint_required,
+                    approval_required=policy.approval_required,
+                    rollback_behavior=policy.rollback_behavior,
+                    autopilot_enabled=policy.autopilot_enabled,
+                )
+            else:
+                config = RunConfig.resolve(
+                    stage_overrides=request.enabled_stages or {stage.value: True for stage in StageEnum},
+                    scoring_method=request.scoring_method,
+                )
+        except AdvancedConfigValidationError as exc:
+            raise HTTPException(status_code=400, detail=advanced_validation_error_response(exc)) from exc
         except (AutonomyPolicyError, OrchestratorConfigError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         result = await AutopilotLoop(
