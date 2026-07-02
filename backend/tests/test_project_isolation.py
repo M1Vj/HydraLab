@@ -96,6 +96,21 @@ async def test_unscoped_reads_still_return_all_project_rows(session):
 
 
 @pytest.mark.asyncio
+async def test_merge_sources_refuses_cross_project(session):
+    repo = Repository(session)
+    await repo.upsert_source({"id": "src-a", "title": "A", "doi": "10.1/x", "project_id": "alpha"})
+    await repo.upsert_source({"id": "src-b", "title": "B", "doi": "10.1/x", "project_id": "beta"})
+
+    with pytest.raises(ValueError, match="different projects"):
+        await repo.merge_sources(["src-a", "src-b"], reason="exact_identifier")
+
+    # Same-project merge still works.
+    await repo.upsert_source({"id": "src-c", "title": "A dup", "doi": "10.1/x", "project_id": "alpha"})
+    result = await repo.merge_sources(["src-a", "src-c"], reason="exact_identifier")
+    assert result["survivor_id"] in {"src-a", "src-c"}
+
+
+@pytest.mark.asyncio
 async def test_list_sources_excludes_trashed_by_default(session):
     repo = Repository(session)
     live = await repo.upsert_source({"id": "src-live", "title": "Live", "project_id": "default"})

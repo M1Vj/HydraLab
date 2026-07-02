@@ -1608,6 +1608,12 @@ class Repository:
         if len(live_sources) < 2:
             raise ValueError("merge requires at least two existing sources")
 
+        # Isolation guard: merging repoints references onto the survivor, so
+        # sources from different projects must never be merged (that would leak
+        # references across the project boundary). Legacy NULL maps to default.
+        if len({(s.project_id or DEFAULT_PROJECT_ID) for s in live_sources}) > 1:
+            raise ValueError("cannot merge sources from different projects")
+
         survivor = sorted(
             live_sources,
             key=lambda s: (
@@ -2152,7 +2158,11 @@ class Repository:
         live = [s for s in sources if not s.get("trashed") and not s.get("merged_into_source_id")]
         if project_id:
             live = [s for s in live if s.get("project_id") in (None, project_id)]
-        groups: dict[str, list[dict[str, Any]]] = {}
+        # Group by (project, citation key) so a same-key source in a different
+        # project is never pulled into the same merge — merge_sources rejects
+        # cross-project merges, and auto-merging across projects would breach
+        # isolation anyway.
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for source in live:
             csl = source.get("csl_json") if isinstance(source.get("csl_json"), dict) else {}
             if not csl:
@@ -2162,10 +2172,11 @@ class Repository:
                     "author": [{"family": a.strip()} for a in str(source.get("authors") or "").split(";") if a.strip()],
                 }
             key = compute_citation_key(csl)
-            groups.setdefault(key, []).append(source)
+            proj = source.get("project_id") or DEFAULT_PROJECT_ID
+            groups.setdefault((proj, key), []).append(source)
 
         merges: list[dict[str, Any]] = []
-        for key, members in groups.items():
+        for (_proj, key), members in groups.items():
             if len(members) < 2:
                 continue
             union_sources: list[str] = []
