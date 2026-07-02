@@ -118,6 +118,11 @@ class ProviderSettingsRequest(BaseModel):
     model: str = Field(min_length=1, max_length=160)
     api_key_ref: str = Field(default="", max_length=300)
 
+
+class ProviderSecretRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=80)
+    secret: str = Field(min_length=1, max_length=4000)
+
 class SettingsUpdateRequest(BaseModel):
     provider_settings: list[ProviderSettingsRequest] | None = None
     workspace_preferences: dict[str, str] | None = None

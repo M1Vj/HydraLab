@@ -651,10 +651,18 @@ class Repository:
         if existing:
             existing.model = model
             existing.api_key_ref = api_key_ref
+            existing.secret_ref = api_key_ref or None
+            existing.auth_status = "configured" if api_key_ref else "missing_secret_ref"
             existing.updated_at = datetime.now(timezone.utc)
             ps = existing
         else:
-            ps = ProviderSettings(provider=provider, model=model, api_key_ref=api_key_ref)
+            ps = ProviderSettings(
+                provider=provider,
+                model=model,
+                api_key_ref=api_key_ref,
+                secret_ref=api_key_ref or None,
+                auth_status="configured" if api_key_ref else "missing_secret_ref",
+            )
             self.session.add(ps)
             
         await self.session.commit()

@@ -12,6 +12,7 @@ from sqlmodel import delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.database.models import Citation, KgEdge, Note, ReviewItem, Source
+from hydra.settings.project_config import default_project_config, load_project_config
 
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
@@ -76,8 +77,24 @@ def _safe_relative_path(path: str) -> str:
     return normalized.as_posix()
 
 
+NOTE_EXTENSIONS = {".md", ".markdown"}
+PROTECTED_PATHS = {
+    "HYDRA.md",
+    "AGENTS.md",
+    "project.yaml",
+    "SOUL.md",
+    "USER.md",
+    "MEMORY.md",
+}
+PROTECTED_PREFIXES = (".git/", ".hydralab/", ".agents/")
+
+
 def _is_draft_path(relative_path: str) -> bool:
     return relative_path.startswith("writing/drafts/") or relative_path.startswith("writing/manuscripts/")
+
+
+def _is_under_root(relative_path: str, root: str) -> bool:
+    return relative_path == root.rstrip("/") or relative_path.startswith(root)
 
 
 def _split_frontmatter(content: str) -> tuple[str | None, str, str]:
@@ -155,6 +172,7 @@ class NoteFileService:
 
     async def open_note(self, relative_path: str, project_id: str = "default", trust_origin: str = "user") -> dict[str, Any]:
         rel_path = _safe_relative_path(relative_path)
+        self._assert_note_path_allowed(rel_path)
         path = self.project_root / rel_path
         if not path.exists():
             raise FileNotFoundError(rel_path)
@@ -189,7 +207,9 @@ class NoteFileService:
         row = await self.session.get(Note, note_id)
         if row is None:
             raise KeyError(note_id)
-        path = self.project_root / _safe_relative_path(row.relative_path)
+        rel_path = _safe_relative_path(row.relative_path)
+        self._assert_note_path_allowed(rel_path)
+        path = self.project_root / rel_path
         _atomic_write(path, content)
         frontmatter, frontmatter_body, _rest = _split_frontmatter(content)
         object_type = "draft" if _is_draft_path(row.relative_path) else "note"
@@ -258,6 +278,28 @@ class NoteFileService:
         }
         journal_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
         return journal_path
+
+    def _assert_note_path_allowed(self, relative_path: str) -> None:
+        path = Path(relative_path)
+        if path.suffix.lower() not in NOTE_EXTENSIONS:
+            raise PermissionError("note-file access is limited to Markdown files under configured note roots")
+        if relative_path in PROTECTED_PATHS or any(relative_path.startswith(prefix) for prefix in PROTECTED_PREFIXES):
+            raise PermissionError("protected project/context files cannot be opened through the note-file API")
+        if not any(_is_under_root(relative_path, root) for root in self._note_roots()):
+            raise PermissionError("note-file path is outside configured note roots")
+
+    def _note_roots(self) -> list[str]:
+        config_path = self.project_root / "project.yaml"
+        if config_path.exists():
+            folders = load_project_config(config_path).data.get("folders", {})
+        else:
+            folders = default_project_config("default", "HydraLab")["folders"]
+        roots: list[str] = []
+        for role in ("knowledge", "writing"):
+            folder = folders.get(role, {})
+            if isinstance(folder, dict) and folder.get("path"):
+                roots.append(str(folder["path"]).strip("/"))
+        return [f"{root}/" for root in roots if root]
 
     def list_recovery_journals(self) -> list[dict[str, Any]]:
         journal_dir = self.project_root / ".hydralab" / "temp"

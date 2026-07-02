@@ -69,6 +69,7 @@ def default_settings() -> dict[str, Any]:
     data["providers"] = {"routing_policy": "manual", "accounts": {}}
     data["privacy"] = {
         "offline_only": False,
+        "scholarly_apis_enabled": True,
         "g3_provider_send": False,
         "provider_send_allowlist": ["active_file", "selection", "explicit_attachment"],
         "provider_send_opt_ins": {

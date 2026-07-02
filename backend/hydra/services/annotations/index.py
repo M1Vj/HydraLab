@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -8,7 +9,7 @@ from typing import Any
 from sqlmodel import delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from hydra.database.models import Annotation, Claim, Note, ReviewItem
+from hydra.database.models import Annotation, AnnotationIndexMetadata, Claim, Note, ReviewItem
 from hydra.services.annotations.sidecar import (
     annotation_sidecar_path,
     external_edit_requires_reindex,
@@ -56,10 +57,21 @@ class AnnotationIndexer:
         annotations = [self._annotation_from_record(record) for record in records]
         for annotation in annotations:
             self.session.add(annotation)
+        if source_id is not None:
+            await self._record_index_metadata(source_id)
         await self.session.commit()
         for annotation in annotations:
             await self.session.refresh(annotation)
         return annotations
+
+    async def sidecar_index_stale(self, source_id: str) -> bool:
+        path = annotation_sidecar_path(self.project_root, source_id)
+        if not path.exists():
+            return False
+        metadata = await self.session.get(AnnotationIndexMetadata, source_id)
+        if metadata is None:
+            return True
+        return metadata.sidecar_content_hash != _file_hash(path)
 
     async def reindex_if_external_edit(self, source_id: str, stored_hash: str, *, app_wrote_last: bool) -> list[Annotation]:
         path = annotation_sidecar_path(self.project_root, source_id)
@@ -158,6 +170,17 @@ class AnnotationIndexer:
             records.extend(payload.get("records", []))
         return records
 
+    async def _record_index_metadata(self, source_id: str) -> None:
+        path = annotation_sidecar_path(self.project_root, source_id)
+        if not path.exists():
+            return
+        metadata = await self.session.get(AnnotationIndexMetadata, source_id)
+        if metadata is None:
+            metadata = AnnotationIndexMetadata(source_id=source_id, sidecar_path=str(path.relative_to(self.project_root)))
+        metadata.sidecar_content_hash = _file_hash(path)
+        metadata.indexed_at = _utcnow()
+        self.session.add(metadata)
+
     def _annotation_from_record(self, record: dict[str, Any]) -> Annotation:
         return Annotation(
             sidecar_record_id=str(record["sidecar_record_id"]),
@@ -207,3 +230,7 @@ class AnnotationIndexer:
             )
             await self.session.commit()
         return finding
+
+
+def _file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()

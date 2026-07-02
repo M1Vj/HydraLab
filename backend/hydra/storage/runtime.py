@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import socket
 import subprocess
 import time
@@ -97,6 +98,8 @@ class BackendRuntime:
             "api_version": "v1",
             "started_at": time.time(),
             "health_url": f"http://{self.host}:{self.port}/healthz",
+            "handshake_nonce": secrets.token_urlsafe(32),
+            "handshake_nonce_issued_at": time.time(),
         }
         _write_owner_only_json(self.port_path, payload)
         self._port_files.add(self.port_path)

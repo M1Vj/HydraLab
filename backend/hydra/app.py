@@ -5,7 +5,9 @@ import json
 import os
 import secrets
 import hashlib
+import hmac
 import sys
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
@@ -40,6 +42,7 @@ from hydra.schemas import (
     NoteSuggestionRequest,
     NoteUpdateRequest,
     ProviderSettingsRequest,
+    ProviderSecretRequest,
     SettingsUpdateRequest,
     SourceDiscoveryRequest,
     SourceSaveRequest,
@@ -50,7 +53,7 @@ from hydra.schemas import (
     WritingReviewRequest,
     ChatCompletionRequest,
 )
-from hydra.database.models import Annotation
+from hydra.database.models import Annotation, IngestionJob
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
 from hydra.services.annotations import AnnotationIndexer, create_annotation_record, read_sidecar_records, write_sidecar_records
@@ -58,6 +61,7 @@ from hydra.services.notes import NoteFileService
 from hydra.services.discovery import (
     DiscoveryCache,
     DiscoveryCoordinator,
+    ProviderRateLimiter,
     SourceProviderConfig,
     author_string,
     evaluate_pdf_download_policy,
@@ -65,7 +69,10 @@ from hydra.services.discovery import (
 )
 from hydra.services.discovery.providers import default_providers
 from hydra.services.ingestion import IngestionService
+from hydra.services.ingestion.safety import validate_source_file
+from hydra.services.ingestion.types import QuarantineError
 from hydra.settings.toml_config import load_settings, save_settings
+from hydra.settings.secrets import InMemorySecretStore, KeyringSecretStore, ProviderSecretService, SecretStore
 from hydra.storage.app_data import app_data_root
 from hydra.storage.runtime import DEFAULT_PORT, BackendRuntime, choose_bind_host
 from hydra.writing import review_text
@@ -84,11 +91,27 @@ EXTENSION_BRIDGE_PATHS = {
     "/api/browser/selection",
     "/api/browser/propose-source",
 }
+RAW_SECRET_PREFIXES = (
+    "sk-",
+    "ai-",
+    "ghp_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "AKIA",
+    "ASIA",
+)
+BRIDGE_TOKEN_TTL_SECONDS = 3600
+BRIDGE_NONCE_TTL_SECONDS = 300
+
+_MEMORY_SECRET_STORE = InMemorySecretStore()
 
 
 def create_app() -> FastAPI:
-    bridge_tokens: set[str] = set()
-    discovery_cache = DiscoveryCache()
+    bridge_tokens: dict[str, float] = {}
+    discovery_cache = DiscoveryCache(persist=True)
+    secret_store = _secret_store()
+    _ensure_runtime_nonce(app_data_root())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -145,7 +168,12 @@ def create_app() -> FastAPI:
         if not authorization.startswith(prefix):
             raise HTTPException(status_code=401, detail="Missing browser bridge token")
         token = authorization[len(prefix):]
-        if token not in bridge_tokens:
+        token_hash = _hash_bridge_token(token)
+        now = time.time()
+        for stored_hash, issued_at in list(bridge_tokens.items()):
+            if now - issued_at > BRIDGE_TOKEN_TTL_SECONDS:
+                bridge_tokens.pop(stored_hash, None)
+        if not any(hmac.compare_digest(token_hash, stored_hash) for stored_hash in bridge_tokens):
             raise HTTPException(status_code=401, detail="Invalid browser bridge token")
         return {"origin": origin, "token": token}
 
@@ -173,8 +201,11 @@ def create_app() -> FastAPI:
         origin = raw_request.headers.get("origin")
         if origin not in HYDRALAB_BRIDGE_ORIGINS:
             raise HTTPException(status_code=403, detail="Forbidden browser bridge origin")
+        if not _consume_runtime_nonce(app_data_root(), request.handshake_nonce):
+            raise HTTPException(status_code=401, detail="Invalid browser bridge nonce")
         token = secrets.token_urlsafe(32)
-        bridge_tokens.add(token)
+        bridge_tokens.clear()
+        bridge_tokens[_hash_bridge_token(token)] = time.time()
         return {
             "status": "connected",
             "token": token,
@@ -415,15 +446,17 @@ def create_app() -> FastAPI:
     @app.post("/api/sources/discovery/search")
     async def source_discovery_search(request: SourceDiscoveryRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
+        posture = _resolve_discovery_posture(request)
         coordinator = DiscoveryCoordinator(
             providers=default_providers(),
             cache=discovery_cache,
+            limiter=_discovery_limiter_from_settings(),
             config=SourceProviderConfig(contact_email=request.contact_email),
         )
         payload = await coordinator.search(
             request.query,
-            offline_only=request.offline_only,
-            scholarly_apis_enabled=request.scholarly_apis_enabled,
+            offline_only=posture["offline_only"],
+            scholarly_apis_enabled=posture["scholarly_apis_enabled"],
             existing_sources=await repo.list_sources(),
         )
         for item in payload["review_items"]:
@@ -501,12 +534,36 @@ def create_app() -> FastAPI:
             original_path = write_uploaded_original(project_root, file.filename or "paper", raw)
             kind = "pdf"
             url_ref = url or doi or ""
+            declared_mime = file.content_type or ""
+            try:
+                validate_source_file(original_path, declared_mime=declared_mime)
+            except QuarantineError as exc:
+                job = IngestionJob(
+                    source_id=f"quarantine:{sha256_bytes(raw)[:16]}",
+                    source_path=str(original_path),
+                    status="quarantined",
+                    progress=0,
+                    original_content_hash=sha256_bytes(raw),
+                    failure_reason=str(exc),
+                )
+                session.add(job)
+                await session.commit()
+                await session.refresh(job)
+                return JSONResponse(
+                    {
+                        "state": "quarantined",
+                        "job_id": job.id,
+                        "reason": str(exc),
+                        "source": None,
+                        "artifacts": [],
+                    },
+                    status_code=422,
+                )
         elif url or doi:
-            final_title = title or f"Ingested {url or doi}"
-            url_ref = url or doi or ""
-            project_root = hydra_project_root()
-            original_path = write_uploaded_original(project_root, f"{hashlib.sha256(url_ref.encode()).hexdigest()[:12]}.md", f"This is mocked extracted text from {url_ref}.".encode("utf-8"))
-            kind = "url"
+            raise HTTPException(
+                status_code=501,
+                detail="url/doi ingestion arrives with discovery auto-download; no artifacts are created by this endpoint yet",
+            )
         else:
             raise HTTPException(status_code=400, detail="Must provide file, url, or doi")
 
@@ -515,7 +572,7 @@ def create_app() -> FastAPI:
             "original_content_hash": sha256_bytes(original_path.read_bytes()),
             "trust_level": TRUST_LEVEL_UNTRUSTED,
         }
-        summary = f"Mocked summary for {final_title}. Ingestion queued."
+        summary = f"Ingestion accepted for {final_title}."
         
         source = await repo.upsert_source(
             {
@@ -534,7 +591,7 @@ def create_app() -> FastAPI:
             title=source["title"],
             source_path=original_path,
             project_root=project_root,
-            declared_mime=file.content_type if file else "text/markdown",
+            declared_mime=declared_mime,
         )
         note_body = f"Summary: {summary}\n\nIngestion state: {ingestion['state']}\nArtifacts: {len(ingestion.get('artifacts', []))}"
         note = await repo.add_note(f"Notes & Summary for {source['title']}", note_body, source["id"])
@@ -546,18 +603,19 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         await repo.add_event("rag.retrieval", f"Retrieving answers for query '{query}'")
         
-        # Mock simple RAG chunking and summarization
-        chunks = [f"Mocked relevant passage for '{query}'"]
+        # Placeholder until the real retrieval branch replaces this endpoint.
+        chunks = [f"Placeholder relevant passage for '{query}'"]
         if source_id:
             chunks.append(f"Passage specifically from source_id={source_id}")
             
-        answer = f"Based on the ingested sources, here is a synthesized answer for '{query}'. This is a mock RAG generation."
+        answer = f"Placeholder retrieval response for '{query}'."
         
         return {
             "query": query,
             "answer": answer,
             "chunks": chunks,
-            "source_id": source_id
+            "source_id": source_id,
+            "placeholder": True,
         }
 
     @app.post("/api/writing/review")
@@ -599,7 +657,7 @@ def create_app() -> FastAPI:
         
         # Link some evidence mock
         sources = await repo.list_sources()
-        source_id = sources[0]["id"] if sources else (await repo.upsert_source({"title": "Mock Source"}))["id"]
+        source_id = sources[0]["id"] if sources else (await repo.upsert_source({"title": "Placeholder Source"}))["id"]
         
         await repo.add_evidence(
             claim_id=claim1["id"],
@@ -616,11 +674,12 @@ def create_app() -> FastAPI:
             confidence=0.2
         )
         
-        await repo.add_event("claims.detected", "Detected mock claims from draft text")
+        await repo.add_event("claims.detected", "Detected placeholder claims from draft text")
         
         return {
             "claims": [claim1, claim2],
-            "evidence": await repo.list_evidence()
+            "evidence": await repo.list_evidence(),
+            "placeholder": True,
         }
 
     @app.post("/api/citations")
@@ -698,6 +757,8 @@ def create_app() -> FastAPI:
             )
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Note file not found") from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -711,6 +772,8 @@ def create_app() -> FastAPI:
             return await NoteFileService(session, hydra_project_root()).save_note(note_id, request.content)
         except KeyError:
             raise HTTPException(status_code=404, detail="Note file not indexed") from None
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -753,8 +816,9 @@ def create_app() -> FastAPI:
                 select(Annotation).where(Annotation.source_id == source_id).order_by(Annotation.page.asc(), Annotation.created_at.asc())
             )
         ).all()
-        if not annotations and read_sidecar_records(hydra_project_root(), source_id):
-            annotations = await AnnotationIndexer(session, hydra_project_root()).rebuild_from_sidecars(source_id)
+        indexer = AnnotationIndexer(session, hydra_project_root())
+        if read_sidecar_records(hydra_project_root(), source_id) and (not annotations or await indexer.sidecar_index_stale(source_id)):
+            annotations = await indexer.rebuild_from_sidecars(source_id)
         return {"annotations": [annotation_to_api(row) for row in annotations]}
 
     @app.post("/api/annotations/{source_id}")
@@ -856,6 +920,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/settings/provider")
     async def save_provider_settings(request: ProviderSettingsRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        _validate_secret_ref(request.provider, request.api_key_ref)
         repo = Repository(session)
         settings = await repo.save_provider_settings(
             request.provider,
@@ -865,13 +930,23 @@ def create_app() -> FastAPI:
         await repo.add_event("settings.provider.saved", f"Saved settings for {request.provider}")
         return settings
 
+    @app.post("/api/settings/provider/secret")
+    async def save_provider_secret(request: ProviderSecretRequest) -> dict[str, object]:
+        service = ProviderSecretService(secret_store)
+        settings_path = app_data_root() / "settings.toml"
+        service.save_provider_secret(settings_path, request.provider, "api_key", request.secret)
+        return {"secret_ref": f"keychain:hydralab/{request.provider}"}
+
     @app.get("/api/settings")
     async def get_settings(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
         settings_path = app_data_root() / "settings.toml"
         global_settings = load_settings(settings_path).data
         return {
-            "provider_settings": await repo.list_provider_settings(),
+            "provider_settings": _provider_settings_with_resolution(
+                await repo.list_provider_settings(),
+                secret_store,
+            ),
             "workspace_preferences": await repo.list_settings(),
             "global_settings": global_settings,
         }
@@ -883,6 +958,7 @@ def create_app() -> FastAPI:
         global_settings = load_settings(settings_path).data
         if request.provider_settings is not None:
             for p in request.provider_settings:
+                _validate_secret_ref(p.provider, p.api_key_ref)
                 await repo.save_provider_settings(p.provider, p.model, p.api_key_ref)
                 account = global_settings.setdefault("providers", {}).setdefault("accounts", {}).setdefault(p.provider, {})
                 account["provider_id"] = p.provider
@@ -895,7 +971,10 @@ def create_app() -> FastAPI:
         save_settings(settings_path, global_settings)
         await repo.add_event("settings.updated", "Saved settings and workspace preferences")
         return {
-            "provider_settings": await repo.list_provider_settings(),
+            "provider_settings": _provider_settings_with_resolution(
+                await repo.list_provider_settings(),
+                secret_store,
+            ),
             "workspace_preferences": await repo.list_settings(),
             "global_settings": global_settings,
         }
@@ -1071,6 +1150,154 @@ def motivating_excerpt(text: str) -> str:
     normalized = " ".join(text.split())
     match = re_search_case_insensitive(r"[^.?!]*save this as a source[^.?!]*[.?!]?", normalized)
     return (match or normalized)[:500]
+
+
+def _secret_store() -> SecretStore:
+    if os.environ.get("HYDRALAB_SECRET_STORE") == "memory" or os.environ.get("PYTEST_CURRENT_TEST"):
+        return _MEMORY_SECRET_STORE
+    return KeyringSecretStore()
+
+
+def _validate_secret_ref(provider: str, value: str) -> None:
+    if not _is_secret_ref(value):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider '{provider}' credentials must be saved as keychain:* or env:* references. "
+                "Send raw secrets to POST /api/settings/provider/secret first."
+            ),
+        )
+
+
+def _is_secret_ref(value: str) -> bool:
+    if not value:
+        return False
+    if value.startswith(RAW_SECRET_PREFIXES):
+        return False
+    if value.startswith("keychain:"):
+        suffix = value.removeprefix("keychain:")
+        return suffix.startswith("hydralab/") and bool(suffix.removeprefix("hydralab/"))
+    if value.startswith("env:"):
+        name = value.removeprefix("env:")
+        return name.replace("_", "").isalnum() and name[0].isalpha()
+    return False
+
+
+def _provider_settings_with_resolution(settings: list[dict[str, Any]], store: SecretStore) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in settings:
+        provider = str(row.get("provider") or "")
+        ref = str(row.get("api_key_ref") or row.get("secret_ref") or "")
+        copied = dict(row)
+        copied["api_key_ref"] = ref
+        copied["secret_ref"] = ref or None
+        copied["resolved"] = _secret_ref_resolved(ref, provider, store)
+        result.append(copied)
+    return result
+
+
+def _resolve_discovery_posture(request: SourceDiscoveryRequest) -> dict[str, bool]:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    privacy = settings.get("privacy", {})
+    general = settings.get("general", {})
+    offline_only = bool(privacy.get("offline_only") or general.get("offline_only") or request.offline_only)
+    stored_scholarly = bool(privacy.get("scholarly_apis_enabled", True))
+    scholarly_apis_enabled = bool(stored_scholarly and request.scholarly_apis_enabled and not offline_only)
+    return {"offline_only": offline_only, "scholarly_apis_enabled": scholarly_apis_enabled}
+
+
+def _discovery_limiter_from_settings() -> ProviderRateLimiter:
+    settings = load_settings(app_data_root() / "settings.toml").data
+    providers = settings.get("providers", {})
+    aggregate = int(providers.get("aggregate_rate", providers.get("aggregate_requests_per_second", 3)) or 3)
+    rates: dict[str, float] = {}
+    configured_rates = providers.get("rates", {})
+    if isinstance(configured_rates, dict):
+        for provider, rate in configured_rates.items():
+            try:
+                rates[str(provider)] = float(rate)
+            except (TypeError, ValueError):
+                continue
+    accounts = providers.get("accounts", {})
+    if isinstance(accounts, dict):
+        for provider, account in accounts.items():
+            if isinstance(account, dict) and "rate" in account:
+                try:
+                    rates[str(provider)] = float(account["rate"])
+                except (TypeError, ValueError):
+                    continue
+    return ProviderRateLimiter(aggregate_requests_per_second=aggregate, provider_requests_per_second=rates)
+
+
+def _secret_ref_resolved(ref: str, provider: str, store: SecretStore) -> bool:
+    if ref.startswith("env:"):
+        return os.environ.get(ref.removeprefix("env:")) is not None
+    if ref == f"keychain:hydralab/{provider}":
+        return ProviderSecretService(store).has_provider_secret(provider, "api_key")
+    return False
+
+
+def _hash_bridge_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _runtime_descriptor_path(root: Path) -> Path:
+    return Path(root) / "runtime" / "backend.json"
+
+
+def _ensure_runtime_nonce(root: Path) -> dict[str, Any]:
+    path = _runtime_descriptor_path(root)
+    try:
+        descriptor = json.loads(path.read_text()) if path.exists() else {}
+    except json.JSONDecodeError:
+        descriptor = {}
+    now = time.time()
+    if not descriptor.get("handshake_nonce"):
+        descriptor["handshake_nonce"] = secrets.token_urlsafe(32)
+        descriptor["handshake_nonce_issued_at"] = now
+    descriptor.setdefault("host", HYDRALAB_BIND_HOST)
+    descriptor.setdefault("port", int(os.environ.get("HYDRALAB_PORT", str(DEFAULT_PORT))))
+    descriptor.setdefault("scheme", "http")
+    descriptor.setdefault("base_url", f"http://{descriptor['host']}:{descriptor['port']}")
+    descriptor.setdefault("api_version", "v1")
+    descriptor.setdefault("started_at", now)
+    descriptor.setdefault("health_url", f"{descriptor['base_url']}/healthz")
+    _write_owner_only_json(path, descriptor)
+    return descriptor
+
+
+def _consume_runtime_nonce(root: Path, presented_nonce: str) -> bool:
+    descriptor = _ensure_runtime_nonce(root)
+    expected = str(descriptor.get("handshake_nonce") or "")
+    issued_at = float(descriptor.get("handshake_nonce_issued_at") or 0)
+    if not expected or time.time() - issued_at > BRIDGE_NONCE_TTL_SECONDS:
+        _rotate_runtime_nonce(root, descriptor)
+        return False
+    if not hmac.compare_digest(expected, presented_nonce):
+        return False
+    _rotate_runtime_nonce(root, descriptor)
+    return True
+
+
+def _rotate_runtime_nonce(root: Path, descriptor: dict[str, Any] | None = None) -> str:
+    descriptor = descriptor or _ensure_runtime_nonce(root)
+    nonce = secrets.token_urlsafe(32)
+    descriptor["handshake_nonce"] = nonce
+    descriptor["handshake_nonce_issued_at"] = time.time()
+    _write_owner_only_json(_runtime_descriptor_path(root), descriptor)
+    return nonce
+
+
+def _write_owner_only_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.chmod(path, 0o600)
 
 def re_search_case_insensitive(pattern: str, text: str) -> str | None:
     import re

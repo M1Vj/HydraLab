@@ -304,6 +304,14 @@ class Annotation(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class AnnotationIndexMetadata(SQLModel, table=True):
+    __tablename__ = "annotation_index_metadata"
+    source_id: str = Field(primary_key=True)
+    sidecar_path: str
+    sidecar_content_hash: str
+    indexed_at: datetime = Field(default_factory=utcnow)
+
+
 class IndexQueueItem(SQLModel, table=True):
     __tablename__ = "index_queue_items"
     id: str = Field(default_factory=uuid_text, primary_key=True)
@@ -337,6 +345,17 @@ class LexicalIndexEntry(SQLModel, table=True):
     trust_level: str = Field(default="untrusted-external", index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class DiscoveryCacheEntry(SQLModel, table=True):
+    __tablename__ = "discovery_cache_entries"
+    cache_key: str = Field(primary_key=True)
+    provider: str = Field(index=True)
+    query_hash: str = Field(index=True)
+    identifier: Optional[str] = Field(default=None, index=True)
+    payload_json: str
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
 
 
 class IngestionJob(SQLModel, table=True):

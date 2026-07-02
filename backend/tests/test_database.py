@@ -1,11 +1,15 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from sqlmodel import SQLModel, select
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import sessionmaker
+from alembic import command
+from alembic.config import Config
 
 from hydra.database import repository as repository_module
 from hydra.database.models import (
@@ -250,6 +254,59 @@ def test_hl_refint_01_source_reference_registry_covers_model_source_foreign_keys
 
     assert discovered
     assert discovered <= repository_module.SOURCE_DIRECT_REFERENCE_COLUMNS
+
+
+def test_alembic_upgrade_head_schema_matches_sqlmodel_metadata(tmp_path: Path):
+    db_path = tmp_path / "alembic-head.db"
+    config = Config("backend/alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{db_path}")
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    inspector = inspect(engine)
+    try:
+        actual = _schema_signature(inspector)
+        expected = _metadata_signature()
+    finally:
+        engine.dispose()
+
+    assert actual == expected
+
+
+def _schema_signature(inspector):
+    signature = {}
+    for table_name in sorted(SQLModel.metadata.tables):
+        columns = inspector.get_columns(table_name)
+        pk = set(inspector.get_pk_constraint(table_name).get("constrained_columns") or [])
+        fks = {
+            (fk["constrained_columns"][0], fk["referred_table"], fk["referred_columns"][0])
+            for fk in inspector.get_foreign_keys(table_name)
+            if fk.get("constrained_columns") and fk.get("referred_columns")
+        }
+        signature[table_name] = {
+            column["name"]: {
+                "primary_key": column["name"] in pk,
+                "nullable": bool(column["nullable"]) and column["name"] not in pk,
+                "foreign_keys": sorted(fk for fk in fks if fk[0] == column["name"]),
+            }
+            for column in columns
+        }
+    return signature
+
+
+def _metadata_signature():
+    signature = {}
+    for table_name, table in sorted(SQLModel.metadata.tables.items()):
+        signature[table_name] = {
+            column.name: {
+                "primary_key": bool(column.primary_key),
+                "nullable": bool(column.nullable) and not column.primary_key,
+                "foreign_keys": sorted((column.name, fk.column.table.name, fk.column.name) for fk in column.foreign_keys),
+            }
+            for column in table.columns
+        }
+    return signature
 
 
 def test_hl_refint_01_source_reference_registry_covers_source_polymorphic_pairs():
