@@ -635,3 +635,32 @@ class McpServerEnableRequest(BaseModel):
 class McpToolPermissionRequest(BaseModel):
     enabled: bool | None = None
     permission: Literal["allow", "deny"] | None = None
+
+
+# --- Phase-3 experiment execution & compute (branch 03-03) ------------------
+class ExperimentRunCreateRequest(BaseModel):
+    project_id: str = "default"
+    backend_id: str
+    label: str = Field(default="", max_length=200)
+    config: dict = Field(default_factory=dict)
+    trust_origin: str = Field(default="user", max_length=40)
+    justification_trust: str = Field(default="user", max_length=40)
+
+
+class ExperimentApprovalRequest(BaseModel):
+    decision: Literal["approve", "reject"] = "approve"
+
+
+class ExperimentStartRequest(BaseModel):
+    argv: list[str] | None = None
+
+
+class ExperimentEnableExecutionRequest(BaseModel):
+    project_id: str = "default"
+    enabled: bool = True
+
+
+class ExperimentCloudBudgetRequest(BaseModel):
+    project_id: str = "default"
+    budget_usd: float | None = None
+    spend_approved: bool = False

@@ -877,3 +877,97 @@ class IdeaCandidate(SQLModel, table=True):
     trust_origin: str = Field(default="user")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+# --- Phase-3 experiment execution & compute (branch 03-03, HL-SAFE-10..19) ---
+# The FIRST HydraLab subsystem that runs real user-authored code. Every table
+# here backs a gated, sandboxed, checkpointed, audited execution path; nothing
+# in this subsystem widens the Phase-1/2 safe command console.
+class ComputeBackend(SQLModel, table=True):
+    """A registered compute backend (HL-SAFE-10).
+
+    ``kind`` is ``local_sandbox`` or ``cloud``. A disabled or unregistered
+    backend is never selectable for a run. ``default_limits_json`` carries the
+    resource ceilings (cpu_seconds/memory_bytes/wall_clock_seconds/log_cap_bytes)
+    the SandboxPolicy builder consumes.
+    """
+
+    __tablename__ = "compute_backends"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    kind: str = Field(default="local_sandbox", index=True)
+    display_name: str = Field(default="")
+    enabled: bool = Field(default=True, index=True)
+    capabilities_json: str = Field(default="{}")
+    default_limits_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ExperimentRun(SQLModel, table=True):
+    """A single gated experiment run record (HL-SAFE-13).
+
+    ``status`` is a plain string; ``killed:<reason>`` terminal values are written
+    verbatim. ``checkpoint_ref`` pins the pre-run checkpoint (HL-SAFE-16),
+    ``trust_origin``/``justification_trust`` drive the untrusted-provenance
+    Review-Inbox routing (HL-SAFE-18), and ``enforcement`` records whether real
+    Seatbelt filesystem/network confinement was applied or a best-effort
+    resource-only fallback was used (honest, never silently unsafe).
+    """
+
+    __tablename__ = "experiment_runs"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    backend_id: Optional[str] = Field(default=None, index=True)
+    label: str = Field(default="")
+    config_json: str = Field(default="{}")
+    status: str = Field(default="pending", index=True)
+    reason: str = Field(default="")
+    checkpoint_ref: Optional[str] = Field(default=None)
+    artifact_manifest_json: str = Field(default="{}")
+    metrics_json: str = Field(default="{}")
+    trust_origin: str = Field(default="user")
+    justification_trust: str = Field(default="user")
+    requested_by: str = Field(default="user")
+    approval_id: Optional[str] = Field(default=None)
+    review_item_id: Optional[str] = Field(default=None)
+    enforcement: str = Field(default="seatbelt")
+    exit_code: Optional[int] = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    ended_at: Optional[datetime] = Field(default=None)
+
+
+class ExperimentRunLog(SQLModel, table=True):
+    """Bounded per-run stdout/stderr/metric rows keyed by ``run_id`` (HL-SAFE-14).
+
+    Every row references its run; when the persisted stream reaches the byte cap
+    the final row carries an explicit ``[truncated: N bytes omitted]`` marker so
+    log loss is never silent.
+    """
+
+    __tablename__ = "experiment_run_logs"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(index=True)
+    stream: str = Field(default="stdout", index=True)  # stdout | stderr | metric
+    seq: int = Field(default=0)
+    content: str = Field(default="")
+    byte_len: int = Field(default=0)
+    truncated: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ExperimentExecutionSetting(SQLModel, table=True):
+    """Per-project execution enablement + cloud budget (HL-SAFE-17).
+
+    ``execution_enabled`` is the per-project first-use gate (default OFF); the
+    Experiments panel renders its permission-denied "Enable execution" state
+    until it is true. ``cloud_budget_usd`` must be configured AND
+    ``cloud_spend_approved`` true before any ``cloud`` backend run may proceed.
+    """
+
+    __tablename__ = "experiment_execution_settings"
+    project_id: str = Field(primary_key=True)
+    execution_enabled: bool = Field(default=False)
+    cloud_budget_usd: Optional[float] = Field(default=None)
+    cloud_spend_approved: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=utcnow)

@@ -6,6 +6,7 @@ import {
   Bug,
   FileSearch,
   FileText,
+  FlaskConical,
   FolderTree,
   GitBranch,
   Globe2,
@@ -28,6 +29,7 @@ export type PanelId =
   | "git"
   | "research-chat"
   | "agent-runs"
+  | "experiments"
   | "idea-board"
   | "markdown-editor"
   | "pdf-reader"
@@ -81,6 +83,7 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
   git: { id: "git", title: "Git", icon: GitBranch, defaultLocation: "border-left", singleton: true, allowMultiple: false },
   "research-chat": { id: "research-chat", title: "Research Chat", icon: BotMessageSquare, defaultLocation: "center", singleton: true, allowMultiple: false },
   "agent-runs": { id: "agent-runs", title: "Agent Runs", icon: Workflow, defaultLocation: "center", singleton: true, allowMultiple: false },
+  experiments: { id: "experiments", title: "Experiments", icon: FlaskConical, defaultLocation: "center", singleton: true, allowMultiple: false },
   "idea-board": { id: "idea-board", title: "Idea Board", icon: Lightbulb, defaultLocation: "center", singleton: true, allowMultiple: false },
   "markdown-editor": { id: "markdown-editor", title: "Markdown Editor", icon: FileText, defaultLocation: "center", singleton: false, allowMultiple: true },
   "pdf-reader": { id: "pdf-reader", title: "PDF Reader", icon: ScrollText, defaultLocation: "center", singleton: false, allowMultiple: true },
@@ -156,7 +159,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 76,
           selected: 0,
           enableMaximize: true,
-          children: [tab("research-chat"), tab("agent-runs"), tab("idea-board"), tab("markdown-editor"), tab("writing"), tab("pdf-reader"), tab("browser")],
+          children: [tab("research-chat"), tab("agent-runs"), tab("experiments"), tab("idea-board"), tab("markdown-editor"), tab("writing"), tab("pdf-reader"), tab("browser")],
         },
         {
           type: "tabset",
