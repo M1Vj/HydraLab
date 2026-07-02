@@ -14,6 +14,7 @@ import {
   Inbox,
   Lightbulb,
   ListTodo,
+  PackageCheck,
   PackageOpen,
   PenLine,
   ScrollText,
@@ -39,6 +40,7 @@ export type PanelId =
   | "citation-evidence"
   | "tasks"
   | "exports"
+  | "reproducibility"
   | "self-evolution"
   | "settings"
   | "logs"
@@ -101,6 +103,14 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
   },
   tasks: { id: "tasks", title: "Tasks", icon: ListTodo, defaultLocation: "border-right", singleton: true, allowMultiple: false },
   exports: { id: "exports", title: "Exports", icon: PackageOpen, defaultLocation: "border-right", singleton: true, allowMultiple: false },
+  reproducibility: {
+    id: "reproducibility",
+    title: "Reproducibility",
+    icon: PackageCheck,
+    defaultLocation: "border-right",
+    singleton: true,
+    allowMultiple: false,
+  },
   "self-evolution": {
     id: "self-evolution",
     title: "Self-Evolution",
@@ -177,7 +187,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 24,
           selected: 0,
           enableMaximize: true,
-          children: [tab("citation-evidence"), tab("tasks"), tab("exports"), tab("self-evolution"), tab("settings")],
+          children: [tab("citation-evidence"), tab("tasks"), tab("exports"), tab("reproducibility"), tab("self-evolution"), tab("settings")],
         },
       ],
     },

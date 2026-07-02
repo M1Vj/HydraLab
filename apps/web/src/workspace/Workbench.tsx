@@ -22,6 +22,7 @@ import { MarkdownEditorPanel } from "./panels/MarkdownEditorPanel";
 import { WritingPanel } from "./panels/WritingPanel";
 import { TasksPanel } from "./panels/TasksPanel";
 import { SelfEvolutionPanel } from "./panels/SelfEvolutionPanel";
+import { ReproducibilityPanel } from "./panels/ReproducibilityPanel";
 import { BrowserPanel } from "./panels/BrowserPanel";
 import {
   CitationEvidencePanel,
@@ -90,6 +91,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         "citation-evidence": CitationEvidencePanel,
         tasks: TasksPanel,
         exports: ExportPanel,
+        reproducibility: ReproducibilityPanel,
         "self-evolution": SelfEvolutionPanel,
         settings: SettingsPanel,
         logs: LogsPanel,
@@ -239,7 +241,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
 }
 
 function ActivityBar({ openPanel, reviewCount }: { openPanel: (id: PanelId) => void; reviewCount: number }) {
-  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "agent-runs", "experiments", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "self-evolution", "settings"];
+  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "agent-runs", "experiments", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "reproducibility", "self-evolution", "settings"];
   return (
     <nav className="activity-bar" aria-label="Activity Bar">
       {ids.map((id) => {

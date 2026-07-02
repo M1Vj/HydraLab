@@ -83,6 +83,8 @@ from hydra.schemas import (
     ConsoleRunRequest,
     CitationExportRequest,
     ProjectZipRequest,
+    ReproducibilityBundleRequest,
+    ReproducibilityReportRequest,
     BackupRequest,
     RestoreRequest,
     WritingReviewRequest,
@@ -211,6 +213,7 @@ from hydra.compute.registry import BackendNotSelectableError, ComputeRegistry
 from hydra.experiments.approval import ExperimentExecutionGate
 from hydra.experiments.logs import RunLogStore
 from hydra.experiments.runner import ExperimentRunner, RunLifecycleError
+from hydra.reproducibility import ReproducibilityBundleBuilder, ManifestVerifier, export_final_report
 from hydra.autonomy.policy import (
     AutonomyPolicy,
     AutonomyPolicyError,
@@ -397,6 +400,16 @@ def _agent_run_public(run: AgentRun) -> dict[str, object]:
         "created_at": run.created_at.timestamp(),
         "artifacts": json.loads(run.artifacts or "[]"),
     }
+
+
+def _parse_run_ids(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = str(value).split(",")
+    return [item.strip() for item in raw if item and item.strip()]
 
 
 def create_app() -> FastAPI:
@@ -1891,6 +1904,110 @@ def create_app() -> FastAPI:
                 for row in rows
             ]
         }
+
+    # --- Phase-3 reproducibility & evaluation ledger (branch 03-07) ---------
+    @app.get("/api/reproducibility/bundleable-runs")
+    async def list_reproducibility_bundleable_runs(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        agent_runs = (
+            await session.exec(
+                select(AgentRun)
+                .where(AgentRun.project_id == project_id)
+                .where(AgentRun.status.in_(["completed", "succeeded"]))
+                .order_by(AgentRun.created_at.desc())
+            )
+        ).all()
+        experiment_runs = (
+            await session.exec(
+                select(ExperimentRun)
+                .where(ExperimentRun.project_id == project_id)
+                .where(ExperimentRun.status.in_(["succeeded", "completed"]))
+                .order_by(ExperimentRun.created_at.desc())
+            )
+        ).all()
+        runs = [
+            {
+                "id": run.id,
+                "kind": "agent",
+                "label": run.recipe or run.stage or run.id,
+                "status": run.status,
+                "created_at": run.created_at.timestamp(),
+            }
+            for run in agent_runs
+        ] + [
+            {
+                "id": run.id,
+                "kind": "experiment",
+                "label": run.label or run.id,
+                "status": run.status,
+                "created_at": run.created_at.timestamp(),
+            }
+            for run in experiment_runs
+        ]
+        return {"project_id": project_id, "runs": runs}
+
+    @app.get("/api/reproducibility/preview")
+    async def preview_reproducibility_bundle(
+        project_id: str = "default",
+        run_ids: str = "",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        selected = _parse_run_ids(run_ids)
+        if not selected:
+            selected = [
+                str(item["id"])
+                for item in (await list_reproducibility_bundleable_runs(project_id, session))["runs"]
+            ]
+        try:
+            return await ReproducibilityBundleBuilder(session).preview(project_id, selected, hydra_project_root())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+
+    @app.post("/api/reproducibility/bundles")
+    async def build_reproducibility_bundle(
+        request: ReproducibilityBundleRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ReproducibilityBundleBuilder(session).build(
+                request.project_id,
+                request.run_ids,
+                hydra_project_root(),
+                approval_id=request.approval_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+        if result.status != "created":
+            reason = result.gate.reason if result.gate else "user-initiated approval required"
+            raise HTTPException(status_code=403, detail={"reason": reason, "status": result.status})
+        return result.public_dict()
+
+    @app.get("/api/reproducibility/bundles/{bundle_id}/verify")
+    async def verify_reproducibility_bundle(
+        bundle_id: str,
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        bundle_dir = hydra_project_root() / "outputs" / "reproducibility" / project_id / bundle_id
+        if not bundle_dir.exists():
+            raise HTTPException(status_code=404, detail={"reason": f"bundle not found: {bundle_id}"})
+        return (await ManifestVerifier(session).verify(bundle_dir)).public_dict()
+
+    @app.post("/api/reproducibility/bundles/{bundle_id}/report")
+    async def export_reproducibility_report(
+        bundle_id: str,
+        request: ReproducibilityReportRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        bundle_dir = hydra_project_root() / "outputs" / "reproducibility" / request.project_id / bundle_id
+        if not bundle_dir.exists():
+            raise HTTPException(status_code=404, detail={"reason": f"bundle not found: {bundle_id}"})
+        result = await export_final_report(session, bundle_dir, approval_id=request.approval_id)
+        if result.status != "created":
+            reason = result.gate.reason if result.gate else "user-initiated approval required"
+            raise HTTPException(status_code=403, detail={"reason": reason, "status": result.status})
+        return result.public_dict()
 
     # ------------------------------------------- idea recipe (02-06, HL-ASSIST-*)
     def _idea_candidate_public(candidate: IdeaCandidateModel) -> dict[str, object]:

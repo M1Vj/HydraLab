@@ -271,6 +271,17 @@ class ProjectZipRequest(BaseModel):
     include_annotations: bool = False
 
 
+class ReproducibilityBundleRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    run_ids: list[str] = Field(min_length=1, max_length=100)
+    approval_id: str | None = Field(default=None, max_length=200)
+
+
+class ReproducibilityReportRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    approval_id: str | None = Field(default=None, max_length=200)
+
+
 class BackupRequest(BaseModel):
     project_id: str = Field(default="default", max_length=200)
 

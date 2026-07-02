@@ -1009,3 +1009,40 @@ class ExperimentExecutionSetting(SQLModel, table=True):
     cloud_budget_usd: Optional[float] = Field(default=None)
     cloud_spend_approved: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ReproducibilityManifest(SQLModel, table=True):
+    """Persisted reproducibility-bundle manifest wrapper (HL-QUAL-30/31)."""
+
+    __tablename__ = "reproducibility_manifests"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    package_version: str
+    schema_version: str = Field(default="reproducibility-manifest.v1")
+    hash_algorithm: str = Field(default="sha256")
+    source_ids_json: str = Field(default="[]")
+    sources_json: str = Field(default="[]")
+    artifacts_json: str = Field(default="[]")
+    prompts_json: str = Field(default="[]")
+    model_calls_json: str = Field(default="[]")
+    tool_calls_json: str = Field(default="[]")
+    code_version_json: str = Field(default="{}")
+    environment_version_json: str = Field(default="{}")
+    approvals_json: str = Field(default="[]")
+    checkpoints_json: str = Field(default="[]")
+    redaction_decisions_json: str = Field(default="[]")
+    run_ids_json: str = Field(default="[]")
+    manifest_content_hash: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class EvaluationResult(SQLModel, table=True):
+    """One metric result produced by an experiment/autonomy run (HL-QUAL-32)."""
+
+    __tablename__ = "evaluation_results"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(index=True)
+    metric_name: str = Field(index=True)
+    value: float
+    evaluated_artifact_hash: str
+    created_at: datetime = Field(default_factory=utcnow)

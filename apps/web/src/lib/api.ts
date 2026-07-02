@@ -123,6 +123,61 @@ export type ExportOptionsResponse = {
   excluded_by_default: string[];
 };
 
+export type ReproducibilityRunSummary = {
+  id: string;
+  kind: "agent" | "experiment" | string;
+  label: string;
+  status: string;
+  created_at: number;
+};
+
+export type ReproducibilityRedactionDecision = {
+  id: string;
+  category: string;
+  path_or_ref: string;
+  reason: string;
+  decision: string;
+};
+
+export type ReproducibilityIncludedCategory = {
+  id: string;
+  label: string;
+  count: number;
+};
+
+export type ReproducibilityPreviewResponse = {
+  status: string;
+  project_id: string;
+  run_ids: string[];
+  included_categories: ReproducibilityIncludedCategory[];
+  redacted_item_count: number;
+  redaction_decisions: ReproducibilityRedactionDecision[];
+};
+
+export type ReproducibilityBundleResponse = {
+  status: string;
+  bundle_id: string;
+  bundle_dir: string;
+  manifest_content_hash: string;
+  evaluation_path: string;
+  ledger_path: string;
+  manifest: Record<string, unknown>;
+  gate: ManuscriptGateResult | null;
+};
+
+export type ReproducibilityVerificationResponse = {
+  ok: boolean;
+  hash_mismatches: string[];
+  dangling_ids: string[];
+  resolved_soft_deleted_or_merged: Array<Record<string, unknown>>;
+};
+
+export type ReproducibilityReportResponse = {
+  status: string;
+  report_path: string;
+  gate: ManuscriptGateResult | null;
+};
+
 export type ClaimStatus = "draft" | "supported" | "weak" | "contradicted" | "needs_review" | "rejected";
 
 export type ClaimRecord = {
@@ -1022,6 +1077,47 @@ export function submitManuscriptPackage(
   client: ApiClient = api,
 ): Promise<{ status: string; gate: ManuscriptGateResult }> {
   return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/submit`, input);
+}
+
+// --- Reproducibility bundle / evaluation ledger (branch 03-07) -------------
+
+export function listReproducibilityRuns(
+  projectId = "default",
+  client: ApiClient = api,
+): Promise<{ project_id: string; runs: ReproducibilityRunSummary[] }> {
+  return client.get(`/api/reproducibility/bundleable-runs?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function getReproducibilityPreview(
+  projectId: string,
+  runIds: string[],
+  client: ApiClient = api,
+): Promise<ReproducibilityPreviewResponse> {
+  const query = new URLSearchParams({ project_id: projectId, run_ids: runIds.join(",") });
+  return client.get(`/api/reproducibility/preview?${query.toString()}`);
+}
+
+export function buildReproducibilityBundle(
+  input: { project_id: string; run_ids: string[]; approval_id?: string | null },
+  client: ApiClient = api,
+): Promise<ReproducibilityBundleResponse> {
+  return client.post("/api/reproducibility/bundles", input);
+}
+
+export function verifyReproducibilityBundle(
+  bundleId: string,
+  projectId = "default",
+  client: ApiClient = api,
+): Promise<ReproducibilityVerificationResponse> {
+  return client.get(`/api/reproducibility/bundles/${encodeURIComponent(bundleId)}/verify?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function exportReproducibilityReport(
+  bundleId: string,
+  input: { project_id: string; approval_id?: string | null },
+  client: ApiClient = api,
+): Promise<ReproducibilityReportResponse> {
+  return client.post(`/api/reproducibility/bundles/${encodeURIComponent(bundleId)}/report`, input);
 }
 
 // --- DOCX OpenXML assisted edits (branch 02-08, Phase 2) --------------------
