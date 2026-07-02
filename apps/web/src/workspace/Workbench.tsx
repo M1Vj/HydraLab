@@ -131,6 +131,14 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
     setToast(message);
   }
 
+  // Auto-dismiss the visual toast so notifications don't linger forever; the
+  // sr-only aria-live region keeps its message for assistive tech regardless.
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(""), 4000);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
   function openPanel(id: PanelId, config: PanelConfig = {}) {
     const activeModel = modelRef.current;
     const tabId = tabStableKey(id, config);
