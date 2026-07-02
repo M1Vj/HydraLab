@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { FileSearch, Pause, RefreshCcw, Save, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileSearch, Pause, RefreshCcw, Save, ShieldAlert, XCircle } from "lucide-react";
 import { useAppContext } from "../../core/context";
 import { registry } from "../../core/registry";
 import {
@@ -7,10 +7,13 @@ import {
   DEFAULT_SOURCE_DISCOVERY_SETTINGS,
   discoveryResultFields,
   pdfDownloadCopy,
+  ingestionConfidenceLabel,
+  resolveIngestionPanelState,
   resolveDiscoveryPanelState,
   sourceDiscoveryNetworkPosture,
   type DiscoveryProviderStatus,
   type DiscoveryResultRow,
+  type SourceIngestionStatus,
   type SourceDiscoverySettings,
 } from "../../lib/hydra";
 
@@ -299,20 +302,76 @@ export function SourcesSidebar() {
 
   return (
     <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "8px" }}>
-      {sources.map(s => (
-        <div 
-          key={s.id} 
-          style={{ 
-            padding: "10px", 
-            backgroundColor: "var(--bg-dark)", 
-            borderRadius: "6px", 
-            border: "1px solid var(--border)" 
-          }}
-        >
-          <div style={{ fontWeight: "bold", fontSize: "13px", color: "var(--fg)" }}>{s.title}</div>
-          {s.authors && <div style={{ fontSize: "11px", color: "var(--fg-dim)", marginTop: "4px" }}>{s.authors}</div>}
+      {sources.map((source) => (
+        <article key={source.id} className="source-sidebar-card">
+          <header>
+            <div>
+              <strong>{source.title}</strong>
+              {source.authors && <span>{source.authors}</span>}
+            </div>
+          </header>
+          <IngestionStatusPanel status={source.ingestion} />
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function IngestionStatusPanel({ status }: { status?: SourceIngestionStatus }) {
+  const panelState = resolveIngestionPanelState(status);
+  if (panelState === "empty") {
+    return (
+      <div className="ingestion-panel empty">
+        <span className="status-pill">empty</span>
+        <span>No extraction artifacts</span>
+      </div>
+    );
+  }
+  if (!status) return null;
+  if (panelState === "loading") {
+    return (
+      <div className="ingestion-panel loading" aria-busy="true">
+        <span className="status-pill warning">{status.state}</span>
+        <progress value={status.progress} max={100} aria-label="Ingestion progress" />
+      </div>
+    );
+  }
+  if (panelState === "permission-denied") {
+    return (
+      <div className="ingestion-panel permission" role="status">
+        <ShieldAlert size={14} />
+        <span>Extraction permission needed</span>
+      </div>
+    );
+  }
+  if (panelState === "failure") {
+    return (
+      <div className="ingestion-panel failure" role="alert">
+        <AlertTriangle size={14} />
+        <span>{status.failureReason || status.state}</span>
+      </div>
+    );
+  }
+  return (
+    <div className="ingestion-panel ready" role="status">
+      <div className="ingestion-summary">
+        <CheckCircle2 size={14} />
+        <span>{status.artifacts.length} artifacts</span>
+      </div>
+      {status.artifacts.slice(0, 2).map((artifact) => (
+        <div className="ingestion-artifact" key={`${artifact.kind}-${artifact.path}`}>
+          <span>{artifact.kind}</span>
+          <span>{artifact.engine}</span>
+          <span>{ingestionConfidenceLabel(artifact)}</span>
         </div>
       ))}
+      {status.warnings.length > 0 && (
+        <ul className="ingestion-warnings" aria-label="Conversion warnings">
+          {status.warnings.slice(0, 2).map((warning) => (
+            <li key={warning}>{warning}</li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

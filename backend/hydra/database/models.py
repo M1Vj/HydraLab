@@ -334,8 +334,68 @@ class LexicalIndexEntry(SQLModel, table=True):
     provider: Optional[str] = Field(default=None)
     model: Optional[str] = Field(default=None)
     semantic_ready: bool = Field(default=False)
+    trust_level: str = Field(default="untrusted-external", index=True)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+class IngestionJob(SQLModel, table=True):
+    __tablename__ = "ingestion_jobs"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    source_id: str = Field(foreign_key="sources.id", index=True)
+    source_path: str
+    status: str = Field(default="queued", index=True)
+    progress: int = Field(default=0)
+    priority: int = Field(default=0, index=True)
+    retry_count: int = Field(default=0)
+    original_content_hash: str = Field(default="")
+    failure_reason: str = Field(default="")
+    notes_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    started_at: Optional[datetime] = Field(default=None, nullable=True)
+    completed_at: Optional[datetime] = Field(default=None, nullable=True)
+
+
+class IngestionArtifact(SQLModel, table=True):
+    __tablename__ = "ingestion_artifacts"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    source_id: str = Field(foreign_key="sources.id", index=True)
+    job_id: Optional[str] = Field(default=None, foreign_key="ingestion_jobs.id", index=True, nullable=True)
+    engine: str = Field(index=True)
+    kind: str = Field(index=True)
+    path: str
+    content_hash: str = Field(default="")
+    extraction_confidence: float = Field(default=0.0)
+    trust_level: str = Field(default="untrusted-external", index=True)
+    warnings_json: str = Field(default="[]")
+    metadata_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ExtractedImage(SQLModel, table=True):
+    __tablename__ = "extracted_images"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    source_id: str = Field(foreign_key="sources.id", index=True)
+    artifact_id: Optional[str] = Field(default=None, foreign_key="ingestion_artifacts.id", nullable=True)
+    path: str
+    page: int = Field(default=1)
+    bbox: str = Field(default="{}")
+    caption: str = Field(default="")
+    trust_level: str = Field(default="untrusted-external", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ConversionWarning(SQLModel, table=True):
+    __tablename__ = "conversion_warnings"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    source_id: str = Field(foreign_key="sources.id", index=True)
+    job_id: Optional[str] = Field(default=None, foreign_key="ingestion_jobs.id", nullable=True)
+    artifact_id: Optional[str] = Field(default=None, foreign_key="ingestion_artifacts.id", nullable=True)
+    code: str = Field(index=True)
+    message: str
+    severity: str = Field(default="warning")
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class ReviewItem(SQLModel, table=True):

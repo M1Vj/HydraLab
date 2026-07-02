@@ -14,10 +14,12 @@ import {
   folderIndexStatus,
   groupTasksByColumn,
   hostPermissionPromptChoices,
+  ingestionConfidenceLabel,
   navigateObjectLink,
   nextBrowserBridgeConnection,
   openProjectInWindow,
   restoreSession,
+  resolveIngestionPanelState,
   resolveInAppBrowserSurface,
   resolveDiscoveryPanelState,
   shouldShowMainCaptureIndicator,
@@ -273,6 +275,31 @@ describe("Hydra UI helpers", () => {
       provider: "openalex",
       expectedSize: "4 MB",
     });
+  });
+
+  test("@HL-INGEST-07 resolves ingestion panel states and confidence labels", () => {
+    expect(resolveIngestionPanelState()).toBe("empty");
+    expect(resolveIngestionPanelState({ state: "running", progress: 42, artifacts: [], warnings: [] })).toBe("loading");
+    expect(resolveIngestionPanelState({ state: "quarantined", progress: 0, artifacts: [], warnings: [], failureReason: "bad archive" })).toBe("failure");
+    expect(resolveIngestionPanelState({ state: "permission-denied", progress: 0, artifacts: [], warnings: [] })).toBe("permission-denied");
+    expect(
+      resolveIngestionPanelState({
+        state: "done",
+        progress: 100,
+        warnings: ["grobid: unavailable"],
+        artifacts: [
+          {
+            kind: "markdown",
+            engine: "docling",
+            path: "sources/derived/src/document.md",
+            extractionConfidence: 0.923,
+            warnings: [],
+            trustLevel: "untrusted-external",
+          },
+        ],
+      }),
+    ).toBe("ready");
+    expect(ingestionConfidenceLabel({ extractionConfidence: 1.4 })).toBe("100%");
   });
 
   test("@HL-DISC-11 resolves empty, loading, partial, failure and offline discovery states", () => {

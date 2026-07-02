@@ -4,6 +4,7 @@ import io
 import json
 import secrets
 import hashlib
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
 
@@ -53,6 +54,7 @@ from hydra.services.discovery import (
     result_from_dict,
 )
 from hydra.services.discovery.providers import default_providers
+from hydra.services.ingestion import IngestionService
 from hydra.settings.toml_config import load_settings, save_settings
 from hydra.storage.app_data import app_data_root
 from hydra.storage.runtime import choose_bind_host
@@ -379,19 +381,26 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         if file:
             raw = await file.read()
-            text = extract_upload_text(raw, file.content_type or "", file.filename or "paper")
             final_title = title or file.filename or "Uploaded paper"
+            project_root = hydra_project_root()
+            original_path = write_uploaded_original(project_root, file.filename or "paper", raw)
             kind = "pdf"
             url_ref = url or doi or ""
         elif url or doi:
             final_title = title or f"Ingested {url or doi}"
             url_ref = url or doi or ""
-            text = f"This is mocked extracted text from {url_ref}."
+            project_root = hydra_project_root()
+            original_path = write_uploaded_original(project_root, f"{hashlib.sha256(url_ref.encode()).hexdigest()[:12]}.md", f"This is mocked extracted text from {url_ref}.".encode("utf-8"))
             kind = "url"
         else:
             raise HTTPException(status_code=400, detail="Must provide file, url, or doi")
-        
-        summary = f"Mocked summary for {final_title}. Text length: {len(text)} characters."
+
+        metadata = {
+            "original_path": str(original_path.relative_to(project_root)),
+            "original_content_hash": sha256_bytes(original_path.read_bytes()),
+            "trust_level": TRUST_LEVEL_UNTRUSTED,
+        }
+        summary = f"Mocked summary for {final_title}. Ingestion queued."
         
         source = await repo.upsert_source(
             {
@@ -400,11 +409,22 @@ def create_app() -> FastAPI:
                 "abstract": summary,
                 "url": url_ref,
                 "kind": kind,
+                "metadata_json": json.dumps(metadata, sort_keys=True),
+                "trust_origin": "user-curated",
             }
         )
-        note = await repo.add_note(f"Notes & Summary for {source['title']}", f"Summary: {summary}\n\nFull text: {text[:3800]}", source["id"])
+        ingestion = await IngestionService().ingest(
+            session,
+            source_id=source["id"],
+            title=source["title"],
+            source_path=original_path,
+            project_root=project_root,
+            declared_mime=file.content_type if file else "text/markdown",
+        )
+        note_body = f"Summary: {summary}\n\nIngestion state: {ingestion['state']}\nArtifacts: {len(ingestion.get('artifacts', []))}"
+        note = await repo.add_note(f"Notes & Summary for {source['title']}", note_body, source["id"])
         await repo.add_event("source.ingested", f"Ingested {source['title']}")
-        return {"source": source, "note": note}
+        return {"source": source, "note": note, "ingestion": ingestion}
 
     @app.get("/api/sources/retrieve")
     async def retrieve_rag(query: str, source_id: str | None = None, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -857,6 +877,28 @@ def extract_upload_text(raw: bytes, content_type: str, filename: str) -> str:
         except Exception:
             return ""
     return raw.decode("utf-8", errors="ignore").strip()
+
+
+def hydra_project_root() -> Path:
+    from hydra.database.session import get_db_url
+
+    db_url = get_db_url()
+    if db_url.startswith("sqlite+aiosqlite:///"):
+        return Path(db_url.removeprefix("sqlite+aiosqlite:///")).parent
+    return Path.cwd() / ".hydra"
+
+
+def write_uploaded_original(project_root: Path, filename: str, raw: bytes) -> Path:
+    safe_name = "".join(char for char in filename if char.isalnum() or char in {".", "-", "_"}).strip(".") or "source"
+    digest = sha256_bytes(raw)[:12]
+    target = project_root / "sources" / "originals" / f"{digest}-{safe_name}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw)
+    return target
+
+
+def sha256_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
 
 
 def format_bibliography(sources: list[dict[str, object]], style: str) -> str:

@@ -5,6 +5,7 @@ export type Source = {
   year?: string;
   url?: string;
   abstract?: string;
+  ingestion?: SourceIngestionStatus;
 };
 
 export type Task = {
@@ -180,6 +181,23 @@ export type SourceDiscoverySettings = {
   automaticPdfDownload: boolean;
   allowedPdfDomains: string[];
   largeFileThresholdBytes: number;
+};
+
+export type SourceIngestionArtifact = {
+  kind: "markdown" | "structured_json" | "reference_metadata" | "image" | string;
+  engine: string;
+  path: string;
+  extractionConfidence: number;
+  warnings: string[];
+  trustLevel: "untrusted-external" | "user-curated" | "user-authored" | string;
+};
+
+export type SourceIngestionStatus = {
+  state: "empty" | "queued" | "running" | "paused" | "done" | "failed" | "quarantined" | "permission-denied" | "connect once to fetch models";
+  progress: number;
+  artifacts: SourceIngestionArtifact[];
+  warnings: string[];
+  failureReason?: string;
 };
 
 export const DEFAULT_SOURCE_DISCOVERY_SETTINGS: SourceDiscoverySettings = {
@@ -448,6 +466,18 @@ export function pdfDownloadCopy(input: {
     return "PDF over size limit; manual download only";
   }
   return "PDF can auto-download from allowed domains";
+}
+
+export function resolveIngestionPanelState(status?: SourceIngestionStatus): "empty" | "loading" | "ready" | "failure" | "permission-denied" {
+  if (!status || status.state === "empty") return "empty";
+  if (["queued", "running", "paused"].includes(status.state)) return "loading";
+  if (status.state === "permission-denied") return "permission-denied";
+  if (["failed", "quarantined", "connect once to fetch models"].includes(status.state)) return "failure";
+  return "ready";
+}
+
+export function ingestionConfidenceLabel(artifact: Pick<SourceIngestionArtifact, "extractionConfidence">): string {
+  return `${Math.round(Math.max(0, Math.min(1, artifact.extractionConfidence)) * 100)}%`;
 }
 
 function formatBytes(bytes: number): string {
