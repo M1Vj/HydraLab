@@ -64,6 +64,13 @@ def default_settings() -> dict[str, Any]:
         "ignored_paths": [".git", ".env", ".hydralab/cache", ".hydralab/temp"],
         "queue": {"max_parallel_jobs": 1, "retry_limit": 3},
     }
+    data["citations"] = {"default_citation_style": "apa"}
+    data["writing"] = {
+        "default_citation_style": "apa",
+        "manuscript_template": "generic-academic",
+        "docx_template": "generic-academic",
+        "docx_style": "generic-academic",
+    }
     data["review_inbox"] = {"enabled_item_types": ["broken-link", "conflict", "reindex"]}
     data["assistant"] = {"mode": "passive", "provider_routing_profile": "manual"}
     data["providers"] = {"routing_policy": "manual", "accounts": {}}
