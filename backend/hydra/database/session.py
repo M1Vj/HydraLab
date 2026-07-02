@@ -33,19 +33,15 @@ def _install_sqlite_pragmas(engine) -> None:
     blocking; ``busy_timeout`` waits on a briefly-locked DB instead of raising
     ``database is locked`` immediately.
 
-    NOTE: ``PRAGMA foreign_keys=ON`` is intentionally NOT set here yet. Turning it
-    on surfaces pre-existing referential-integrity violations in currently-working
-    flows (quarantine ingestion jobs carry a synthetic ``quarantine:`` source_id
-    with no ``sources`` row; project restore inserts notes before recreating their
-    parent project/workspace). Enabling enforcement is a dedicated data-layer task
-    that must fix those flows (nullable/real source refs, parent-row ordering)
-    with regression tests — shipping it half-done would break real features.
+    ``foreign_keys=ON`` makes SQLite enforce the FK metadata declared on the
+    SQLModel tables instead of accepting orphaned rows.
     """
 
     @event.listens_for(engine.sync_engine, "connect")
     def _set_pragmas(dbapi_connection, _record):  # pragma: no cover - driver callback
         cursor = dbapi_connection.cursor()
         try:
+            cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA busy_timeout=5000")
         finally:
@@ -97,6 +93,15 @@ def _install_append_only_triggers(sync_conn) -> None:
         sync_conn.exec_driver_sql(statement)
 
 
+def _seed_default_workspace(sync_conn) -> None:
+    sync_conn.exec_driver_sql(
+        """
+        INSERT OR IGNORE INTO workspaces (id, name, created_at, updated_at)
+        VALUES ('default', 'Default workspace', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+
+
 def _stamp_alembic_head(sync_conn) -> None:
     """Record the alembic head on a freshly ``create_all``-provisioned DB.
 
@@ -136,6 +141,7 @@ async def init_db():
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(_seed_default_workspace)
         await conn.run_sync(_install_append_only_triggers)
         await conn.run_sync(_stamp_alembic_head)
     _initialized_databases.add(db_url)

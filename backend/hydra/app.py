@@ -2523,7 +2523,7 @@ def create_app() -> FastAPI:
                 validate_source_file(original_path, declared_mime=declared_mime)
             except QuarantineError as exc:
                 job = IngestionJob(
-                    source_id=f"quarantine:{sha256_bytes(raw)[:16]}",
+                    source_id=None,
                     source_path=str(original_path),
                     status="quarantined",
                     progress=0,
