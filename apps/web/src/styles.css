@@ -912,3 +912,161 @@ kbd {
     border-bottom: 1px solid var(--border-color);
   }
 }
+
+.pdf-reader-module {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pdf-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.pdf-page-count {
+  min-width: 60px;
+  text-align: center;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.pdf-reader-grid {
+  display: grid;
+  grid-template-columns: 1fr 240px;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pdf-stage {
+  position: relative;
+  overflow: auto;
+  padding: 12px;
+  background: var(--bg-base);
+}
+
+.pdf-skeleton {
+  height: 60%;
+  margin: 12px auto;
+  max-width: 480px;
+}
+
+.pdf-page-host {
+  position: relative;
+  width: max-content;
+  margin: 0 auto;
+}
+
+.pdf-page-host:not(.ready) {
+  display: none;
+}
+
+.pdf-page-host canvas {
+  display: block;
+  box-shadow: 0 0 0 1px var(--border-color);
+}
+
+.pdf-annotation-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pdf-annotation-mark {
+  position: absolute;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: rgba(210, 153, 34, 0.32);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.pdf-annotation-mark.selected {
+  outline: 2px solid var(--accent);
+}
+
+.annotation-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-left: 1px solid var(--border-color);
+  overflow: auto;
+}
+
+.annotation-inspector header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.annotation-inspector dl {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.annotation-inspector dl div {
+  display: flex;
+  justify-content: space-between;
+}
+
+.inspector-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.inspector-error {
+  color: var(--error-text);
+  margin: 0;
+}
+
+.provider-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.provider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-muted);
+}
+
+.provider-field input {
+  padding: 5px 7px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-main);
+}
+
+.provider-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.secret-status.stored {
+  color: var(--success);
+}
+
+.secret-status.unset {
+  color: var(--text-muted);
+}
+
+.settings-hint {
+  color: var(--text-muted);
+}
