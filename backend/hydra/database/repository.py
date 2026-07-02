@@ -1080,7 +1080,7 @@ class Repository:
         res = await self.session.exec(select(TaskLink).where(TaskLink.task_id == task_id))
         return self._to_dict_list(res.all())
 
-    async def flag_task_links_for_trashed_target(self, target_type: str, target_id: str) -> int:
+    async def flag_task_links_for_trashed_target(self, target_type: str, target_id: str, *, commit: bool = True) -> int:
         res = await self.session.exec(
             select(TaskLink).where(and_(TaskLink.target_type == target_type, TaskLink.target_id_or_path == target_id))
         )
@@ -1099,10 +1099,11 @@ class Repository:
                     target_id=target_id,
                 )
             )
-        await self.session.commit()
+        if commit:
+            await self.session.commit()
         return len(rows)
 
-    async def reattach_task_links_for_target(self, target_type: str, target_id: str) -> int:
+    async def reattach_task_links_for_target(self, target_type: str, target_id: str, *, commit: bool = True) -> int:
         res = await self.session.exec(
             select(TaskLink).where(
                 and_(
@@ -1116,7 +1117,8 @@ class Repository:
         for link in rows:
             link.link_state = "live"
             self.session.add(link)
-        await self.session.commit()
+        if commit:
+            await self.session.commit()
         return len(rows)
 
     async def accept_task(self, task_id: str) -> Optional[dict[str, Any]]:
@@ -1809,8 +1811,8 @@ class Repository:
                 )
             )
 
+        await self.flag_task_links_for_trashed_target("source", source_id, commit=False)
         await self.session.commit()
-        await self.flag_task_links_for_trashed_target("source", source_id)
         return {"trashed": True, "dependent_counts": counts}
 
     async def trash_note(self, note_id: str) -> dict[str, Any]:
@@ -1821,8 +1823,8 @@ class Repository:
         note.link_state = "target_trashed"
         note.updated_at = datetime.now(timezone.utc)
         self.session.add(note)
+        flagged = await self.flag_task_links_for_trashed_target("note", note_id, commit=False)
         await self.session.commit()
-        flagged = await self.flag_task_links_for_trashed_target("note", note_id)
         return {"trashed": True, "flagged_task_links": flagged}
 
     async def restore_note(self, note_id: str) -> dict[str, Any]:
@@ -1833,8 +1835,8 @@ class Repository:
         note.link_state = "live"
         note.updated_at = datetime.now(timezone.utc)
         self.session.add(note)
+        reattached = await self.reattach_task_links_for_target("note", note_id, commit=False)
         await self.session.commit()
-        reattached = await self.reattach_task_links_for_target("note", note_id)
         return {"restored": True, "reattached_task_links": reattached}
 
     async def restore_source(self, source_id: str) -> dict[str, Any]:
@@ -1855,8 +1857,8 @@ class Repository:
                 row.link_state = "live"
                 self.session.add(row)
 
+        await self.reattach_task_links_for_target("source", source_id, commit=False)
         await self.session.commit()
-        await self.reattach_task_links_for_target("source", source_id)
         return {"restored": True}
 
     async def list_review_items(self, item_type: Optional[str] = None) -> list[dict[str, Any]]:

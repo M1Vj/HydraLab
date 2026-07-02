@@ -214,6 +214,27 @@ def test_unknown_column_is_rejected_not_silently_orphaned(tmp_path, monkeypatch)
     assert client.patch(f"/api/tasks/{task_id}", json={"column": "done"}).json()["column"] == "done"
 
 
+# @HL-UX-08 (source path) ----------------------------------------------------
+def test_trash_source_flags_and_restore_reattaches_task_link_atomically(tmp_path, monkeypatch):
+    """Trashing a source must flag its task links in the same commit as the
+    trash itself — no window where the source is trashed but links read live."""
+    client = _client(tmp_path, monkeypatch)
+    source = client.post("/api/sources/search", json={"query": "attention is all you need"}).json()["sources"][0]
+    task = client.post("/api/tasks", json={"title": "Cross-check source"}).json()
+    client.post(
+        f"/api/tasks/{task['id']}/links",
+        json={"target_type": "source", "target_id_or_path": source["id"], "link_role": "about"},
+    )
+
+    client.post(f"/api/sources/{source['id']}/trash", json={"confirmed": True})
+    links = client.get(f"/api/tasks/{task['id']}/links").json()["links"]
+    assert links[0]["link_state"] == "source_trashed"
+
+    client.post(f"/api/sources/{source['id']}/restore")
+    links_after = client.get(f"/api/tasks/{task['id']}/links").json()["links"]
+    assert links_after[0]["link_state"] == "live"
+
+
 # classification unit --------------------------------------------------------
 def test_requires_review_classification():
     assert requires_review("deadline", "user") is True
