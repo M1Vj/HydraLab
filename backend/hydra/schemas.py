@@ -53,6 +53,34 @@ class ManuscriptExportRequest(BaseModel):
         return value
 
 
+class DocxEditProposalIn(BaseModel):
+    op_type: str = Field(min_length=1, max_length=40)
+    target_locator: str = Field(default="", max_length=400)
+    payload: dict[str, object] = Field(default_factory=dict)
+    justification: str = Field(default="", max_length=4000)
+    justification_source: Literal["assistant", "document"] = "assistant"
+    motivating_excerpt: str = Field(default="", max_length=4000)
+
+
+class DocxEditPlanRequest(BaseModel):
+    manuscript: str = Field(min_length=1, max_length=200)
+    source_file: str = Field(min_length=1, max_length=400)
+    mode: Literal["passive", "copilot", "full_access"] = "passive"
+    project_id: str | None = Field(default=None, max_length=200)
+    proposals: list[DocxEditProposalIn] = Field(default_factory=list)
+
+    @field_validator("manuscript", "source_file")
+    @classmethod
+    def reject_docx_traversal(cls, value: str) -> str:
+        if ".." in value or value.startswith("/") or "\\" in value or "\x00" in value:
+            raise ValueError("path traversal is not allowed")
+        return value
+
+
+class DocxOperationReviewRequest(BaseModel):
+    decision: Literal["approved", "rejected", "pending"]
+
+
 class NoteCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=20000)
