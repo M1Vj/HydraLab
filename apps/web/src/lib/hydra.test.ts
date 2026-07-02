@@ -5,11 +5,18 @@ import {
   createResearchUndoStack,
   createWorkbenchProject,
   DEFAULT_PANEL_DEFINITIONS,
+  DEFAULT_BROWSER_CAPTURE_SETTINGS,
+  browserHistoryPermissionRequest,
+  browserProviderEligibility,
   folderIndexStatus,
   groupTasksByColumn,
+  hostPermissionPromptChoices,
   navigateObjectLink,
+  nextBrowserBridgeConnection,
   openProjectInWindow,
   restoreSession,
+  resolveInAppBrowserSurface,
+  shouldShowMainCaptureIndicator,
   softDeleteObject,
   sourceLabel,
   statusCopy,
@@ -42,6 +49,7 @@ describe("Hydra UI helpers", () => {
   test("@HL-UX-02 registers must-keep panels with all four UI states", () => {
     const requiredIds = [
       "explorer",
+      "browser",
       "source-discovery",
       "pdf-reader",
       "markdown-editor",
@@ -168,5 +176,70 @@ describe("Hydra UI helpers", () => {
 
     expect(stack.undo()?.objects[0].linkedIds).toEqual(["ev_1"]);
     expect(stack.editorUndoMarker()).toBe("editor-stack-unchanged");
+  });
+
+  test("@HL-BROWSE-03 resolves honest in-app browser surfaces and framing fallback", () => {
+    expect(resolveInAppBrowserSurface({ url: "https://example.com/paper", frameBlocked: false })).toMatchObject({
+      surface: "iframe",
+      state: "loading",
+    });
+    expect(resolveInAppBrowserSurface({ url: "https://example.com/paper.pdf", frameBlocked: false })).toMatchObject({
+      surface: "pdfjs",
+      state: "loading",
+    });
+    expect(resolveInAppBrowserSurface({ url: "https://nature.com/article", frameBlocked: true })).toMatchObject({
+      surface: "snapshot-fallback",
+      state: "frame-blocked-fallback",
+      blank: false,
+    });
+    expect(resolveInAppBrowserSurface({ url: "https://institution.example/login", signInRequired: true })).toMatchObject({
+      surface: "chrome-extension",
+      state: "sign-in-required",
+    });
+  });
+
+  test("@HL-BROWSE-04 host permission prompt exposes exactly three choices", () => {
+    expect(hostPermissionPromptChoices("openreview.net")).toEqual([
+      { value: "allow-for-project", label: "Allow for this project", host: "openreview.net" },
+      { value: "always-allow-host", label: "Always allow this host", host: "openreview.net" },
+      { value: "blocked", label: "Decline/Block", host: "openreview.net" },
+    ]);
+  });
+
+  test("@HL-BROWSE-10 history permission is request scoped with no always-allow option", () => {
+    const request = browserHistoryPermissionRequest("Find a paper opened for this answer");
+
+    expect(request.scope).toBe("single-request");
+    expect(request.choices).toEqual(["Allow for this request", "Decline"]);
+    expect(request.choices.some((choice) => choice.toLowerCase().includes("always"))).toBe(false);
+  });
+
+  test("@HL-BROWSE-11 @HL-CONSENT-01 @HL-CONSENT-02 browser capture settings default off and stay Settings-only", () => {
+    expect(DEFAULT_BROWSER_CAPTURE_SETTINGS.g2LocalCapture).toBe(false);
+    expect(DEFAULT_BROWSER_CAPTURE_SETTINGS.browserPageTextToProvider).toBe(false);
+    expect(DEFAULT_BROWSER_CAPTURE_SETTINGS.controls).toEqual([
+      "pause",
+      "disable",
+      "reduced-capture",
+      "clear-captured-context",
+      "allowlist",
+      "blocklist",
+    ]);
+    expect(shouldShowMainCaptureIndicator(DEFAULT_BROWSER_CAPTURE_SETTINGS)).toBe(false);
+    expect(browserProviderEligibility(DEFAULT_BROWSER_CAPTURE_SETTINGS)).toMatchObject({
+      localCaptureEnabled: false,
+      pageTextProviderEligible: false,
+    });
+  });
+
+  test("@HL-BROWSE-12 connection reconnect uses capped backoff and backend-stopped state", () => {
+    const first = nextBrowserBridgeConnection({ status: "connected", attempt: 0 }, "token-rejected");
+    const second = nextBrowserBridgeConnection(first, "request-failed");
+    const capped = nextBrowserBridgeConnection({ status: "reconnecting", attempt: 9 }, "request-failed");
+
+    expect(first).toMatchObject({ status: "reconnecting", attempt: 1, rereadPortFile: true });
+    expect(second.nextDelayMs).toBeGreaterThan(first.nextDelayMs);
+    expect(capped.nextDelayMs).toBeLessThanOrEqual(10000);
+    expect(nextBrowserBridgeConnection(capped, "max-attempts")).toMatchObject({ status: "backend-stopped" });
   });
 });

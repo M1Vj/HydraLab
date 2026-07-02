@@ -111,6 +111,47 @@ export type ReviewInboxItem = {
   originPanel: string;
 };
 
+export type BrowserCaptureControl =
+  | "pause"
+  | "disable"
+  | "reduced-capture"
+  | "clear-captured-context"
+  | "allowlist"
+  | "blocklist";
+
+export type BrowserCaptureSettings = {
+  integrationEnabled: boolean;
+  g2LocalCapture: boolean;
+  browserPageTextToProvider: boolean;
+  capturePaused: boolean;
+  reducedCapture: boolean;
+  connectionStatus: "connected" | "reconnecting" | "backend-stopped" | "handshaking";
+  allowedHosts: string[];
+  blockedHosts: string[];
+  controls: BrowserCaptureControl[];
+};
+
+export type InAppBrowserSurface =
+  | "iframe"
+  | "pdfjs"
+  | "snapshot-fallback"
+  | "chrome-extension"
+  | "playwright";
+
+export type InAppBrowserState =
+  | "empty"
+  | "loading"
+  | "frame-blocked-fallback"
+  | "sign-in-required"
+  | "automation-ready";
+
+export type BrowserBridgeConnection = {
+  status: "connected" | "reconnecting" | "backend-stopped" | "handshaking";
+  attempt: number;
+  nextDelayMs?: number;
+  rereadPortFile?: boolean;
+};
+
 export type WorkbenchProject = {
   id: string;
   name: string;
@@ -120,6 +161,18 @@ export type WorkbenchProject = {
   objects: ResearchObject[];
   trash: TrashObject[];
   reviewItems: ReviewInboxItem[];
+};
+
+export const DEFAULT_BROWSER_CAPTURE_SETTINGS: BrowserCaptureSettings = {
+  integrationEnabled: false,
+  g2LocalCapture: false,
+  browserPageTextToProvider: false,
+  capturePaused: false,
+  reducedCapture: false,
+  connectionStatus: "backend-stopped",
+  allowedHosts: [],
+  blockedHosts: [],
+  controls: ["pause", "disable", "reduced-capture", "clear-captured-context", "allowlist", "blocklist"],
 };
 
 export type WindowProjectState = {
@@ -144,6 +197,7 @@ export const KANBAN_COLUMNS = ["To Do", "In Progress", "Review", "Done"] as cons
 
 export const DEFAULT_PANEL_DEFINITIONS: PanelDefinition[] = [
   panelDefinition("explorer", "Explorer", "explorer", "No sources yet", "Discover sources"),
+  panelDefinition("browser", "Browser", "browser", "No browser page open", "Open URL"),
   panelDefinition("source-discovery", "Source Discovery", "sources", "No query run", "Search for papers"),
   panelDefinition("pdf-reader", "PDF Reader", "pdf", "No document open", "Open a PDF"),
   panelDefinition("markdown-editor", "Markdown Editor", "notes", "No note or draft open", "New note"),
@@ -199,6 +253,84 @@ export function statusCopy(status: string): string {
     return "Needs review";
   }
   return "Working";
+}
+
+export function resolveInAppBrowserSurface(input: {
+  url?: string;
+  frameBlocked?: boolean;
+  signInRequired?: boolean;
+  controlledAutomation?: boolean;
+}) {
+  if (!input.url) {
+    return { surface: "iframe" as InAppBrowserSurface, state: "empty" as InAppBrowserState, blank: false };
+  }
+  if (input.signInRequired) {
+    return {
+      surface: "chrome-extension" as InAppBrowserSurface,
+      state: "sign-in-required" as InAppBrowserState,
+      blank: false,
+      action: "Use Chrome extension",
+    };
+  }
+  if (input.controlledAutomation) {
+    return { surface: "playwright" as InAppBrowserSurface, state: "automation-ready" as InAppBrowserState, blank: false };
+  }
+  if (input.frameBlocked) {
+    return {
+      surface: "snapshot-fallback" as InAppBrowserSurface,
+      state: "frame-blocked-fallback" as InAppBrowserState,
+      blank: false,
+      action: "Open in Chrome extension",
+    };
+  }
+  if (input.url.toLowerCase().split(/[?#]/)[0].endsWith(".pdf")) {
+    return { surface: "pdfjs" as InAppBrowserSurface, state: "loading" as InAppBrowserState, blank: false };
+  }
+  return { surface: "iframe" as InAppBrowserSurface, state: "loading" as InAppBrowserState, blank: false };
+}
+
+export function hostPermissionPromptChoices(host: string) {
+  return [
+    { value: "allow-for-project" as const, label: "Allow for this project", host },
+    { value: "always-allow-host" as const, label: "Always allow this host", host },
+    { value: "blocked" as const, label: "Decline/Block", host },
+  ];
+}
+
+export function browserHistoryPermissionRequest(reason: string) {
+  return {
+    scope: "single-request" as const,
+    reason,
+    choices: ["Allow for this request", "Decline"],
+  };
+}
+
+export function shouldShowMainCaptureIndicator(_settings: BrowserCaptureSettings): boolean {
+  return false;
+}
+
+export function browserProviderEligibility(settings: BrowserCaptureSettings) {
+  return {
+    localCaptureEnabled: settings.integrationEnabled && settings.g2LocalCapture,
+    pageTextProviderEligible: settings.integrationEnabled && settings.g2LocalCapture && settings.browserPageTextToProvider,
+    separateOptInRequired: !settings.browserPageTextToProvider,
+  };
+}
+
+export function nextBrowserBridgeConnection(current: BrowserBridgeConnection, event: "token-rejected" | "request-failed" | "connected" | "max-attempts"): BrowserBridgeConnection {
+  if (event === "connected") {
+    return { status: "connected", attempt: 0, nextDelayMs: 0, rereadPortFile: false };
+  }
+  if (event === "max-attempts" || current.attempt >= 10) {
+    return { status: "backend-stopped", attempt: current.attempt, rereadPortFile: true };
+  }
+  const attempt = current.status === "connected" ? 1 : current.attempt + 1;
+  return {
+    status: "reconnecting",
+    attempt,
+    nextDelayMs: Math.min(10000, 250 * 2 ** (attempt - 1)),
+    rereadPortFile: true,
+  };
 }
 
 export function buildCommandPaletteResults(commands: Command[], objects: QuickOpenObject[], query: string) {
