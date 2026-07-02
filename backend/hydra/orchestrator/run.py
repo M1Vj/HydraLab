@@ -86,15 +86,30 @@ class RunStateMachine:
         self.budget = budget or RunBudget()
         self.run_id = ""
 
-    async def start(self, *, project_id: str, mode: str, recipe: str = "bounded-stage-pass") -> RunExecutionResult:
-        run = await self.repository.create_run(project_id=project_id, mode=mode, recipe=recipe)
+    async def start(
+        self,
+        *,
+        project_id: str,
+        mode: str,
+        recipe: str = "bounded-stage-pass",
+        inputs: list[Any] | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> RunExecutionResult:
+        run = await self.repository.create_run(project_id=project_id, mode=mode, recipe=recipe, inputs=inputs)
         self.run_id = run.id
-        return await self.resume(run_id=run.id, project_id=project_id, mode=mode)
+        return await self.resume(run_id=run.id, project_id=project_id, mode=mode, data=data)
 
-    async def resume(self, *, run_id: str, project_id: str, mode: str) -> RunExecutionResult:
+    async def resume(
+        self,
+        *,
+        run_id: str,
+        project_id: str,
+        mode: str,
+        data: dict[str, Any] | None = None,
+    ) -> RunExecutionResult:
         self.run_id = run_id
         started = time.monotonic()
-        data: dict[str, Any] = {}
+        data = dict(data or {})
         completed: list[StageEnum] = []
 
         for stage in CANONICAL_STAGE_ORDER:

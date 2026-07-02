@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -476,6 +476,8 @@ class OrchestratorRunStartRequest(BaseModel):
     project_id: str = Field(default="default", max_length=200)
     enabled_stages: dict[str, bool] = Field(default_factory=dict)
     scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "rubric"
+    recipe_id: str | None = Field(default=None, max_length=120)
+    recipe_inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatMessageResponse(BaseModel):
