@@ -70,17 +70,20 @@ class PlaywrightBrowserResearchDriver:
         self._contexts: dict[str, object] = {}
 
     async def open_task_group(self, *, task_group_id: str, task_group_label: str) -> None:
+        self._contexts.setdefault(task_group_id, None)
+
+    async def _ensure_context(self, task_group_id: str):
         if self._playwright is None:
             from playwright.async_api import async_playwright  # type: ignore[import-not-found]
 
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(headless=self.headless)
-        if task_group_id not in self._contexts:
+        if self._contexts.get(task_group_id) is None:
             self._contexts[task_group_id] = await self._browser.new_context()  # type: ignore[union-attr]
+        return self._contexts[task_group_id]
 
     async def navigate(self, url: str, *, task_group_id: str) -> DriverPage:
-        await self.open_task_group(task_group_id=task_group_id, task_group_label=task_group_id)
-        context = self._contexts[task_group_id]
+        context = await self._ensure_context(task_group_id)
         page = await context.new_page()  # type: ignore[attr-defined]
         self.requested_urls.append(url)
         response = await page.goto(url, wait_until="domcontentloaded")

@@ -34,6 +34,7 @@ from hydra.schemas import (
     BrowserHandshakeRequest,
     BrowserHistoryRequest,
     BrowserHostPermissionUpdateRequest,
+    AutonomousBrowserRunStartRequest,
     AnnotationClaimRequest,
     AnnotationCreateRequest,
     EvidenceCreateRequest,
@@ -149,6 +150,13 @@ from hydra.services.browser import (
     BrowserCopilotService,
     BrowserHostPermissionRepository,
 )
+from hydra.browser_automation.runner import (
+    AutonomousBrowserResearchRunner,
+    BrowserResearchStep,
+    BrowserRunRequest,
+    RECIPE_ID as AUTONOMOUS_BROWSER_RECIPE_ID,
+)
+from hydra.browser_automation.driver import PlaywrightBrowserResearchDriver
 from hydra.services.export import (
     build_project_zip,
     export_options,
@@ -325,6 +333,20 @@ def _resolve_providers(secret_store: SecretStore) -> list[Any]:
     if not providers:
         providers.append(MockProvider())
     return providers
+
+
+def _agent_run_public(run: AgentRun) -> dict[str, object]:
+    return {
+        "id": run.id,
+        "project_id": run.project_id,
+        "recipe": run.recipe,
+        "mode": run.mode,
+        "status": run.status,
+        "paused": bool(run.paused),
+        "tokens_used": run.tokens_used,
+        "created_at": run.created_at.timestamp(),
+        "artifacts": json.loads(run.artifacts or "[]"),
+    }
 
 
 def create_app() -> FastAPI:
@@ -509,6 +531,68 @@ def create_app() -> FastAPI:
         session: AsyncSession = Depends(get_session),
     ) -> dict[str, object]:
         return {"actions": await BrowserActionLogRepository(session).list(project_id=project_id)}
+
+    @app.get("/api/browser/autonomous-runs")
+    async def list_autonomous_browser_runs(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        rows = (
+            await session.exec(
+                select(AgentRun)
+                .where(
+                    AgentRun.project_id == project_id,
+                    AgentRun.recipe == AUTONOMOUS_BROWSER_RECIPE_ID,
+                )
+                .order_by(AgentRun.created_at.desc())
+            )
+        ).all()
+        return {"runs": [_agent_run_public(row) for row in rows]}
+
+    @app.post("/api/browser/autonomous-runs")
+    async def start_autonomous_browser_run(
+        request: AutonomousBrowserRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        mode = policy.default_mode or privacy["default_mode"]
+        runner = AutonomousBrowserResearchRunner(
+            session,
+            driver=PlaywrightBrowserResearchDriver(headless=False),
+            artifact_root=hydra_project_root(),
+            token_budget=int(privacy["run_budget"]),
+            wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+        )
+        result = await runner.start(
+            BrowserRunRequest(
+                project_id=request.project_id,
+                mode=mode,
+                task_id=request.task_id,
+                task_label=request.task_label,
+                steps=[BrowserResearchStep(url=url) for url in request.start_urls],
+                full_access_enabled=bool(policy.full_access_enabled),
+            )
+        )
+        run = await session.get(AgentRun, result.run_id)
+        return {
+            "run": _agent_run_public(run) if run is not None else {"id": result.run_id, "status": result.state},
+            "state": result.state,
+            "host_prompt": result.host_prompt,
+            "budget_prompt": result.budget_prompt,
+            "rate_limit_state": result.rate_limit_state,
+        }
+
+    @app.post("/api/browser/autonomous-runs/{run_id}/cancel")
+    async def cancel_autonomous_browser_run(
+        run_id: str,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        await AutonomousBrowserResearchRunner(session).cancel(run_id)
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return {"run": _agent_run_public(run)}
 
     @app.post("/api/browser/copilot/actions")
     async def propose_browser_action(

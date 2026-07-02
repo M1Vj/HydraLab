@@ -8,12 +8,14 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.agents.policy import COPILOT, FULL_ACCESS, PASSIVE, TRUST_UNTRUSTED
+from hydra.app import create_app
 from hydra.browser_automation.capture import BrowserCaptureService, SourcePromotionRequest
 from hydra.browser_automation.driver import DriverPage, FakeBrowserResearchDriver
 from hydra.browser_automation.policy import (
@@ -310,3 +312,31 @@ async def test_hl_trust_33_hard_blocked_context_never_captured_or_sent(session: 
     assert decision.status == "hard-blocked"
     assert decision.provider_eligible is False
     assert (await session.exec(select(BrowserEvent))).all() == []
+
+
+def test_api_start_and_cancel_autonomous_browser_run(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    headers = {"Origin": "http://127.0.0.1:5173"}
+
+    started = client.post(
+        "/api/browser/autonomous-runs",
+        headers=headers,
+        json={
+            "project_id": PROJECT_ID,
+            "task_id": "task-transformers",
+            "task_label": "Transformer Survey",
+            "start_urls": ["https://openreview.net/forum?id=abc"],
+        },
+    )
+
+    assert started.status_code == 200
+    body = started.json()
+    assert body["run"]["recipe"] == "autonomous-browser-research"
+    assert body["run"]["mode"] in {PASSIVE, COPILOT, FULL_ACCESS}
+    assert body["run"]["status"] == "paused"
+    assert body["host_prompt"]["host"] == "openreview.net"
+
+    cancelled = client.post(f"/api/browser/autonomous-runs/{body['run']['id']}/cancel", headers=headers)
+    assert cancelled.status_code == 200
+    assert cancelled.json()["run"]["status"] == "cancelled"
