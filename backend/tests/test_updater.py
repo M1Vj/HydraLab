@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from hydra.database.models import AgentModePolicy, AgentRun, IngestionJob, ProviderSettings, Source
+from hydra.database.models import AgentModePolicy, AgentRun, ExperimentRun, IngestionJob, ProviderSettings, Source
 from hydra.settings.toml_config import SettingsValidationError, default_settings, validate_settings
 from hydra.updater.activity import GitOperationTracker, WriteOperationTracker
 from hydra.updater.flow import (
@@ -74,6 +74,35 @@ async def test_active_work_guard_blocks_running_or_queued_agent_runs(session, st
 
     assert result.active is True
     assert result.reasons == ("agent_run",)
+
+
+async def _add_experiment_run(session: AsyncSession, status: str) -> None:
+    session.add(ExperimentRun(project_id="default", status=status))
+    await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["running", "paused", "pending", "awaiting_approval"])
+async def test_active_work_guard_blocks_live_experiment_runs(session, status):
+    await _add_experiment_run(session, status)
+    guard = ActiveWorkGuard(git_tracker=GitOperationTracker(), write_tracker=WriteOperationTracker())
+
+    result = await guard.check(session, "default")
+
+    assert result.active is True
+    assert result.reasons == ("experiment_run",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled", "killed:timeout"])
+async def test_active_work_guard_ignores_terminal_experiment_runs(session, status):
+    await _add_experiment_run(session, status)
+    guard = ActiveWorkGuard(git_tracker=GitOperationTracker(), write_tracker=WriteOperationTracker())
+
+    result = await guard.check(session, "default")
+
+    assert result.active is False
+    assert "experiment_run" not in result.reasons
 
 
 @pytest.mark.asyncio

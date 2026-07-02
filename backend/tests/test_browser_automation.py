@@ -28,7 +28,7 @@ from hydra.browser_automation.runner import (
     BrowserResearchStep,
     BrowserRunRequest,
 )
-from hydra.database.models import AgentRun, AgentRunStep, BrowserEvent, ReviewItem, Source
+from hydra.database.models import AgentRun, AgentRunStep, BrowserEvent, BrowserHostPermission, ReviewItem, Source
 from hydra.services.browser.repository import BrowserActionLogRepository, BrowserHostPermissionRepository
 
 
@@ -435,6 +435,32 @@ async def test_hl_browse_39c_redirect_to_host_allowed_in_other_task_group_is_dis
     assert any(step.kind == "browser.redirect-blocked" for step in steps)
     assert not any(step.kind == "browser.capture" for step in steps)
     assert (await session.exec(select(Source))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_hl_browse_39d_allow_for_task_requires_task_group(session: AsyncSession):
+    # A grant with no bound task group is meaningless and dangerous ("allow for
+    # this task" with no task), so set() must refuse to create it.
+    repo = BrowserHostPermissionRepository(session)
+    with pytest.raises(ValueError, match="allow_for_task requires a task_group_id"):
+        await repo.set(PROJECT_ID, "test.local", "allow_for_task")
+    with pytest.raises(ValueError, match="allow_for_task requires a task_group_id"):
+        await repo.set(PROJECT_ID, "test.local", "allow_for_task", task_group_id="")
+
+
+@pytest.mark.asyncio
+async def test_hl_browse_39e_ungrouped_allow_for_task_row_never_leaks_across_groups(session: AsyncSession):
+    # Defense in depth: even a legacy/hand-written row whose task_group_id is
+    # NULL must not be honored for any specific task — get() downgrades it to
+    # "ask" so it can never grant across task groups.
+    session.add(
+        BrowserHostPermission(project_id=PROJECT_ID, host="test.local", state="allow_for_task", task_group_id=None)
+    )
+    await session.commit()
+    repo = BrowserHostPermissionRepository(session)
+
+    scoped = await repo.get(PROJECT_ID, "test.local", task_group_id="task-transformers")
+    assert scoped["state"] == "ask"
 
 
 @pytest.mark.asyncio

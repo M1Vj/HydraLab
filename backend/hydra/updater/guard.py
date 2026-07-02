@@ -6,7 +6,8 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.agents.contracts import RunStatus
-from hydra.database.models import AgentRun, IngestionJob, Source
+from hydra.database.models import AgentRun, ExperimentRun, IngestionJob, Source
+from hydra.experiments import models as experiment_models
 from hydra.updater.activity import (
     DEFAULT_GIT_OPERATION_TRACKER,
     DEFAULT_WRITE_OPERATION_TRACKER,
@@ -16,6 +17,15 @@ from hydra.updater.activity import (
 
 ACTIVE_AGENT_RUN_STATUSES = (RunStatus.QUEUED.value, RunStatus.RUNNING.value)
 ACTIVE_CONVERSION_STATUSES = ("queued", "running")
+# Non-terminal experiment-run statuses. A binary swap while any of these are live
+# would orphan a running/paused sandbox child (03-03) or race a pending run into
+# spawning against the old binary, so the guard blocks on the full in-flight set.
+ACTIVE_EXPERIMENT_RUN_STATUSES = (
+    experiment_models.STATUS_PENDING,
+    experiment_models.STATUS_AWAITING_APPROVAL,
+    experiment_models.STATUS_RUNNING,
+    experiment_models.STATUS_PAUSED,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +51,8 @@ class ActiveWorkGuard:
         reasons: list[str] = []
         if await self._has_agent_run(session, project_id):
             reasons.append("agent_run")
+        if await self._has_experiment_run(session, project_id):
+            reasons.append("experiment_run")
         if await self._has_conversion(session, project_id):
             reasons.append("conversion")
         if self.git_tracker.active:
@@ -53,6 +65,12 @@ class ActiveWorkGuard:
         stmt = select(AgentRun).where(AgentRun.status.in_(ACTIVE_AGENT_RUN_STATUSES))
         if project_id:
             stmt = stmt.where(AgentRun.project_id == project_id)
+        return (await session.exec(stmt)).first() is not None
+
+    async def _has_experiment_run(self, session: AsyncSession, project_id: str | None) -> bool:
+        stmt = select(ExperimentRun).where(ExperimentRun.status.in_(ACTIVE_EXPERIMENT_RUN_STATUSES))
+        if project_id:
+            stmt = stmt.where(ExperimentRun.project_id == project_id)
         return (await session.exec(stmt)).first() is not None
 
     async def _has_conversion(self, session: AsyncSession, project_id: str | None) -> bool:

@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.license_gate import LicenseRow, evaluate_license_rows, parse_dependency_register
@@ -22,6 +24,28 @@ def test_license_gate_fails_seeded_agpl_bundled_dependency():
     assert len(findings) == 1
     assert findings[0].name == "bad-agpl"
     assert findings[0].spdx == "AGPL-3.0-only"
+
+
+@pytest.mark.parametrize("role", ["Bundled-Dependency", "BUNDLED-DEPENDENCY", " bundled-dependency "])
+def test_license_gate_catches_case_or_whitespace_varied_bundled_role(role):
+    findings = evaluate_license_rows(
+        [LicenseRow(name="sneaky-agpl", spdx="AGPL-3.0-only", role=role)]
+    )
+
+    assert len(findings) == 1
+    assert findings[0].name == "sneaky-agpl"
+
+
+def test_parse_dependency_register_rejects_malformed_row():
+    markdown = (
+        "## Dependency Licensing Register\n\n"
+        "| Name | SPDX license | Provenance | Role |\n"
+        "| --- | --- | --- | --- |\n"
+        "| broken | MIT |\n"
+    )
+
+    with pytest.raises(ValueError, match="Malformed dependency register row"):
+        parse_dependency_register(markdown)
 
 
 def test_real_attribution_register_passes_license_gate():

@@ -49,9 +49,13 @@ def parse_dependency_register(markdown: str) -> list[LicenseRow]:
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         if len(cells) < 4:
-            continue
+            raise ValueError(f"Malformed dependency register row (expected >=4 columns): {raw_line.strip()!r}")
         rows.append(LicenseRow(name=cells[0], spdx=cells[1], role=cells[3]))
     return rows
+
+
+def _is_bundled_role(role: str) -> bool:
+    return role.strip().casefold() == "bundled-dependency"
 
 
 def _split_spdx_expression(spdx: str) -> list[str]:
@@ -76,7 +80,7 @@ def evaluate_license_rows(
 
     findings: list[LicenseFinding] = []
     for row in rows:
-        if row.role != "bundled-dependency":
+        if not _is_bundled_role(row.role):
             continue
         if row.spdx in allowed_spdx:
             continue
@@ -92,7 +96,7 @@ def evaluate_license_rows(
 
 
 def cleared_bundled_dependencies(rows: list[LicenseRow]) -> list[dict[str, str]]:
-    return [asdict(row) for row in rows if row.role == "bundled-dependency"]
+    return [asdict(row) for row in rows if _is_bundled_role(row.role)]
 
 
 def main(argv: list[str] | None = None) -> int:

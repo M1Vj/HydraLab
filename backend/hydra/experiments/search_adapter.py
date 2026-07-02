@@ -71,7 +71,14 @@ class SearchAdapter:
         base_config: dict,
         budget: SearchBudget,
         argv_builder: Callable[[dict], list[str]],
+        trust_origin: str = "user",
+        justification_trust: str = "user",
     ) -> SearchResult:
+        # Trust provenance is threaded from the caller, never hardcoded: an
+        # untrusted-origin caller (e.g. an agent-driven search) produces
+        # candidates that ``create_run`` routes to the Review Inbox with no
+        # ``approval_id``, so the auto-approve/auto-start path below is skipped
+        # and a human must promote them. This prevents trust laundering.
         result = SearchResult(budget=budget)
         for index in range(max(1, budget.max_candidates)):
             config = self.proposer(base_config, index)
@@ -81,8 +88,8 @@ class SearchAdapter:
                 backend_id=backend_id,
                 config={**config, "argv": argv, "metric_key": budget.metric_key},
                 label=f"search-candidate-{index}",
-                trust_origin="user",
-                justification_trust="user",
+                trust_origin=trust_origin,
+                justification_trust=justification_trust,
             )
             candidate = Candidate(candidate_id=f"candidate-{index}", config=config, run_id=proposal.run.id)
             # Every candidate stays fully gated: approve the per-run approval, then
