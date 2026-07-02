@@ -356,6 +356,50 @@ async def test_hl_browse_39_redirect_to_unapproved_host_is_discarded_before_capt
 
 
 @pytest.mark.asyncio
+async def test_hl_browse_39b_redirect_to_blocked_host_is_discarded_and_logged(
+    session: AsyncSession, tmp_path: Path
+):
+    # Peer-audit exploit: an approved host 302s to an explicitly BLOCKED host.
+    # The landed page must be discarded, logged host-blocked, never captured
+    # (HL-BROWSE-31/32).
+    await BrowserHostPermissionRepository(session).set(
+        PROJECT_ID, "test.local", "allow_for_task", task_group_id="task-transformers"
+    )
+    await BrowserHostPermissionRepository(session).set(PROJECT_ID, "sci-hub.se", "blocked")
+    declared = "http://test.local/paper"
+    landed = DriverPage(
+        url="https://sci-hub.se/10.1145/paper",
+        title="Redirected to blocked host",
+        text="full text that must never be captured",
+        snapshot_bytes=b"<html></html>",
+    )
+    driver = FakeBrowserResearchDriver({declared: landed})
+    runner = AutonomousBrowserResearchRunner(session, driver=driver, artifact_root=tmp_path)
+
+    result = await runner.start(
+        BrowserRunRequest(
+            project_id=PROJECT_ID,
+            mode=COPILOT,
+            task_id="task-transformers",
+            task_label="Transformer Survey",
+            steps=[BrowserResearchStep(url=declared)],
+        )
+    )
+
+    run = await session.get(AgentRun, result.run_id)
+    assert run is not None and run.status == "succeeded"
+    steps = (await session.exec(select(AgentRunStep).where(AgentRunStep.run_id == result.run_id))).all()
+    blocked_steps = [step for step in steps if step.kind == "browser.redirect-blocked"]
+    assert blocked_steps and any("sci-hub.se" in json.loads(step.payload_json)["host"] for step in blocked_steps)
+    assert not any(step.kind == "browser.capture" for step in steps)
+    assert (await session.exec(select(Source))).all() == []
+    events = (await session.exec(select(BrowserEvent))).all()
+    assert all(event.event_type == "host-blocked" for event in events)
+    logs = await BrowserActionLogRepository(session).list(project_id=PROJECT_ID)
+    assert any(entry["action"] == "redirect-blocked" and entry["host"] == "sci-hub.se" for entry in logs)
+
+
+@pytest.mark.asyncio
 async def test_hl_browse_40_landed_password_page_is_discarded_before_capture(
     session: AsyncSession, tmp_path: Path
 ):
