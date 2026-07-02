@@ -52,6 +52,7 @@ import {
 import { Dialog, DropdownMenu, Switch, Tooltip } from "./components/ui/primitives";
 import { SettingsModule } from "./components/modules/SettingsModule";
 import { SourceDiscoveryPanel } from "./components/modules/SourcesModule";
+import { PdfModule } from "./components/modules/PdfModule";
 
 type Surface = "welcome" | "workbench";
 type PanelStateKind = "empty" | "loading" | "partial" | "failure" | "offline-permission" | "permission-denied";
@@ -328,7 +329,7 @@ function WorkbenchApp() {
       </aside>
       <main className="workspace-main">
         <div className="editor-tabs" role="tablist" aria-label="Open panels">
-          {["saved-chat", "browser", "source-discovery", "markdown-editor", "citation-evidence", "tasks"].map((tab) => (
+          {["saved-chat", "browser", "source-discovery", "pdf-reader", "markdown-editor", "citation-evidence", "tasks"].map((tab) => (
             <button
               key={tab}
               className={`editor-tab ${activeTab === tab ? "active" : ""}`}
@@ -519,6 +520,7 @@ function ActivityBar({ active, reviewCount, onSelect }: { active: string; review
     ["browser", Globe2, "Browser"],
     ["saved-chat", MessageSquareText, "Assistant"],
     ["source-discovery", FileSearch, "Source discovery"],
+    ["pdf-reader", FileText, "PDF reader"],
     ["citation-evidence", BookOpenCheck, "Citation and evidence"],
     ["review-inbox", Inbox, "Review Inbox"],
     ["tasks", ListTodo, "Tasks"],
@@ -578,6 +580,7 @@ function PanelContent({
   onOpenReview: () => void;
 }) {
   if (panel.id === "source-discovery") return <SourceDiscoveryPanel />;
+  if (panel.id === "pdf-reader") return <PdfModule />;
   if (state !== "empty") return <PanelStateView panel={panel} state={state} />;
   if (panel.id === "explorer") {
     return (
@@ -803,6 +806,13 @@ function ObjectPanel({
             </button>
           </div>
         </div>
+      </article>
+    );
+  }
+  if (panelId === "pdf-reader") {
+    return (
+      <article className="object-panel pdf-object-panel">
+        <PdfModule />
       </article>
     );
   }

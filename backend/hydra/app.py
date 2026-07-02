@@ -11,6 +11,7 @@ from typing import AsyncIterator, Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.browser_bridge import (
@@ -26,6 +27,8 @@ from hydra.schemas import (
     BrowserCaptureRequest,
     BrowserHandshakeRequest,
     BrowserHistoryRequest,
+    AnnotationClaimRequest,
+    AnnotationCreateRequest,
     EvidenceCreateRequest,
     CitationCreateRequest,
     ClaimCreateRequest,
@@ -43,8 +46,10 @@ from hydra.schemas import (
     WritingReviewRequest,
     ChatCompletionRequest,
 )
+from hydra.database.models import Annotation
 from hydra.database.session import get_session, init_db, async_session_maker
 from hydra.database.repository import Repository
+from hydra.services.annotations import AnnotationIndexer, create_annotation_record, read_sidecar_records, write_sidecar_records
 from hydra.services.discovery import (
     DiscoveryCache,
     DiscoveryCoordinator,
@@ -568,6 +573,50 @@ def create_app() -> FastAPI:
         repo = Repository(session)
         return await repo.get_note_links(note_id)
 
+    @app.get("/api/annotations/{source_id}")
+    async def list_annotations(source_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        annotations = (
+            await session.exec(
+                select(Annotation).where(Annotation.source_id == source_id).order_by(Annotation.page.asc(), Annotation.created_at.asc())
+            )
+        ).all()
+        if not annotations and read_sidecar_records(hydra_project_root(), source_id):
+            annotations = await AnnotationIndexer(session, hydra_project_root()).rebuild_from_sidecars(source_id)
+        return {"annotations": [annotation_to_api(row) for row in annotations]}
+
+    @app.post("/api/annotations/{source_id}")
+    async def create_annotation(source_id: str, request: AnnotationCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        project_root = hydra_project_root()
+        records = read_sidecar_records(project_root, source_id)
+        record = create_annotation_record(
+            source_id=source_id,
+            page=request.page,
+            text=request.text,
+            quad_points=request.quad_points,
+            annotation_type=request.type,
+            linked_claim_ids=request.linked_claim_ids,
+            linked_note_ids=request.linked_note_ids,
+            color=request.color,
+        )
+        records.append(record)
+        write_sidecar_records(project_root, source_id, records)
+        await AnnotationIndexer(session, project_root).rebuild_from_sidecars(source_id)
+        row = await session.get(Annotation, record["sidecar_record_id"])
+        if row is None:
+            raise HTTPException(status_code=500, detail="Annotation was written but not indexed")
+        return {"annotation": annotation_to_api(row), "sidecar_record_id": record["sidecar_record_id"]}
+
+    @app.post("/api/annotations/{sidecar_record_id}/claim")
+    async def create_annotation_claim(
+        sidecar_record_id: str,
+        request: AnnotationClaimRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return await AnnotationIndexer(session, hydra_project_root()).create_or_suggest_claim(
+            sidecar_record_id,
+            auto_create=request.auto_create,
+        )
+
     @app.post("/api/tasks")
     async def create_task(request: TaskCreateRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         repo = Repository(session)
@@ -899,6 +948,25 @@ def write_uploaded_original(project_root: Path, filename: str, raw: bytes) -> Pa
 
 def sha256_bytes(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def annotation_to_api(annotation: Annotation) -> dict[str, object]:
+    return {
+        "sidecar_record_id": annotation.sidecar_record_id,
+        "source_id": annotation.source_id,
+        "page": annotation.page,
+        "text": annotation.text,
+        "quad_points": json.loads(annotation.quad_points or "[]"),
+        "bbox": json.loads(annotation.bbox or "{}"),
+        "type": annotation.type,
+        "linked_claim_ids": json.loads(annotation.linked_claim_ids or "[]"),
+        "linked_note_ids": json.loads(annotation.linked_note_ids or "[]"),
+        "color": annotation.color,
+        "rev": annotation.rev,
+        "content_hash": annotation.content_hash,
+        "link_state": annotation.link_state,
+        "trust_origin": annotation.trust_origin,
+    }
 
 
 def format_bibliography(sources: list[dict[str, object]], style: str) -> str:

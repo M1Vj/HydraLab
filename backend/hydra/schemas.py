@@ -88,6 +88,20 @@ class EvidenceCreateRequest(BaseModel):
     review_status: str = Field(default="needs_review", pattern="^(needs_review|accepted|rejected)$")
 
 
+class AnnotationCreateRequest(BaseModel):
+    page: int = Field(ge=1)
+    text: str = Field(default="", max_length=12000)
+    quad_points: list[float] = Field(min_length=8, max_length=8)
+    type: Literal["highlight", "underline", "note"] = "highlight"
+    color: str = Field(default="yellow", max_length=40)
+    linked_claim_ids: list[str] = Field(default_factory=list)
+    linked_note_ids: list[str] = Field(default_factory=list)
+
+
+class AnnotationClaimRequest(BaseModel):
+    auto_create: bool = False
+
+
 class ProviderSettingsRequest(BaseModel):
     provider: str = Field(min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=160)
