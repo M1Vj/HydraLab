@@ -360,6 +360,7 @@ export type AssistantMode = { id: string; label: string; enabled: boolean; phase
 
 export type AssistantModes = {
   default_mode: string;
+  full_access_enabled: boolean;
   modes: AssistantMode[];
   offline_only: boolean;
   g3_provider_send: boolean;
@@ -374,11 +375,43 @@ export type SkillInfo = {
   requires_approval: boolean;
   description?: string;
   disabled_reason?: string | null;
+  body?: string;
+  edited?: boolean;
+  restorable?: boolean;
 };
 
 export type SkillsResponse = {
   skills: SkillInfo[];
   rejected_plugins: Array<{ path: string; reason: string }>;
+};
+
+export type AgentApproval = {
+  id: string;
+  action_kind: string;
+  status: string;
+  decision?: string | null;
+  reason: string;
+  trust_origin: string;
+  target_kind?: string | null;
+  target_ref?: string | null;
+  summary: string;
+};
+
+export type AgentTraceStep = {
+  index: number;
+  kind: string;
+  status: string;
+  summary: string;
+  tokens: number;
+  trust_origin: string;
+  skill_id?: string | null;
+  capability?: string | null;
+  denied_capability?: string | null;
+};
+
+export type AgentRunTrace = {
+  run: { id: string; project_id: string; mode: string; status: string; paused: boolean };
+  trace: { run_id: string; steps: AgentTraceStep[] };
 };
 
 export type ContextFileInfo = {
