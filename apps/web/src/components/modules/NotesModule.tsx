@@ -227,7 +227,7 @@ export function NotesMain() {
   async function saveNoteContent(body: string) {
     const payload: Note = { ...activeNote, body };
     setSelectedNote(payload);
-    const res = await fetch(`http://localhost:8000/api/notes/${activeNote.id}`, {
+    const res = await fetch(`/api/notes/${activeNote.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -350,7 +350,7 @@ export function NotesMain() {
               if (found) {
                 selectNote(found);
               } else {
-                fetch(`http://localhost:8000/api/notes/${nodeId}`)
+                fetch(`/api/notes/${nodeId}`)
                   .then(r => r.json())
                   .then(n => selectNote(n))
                   .catch(console.error);
@@ -379,7 +379,7 @@ export function NotesMain() {
                       if (found) {
                         selectNote(found);
                       } else {
-                        fetch(`http://localhost:8000/api/notes/${link.id}`)
+                        fetch(`/api/notes/${link.id}`)
                           .then(r => r.json())
                           .then(n => selectNote(n))
                           .catch(console.error);
@@ -434,7 +434,7 @@ export function NotesMain() {
                       if (found) {
                         selectNote(found);
                       } else {
-                        fetch(`http://localhost:8000/api/notes/${link.id}`)
+                        fetch(`/api/notes/${link.id}`)
                           .then(r => r.json())
                           .then(n => selectNote(n))
                           .catch(console.error);

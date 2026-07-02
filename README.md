@@ -53,6 +53,14 @@ Project context and operating rules:
 
 Install dependencies and run the existing backend/frontend commands used by the repo. The current planning docs are the source of truth for implementation order and branch scope.
 
+Backend source/dev entrypoint:
+
+```bash
+python -m hydra.serve --project-root /path/to/project
+```
+
+The backend binds `127.0.0.1`, tries port `8765` first, falls back through `8799`, and writes runtime discovery files under both app data and the project's `.hydralab/runtime/` directory.
+
 Common checks:
 
 ```bash

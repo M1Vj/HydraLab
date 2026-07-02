@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import secrets
 import hashlib
+import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
@@ -65,7 +67,7 @@ from hydra.services.discovery.providers import default_providers
 from hydra.services.ingestion import IngestionService
 from hydra.settings.toml_config import load_settings, save_settings
 from hydra.storage.app_data import app_data_root
-from hydra.storage.runtime import choose_bind_host
+from hydra.storage.runtime import DEFAULT_PORT, BackendRuntime, choose_bind_host
 from hydra.writing import review_text
 
 HYDRALAB_BIND_HOST = choose_bind_host()
@@ -90,8 +92,24 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        runtime: BackendRuntime | None = None
+        runtime_managed = os.environ.get("HYDRALAB_RUNTIME_MANAGED") == "1"
+        if not runtime_managed:
+            port = int(os.environ.get("HYDRALAB_PORT", str(DEFAULT_PORT)))
+            runtime = BackendRuntime(app_data_root=app_data_root(), host=HYDRALAB_BIND_HOST, port=port)
+            acquired = runtime.acquire()
+            if not acquired.acquired:
+                message = f"HydraLab backend is already running (pid {acquired.running_pid}); refusing to start a second writer."
+                print(message, file=sys.stderr)
+                raise RuntimeError(message)
+            project_root = os.environ.get("HYDRALAB_PROJECT_ROOT")
+            runtime.write_port_file(project_root=Path(project_root) if project_root else None)
         await init_db()
-        yield
+        try:
+            yield
+        finally:
+            if runtime is not None:
+                runtime.release()
 
     app = FastAPI(title="Hydra Phase 1 Research API", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
@@ -99,8 +117,8 @@ def create_app() -> FastAPI:
         allow_origins=[
             "http://localhost:5173",
             "http://127.0.0.1:5173",
-            "http://localhost:8000",
-            "http://127.0.0.1:8000",
+            "http://localhost:8765",
+            "http://127.0.0.1:8765",
             HYDRALAB_EXTENSION_ORIGIN,
         ],
         allow_methods=["*"],

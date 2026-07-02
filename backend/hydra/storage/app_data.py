@@ -21,6 +21,9 @@ def app_data_root() -> Path:
     override = os.environ.get("HYDRALAB_APP_DATA_ROOT")
     if override:
         return Path(override).expanduser()
+    hydra_home = os.environ.get("HYDRA_HOME")
+    if hydra_home:
+        return Path(hydra_home).expanduser() / "app-data"
     return Path.home() / "Library" / "Application Support" / "HydraLab"
 
 
