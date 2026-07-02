@@ -2215,44 +2215,56 @@ class Repository:
         sources = await self.list_sources(include_trashed=True)
         if project_id:
             sources = [s for s in sources if s.get("project_id") in (None, project_id)]
-        verdicts = find_duplicates(sources)
-        for verdict in verdicts:
-            group_id = f"dupgrp_{uuid.uuid5(uuid.NAMESPACE_URL, verdict['left_id'] + verdict['right_id']).hex[:12]}"
-            left = await self.session.get(Source, verdict["left_id"])
-            right = await self.session.get(Source, verdict["right_id"])
-            for source in (left, right):
-                if source is None:
-                    continue
-                source.duplicate_group_id = group_id
-                source.duplicate_status = verdict["status"]
-                source.merge_confidence = verdict["confidence"]
-                self.session.add(source)
-            if verdict["status"] == "needs_review":
-                existing = (
-                    await self.session.exec(
-                        select(ReviewItem).where(
-                            ReviewItem.item_type == "duplicate-merge-proposal",
-                            ReviewItem.origin_id == verdict["left_id"],
-                            ReviewItem.target_id == verdict["right_id"],
+        # Bucket by project so a duplicate verdict never pairs sources across the
+        # project boundary. A cross-project pair would leak one project's sources
+        # into another's review inbox and propose a merge that merge_sources
+        # rejects outright (cross-project merges are forbidden). Legacy NULL maps
+        # to the default project, matching _project_scope.
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for source in sources:
+            buckets.setdefault(source.get("project_id") or DEFAULT_PROJECT_ID, []).append(source)
+
+        all_verdicts: list[dict[str, Any]] = []
+        for bucket_project, bucket_sources in buckets.items():
+            verdicts = find_duplicates(bucket_sources)
+            for verdict in verdicts:
+                group_id = f"dupgrp_{uuid.uuid5(uuid.NAMESPACE_URL, verdict['left_id'] + verdict['right_id']).hex[:12]}"
+                left = await self.session.get(Source, verdict["left_id"])
+                right = await self.session.get(Source, verdict["right_id"])
+                for source in (left, right):
+                    if source is None:
+                        continue
+                    source.duplicate_group_id = group_id
+                    source.duplicate_status = verdict["status"]
+                    source.merge_confidence = verdict["confidence"]
+                    self.session.add(source)
+                if verdict["status"] == "needs_review":
+                    existing = (
+                        await self.session.exec(
+                            select(ReviewItem).where(
+                                ReviewItem.item_type == "duplicate-merge-proposal",
+                                ReviewItem.origin_id == verdict["left_id"],
+                                ReviewItem.target_id == verdict["right_id"],
+                            )
                         )
-                    )
-                ).first()
-                if existing is None:
-                    self.session.add(
-                        ReviewItem(
-                            project_id=project_id,
-                            item_type="duplicate-merge-proposal",
-                            title="Confirm possible duplicate sources",
-                            summary=f"Two sources look like duplicates ({verdict['confidence']:.0%} similar). Confirm before merge.",
-                            origin_type="source",
-                            origin_id=verdict["left_id"],
-                            target_type="source",
-                            target_id=verdict["right_id"],
-                            payload_json=json.dumps(verdict, sort_keys=True),
+                    ).first()
+                    if existing is None:
+                        self.session.add(
+                            ReviewItem(
+                                project_id=bucket_project,
+                                item_type="duplicate-merge-proposal",
+                                title="Confirm possible duplicate sources",
+                                summary=f"Two sources look like duplicates ({verdict['confidence']:.0%} similar). Confirm before merge.",
+                                origin_type="source",
+                                origin_id=verdict["left_id"],
+                                target_type="source",
+                                target_id=verdict["right_id"],
+                                payload_json=json.dumps(verdict, sort_keys=True),
+                            )
                         )
-                    )
+            all_verdicts.extend(verdicts)
         await self.session.commit()
-        return verdicts
+        return all_verdicts
 
     # --- Referential-integrity scan (HL-REFINT-04) --------------------------
     async def scan_referential_integrity(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:

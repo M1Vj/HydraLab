@@ -125,6 +125,26 @@ async def test_list_sources_excludes_trashed_by_default(session):
 
 
 @pytest.mark.asyncio
+async def test_detect_duplicates_never_pairs_across_projects(session):
+    repo = Repository(session)
+    await repo.upsert_source({"id": "dup-alpha", "title": "Attention", "doi": "10.1/same", "project_id": "alpha"})
+    await repo.upsert_source({"id": "dup-beta", "title": "Attention", "doi": "10.1/same", "project_id": "beta"})
+
+    # Unscoped scan must not pair the identical-DOI sources across projects, and
+    # must not queue a merge proposal that would breach isolation / dead-end.
+    verdicts = await repo.detect_duplicates()
+    pairs = {frozenset((v["left_id"], v["right_id"])) for v in verdicts}
+    assert frozenset(("dup-alpha", "dup-beta")) not in pairs
+    assert await repo.list_review_items(item_type="duplicate-merge-proposal") == []
+
+    # Same-project duplicates are still detected.
+    await repo.upsert_source({"id": "dup-alpha2", "title": "Attention", "doi": "10.1/same", "project_id": "alpha"})
+    scoped = await repo.detect_duplicates(project_id="alpha")
+    scoped_pairs = {frozenset((v["left_id"], v["right_id"])) for v in scoped}
+    assert frozenset(("dup-alpha", "dup-alpha2")) in scoped_pairs
+
+
+@pytest.mark.asyncio
 async def test_legacy_task_column_label_is_normalized_on_read(session):
     # A pre-fix DB may hold a display label ("To Do") in column_name; the board
     # only renders the four canonical ids, so an un-normalized label would orphan
