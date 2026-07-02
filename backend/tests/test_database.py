@@ -7,15 +7,24 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.orm import sessionmaker
 
+from hydra.database import repository as repository_module
 from hydra.database.models import (
     Annotation,
     Claim,
+    ConversionWarning,
     EvidenceLink,
+    ExtractedImage,
+    IngestionArtifact,
+    IngestionJob,
+    IndexQueueItem,
+    KgEdge,
     LexicalIndexEntry,
     Note,
+    NoteLink,
     SchemaVersion,
     Source,
     SourceTombstone,
+    ReviewItem,
     Workspace,
 )
 from hydra.database.crud import CRUD
@@ -229,6 +238,123 @@ async def test_hl_refint_01_merge_sources_repoints_evidence_and_leaves_zero_dang
     assert (await session.get(EvidenceLink, evidence.id)).source_id == survivor.id
     assert await session.get(SourceTombstone, duplicate.id)
     assert await repo.count_references_to_source(duplicate.id) == 0
+
+
+def test_hl_refint_01_source_reference_registry_covers_model_source_foreign_keys():
+    discovered = set()
+    for table in SQLModel.metadata.tables.values():
+        for column in table.columns:
+            for foreign_key in column.foreign_keys:
+                if foreign_key.column.table.name == "sources" and foreign_key.column.name == "id":
+                    discovered.add((table.name, column.name))
+
+    assert discovered
+    assert discovered <= repository_module.SOURCE_DIRECT_REFERENCE_COLUMNS
+
+
+def test_hl_refint_01_source_reference_registry_covers_source_polymorphic_pairs():
+    conventions = [
+        ("location_type", "location_id"),
+        ("source_type", "source_id"),
+        ("target_type", "target_id"),
+        ("target_type", "target_id_or_path"),
+        ("src_type", "src_id"),
+        ("dst_type", "dst_id_or_path"),
+        ("origin_type", "origin_id"),
+    ]
+    discovered = set()
+    for table in SQLModel.metadata.tables.values():
+        column_names = set(table.columns.keys())
+        for type_column, id_column in conventions:
+            if type_column in column_names and id_column in column_names:
+                discovered.add((table.name, type_column, "source", id_column))
+
+    assert discovered
+    assert discovered <= repository_module.SOURCE_POLYMORPHIC_REFERENCE_COLUMNS
+
+
+@pytest.mark.asyncio
+async def test_hl_refint_01_merge_sources_repoints_all_source_references(session: AsyncSession):
+    repo = Repository(session)
+    survivor = Source(id="00000000-0000-0000-0000-000000000011", title="Attention", doi="10.48550/arXiv.1706.03762")
+    duplicate = Source(id="00000000-0000-0000-0000-000000000012", title="Attention duplicate", doi="10.48550/arXiv.1706.03762")
+    note = Note(id="note-1", title="Source note", source_id=duplicate.id)
+    note_link_target = NoteLink(source_id=note.id, source_type="note", target_source_id=duplicate.id, raw_target_name="Attention")
+    note_link_source = NoteLink(source_id=duplicate.id, source_type="source", raw_target_name="Generated from source")
+    kg_src = KgEdge(project_id="p1", src_id=duplicate.id, src_type="source", dst_id_or_path=note.id, dst_type="note")
+    kg_dst = KgEdge(project_id="p1", src_id=note.id, src_type="note", dst_id_or_path=duplicate.id, dst_type="source")
+    review_origin = ReviewItem(item_type="source-review", title="origin", origin_type="source", origin_id=duplicate.id)
+    review_target = ReviewItem(item_type="source-review", title="target", target_type="source", target_id=duplicate.id)
+    queue_item = IndexQueueItem(project_id="p1", target_type="source", target_id_or_path=duplicate.id)
+    lexical_entry = LexicalIndexEntry(source_id=duplicate.id, chunk_id="chunk-1")
+    ingestion_job = IngestionJob(source_id=duplicate.id, source_path="sources/paper.pdf")
+    ingestion_artifact = IngestionArtifact(source_id=duplicate.id, engine="pypdf", kind="text", path="sources/paper.md")
+    extracted_image = ExtractedImage(source_id=duplicate.id, path="sources/images/fig1.png")
+    conversion_warning = ConversionWarning(source_id=duplicate.id, code="warn", message="warning")
+    session.add_all(
+        [
+            survivor,
+            duplicate,
+            note,
+            note_link_target,
+            note_link_source,
+            kg_src,
+            kg_dst,
+            review_origin,
+            review_target,
+            queue_item,
+            lexical_entry,
+            ingestion_job,
+            ingestion_artifact,
+            extracted_image,
+            conversion_warning,
+        ]
+    )
+    await session.commit()
+
+    result = await repo.merge_sources([survivor.id, duplicate.id], reason="exact_identifier")
+
+    assert result["survivor_id"] == survivor.id
+    assert (await session.get(Note, note.id)).source_id == survivor.id
+    assert (await session.get(NoteLink, note_link_target.id)).target_source_id == survivor.id
+    assert (await session.get(NoteLink, note_link_source.id)).source_id == survivor.id
+    assert (await session.get(KgEdge, kg_src.id)).src_id == survivor.id
+    assert (await session.get(KgEdge, kg_dst.id)).dst_id_or_path == survivor.id
+    assert (await session.get(ReviewItem, review_origin.id)).origin_id == survivor.id
+    assert (await session.get(ReviewItem, review_target.id)).target_id == survivor.id
+    assert (await session.get(IndexQueueItem, queue_item.id)).target_id_or_path == survivor.id
+    assert (await session.get(LexicalIndexEntry, lexical_entry.id)).source_id == survivor.id
+    assert (await session.get(IngestionJob, ingestion_job.id)).source_id == survivor.id
+    assert (await session.get(IngestionArtifact, ingestion_artifact.id)).source_id == survivor.id
+    assert (await session.get(ExtractedImage, extracted_image.id)).source_id == survivor.id
+    assert (await session.get(ConversionWarning, conversion_warning.id)).source_id == survivor.id
+    assert await repo.count_references_to_source(duplicate.id) == 0
+
+
+@pytest.mark.asyncio
+async def test_hl_refint_01_merge_rolls_back_when_zero_dangling_gate_finds_missed_reference(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = Repository(session)
+    survivor = Source(id="00000000-0000-0000-0000-000000000021", title="Attention", doi="10.48550/arXiv.1706.03762")
+    duplicate = Source(id="00000000-0000-0000-0000-000000000022", title="Attention duplicate", doi="10.48550/arXiv.1706.03762")
+    note = Note(id="note-missed", title="Missed source note", source_id=duplicate.id)
+    duplicate_id = duplicate.id
+    note_id = note.id
+    session.add_all([survivor, duplicate, note])
+    await session.commit()
+
+    async def missed_repoint(_old_id: str, _survivor_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(repo, "_repoint_source_references", missed_repoint)
+
+    with pytest.raises(RuntimeError, match="dangling references remain"):
+        await repo.merge_sources([survivor.id, duplicate.id], reason="exact_identifier")
+
+    assert (await session.get(Source, duplicate_id)).trashed is False
+    assert (await session.get(Note, note_id)).source_id == duplicate_id
 
 
 @pytest.mark.asyncio

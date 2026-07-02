@@ -17,6 +17,11 @@ from hydra.database.models import (
     Citation,
     Claim,
     EvidenceLink,
+    IngestionArtifact,
+    IngestionJob,
+    ExtractedImage,
+    ConversionWarning,
+    IndexQueueItem,
     Task,
     Setting,
     ProviderSettings,
@@ -34,6 +39,65 @@ from hydra.database.models import (
     TaskLink,
 )
 from hydra.browser_bridge import TRUST_LEVEL_UNTRUSTED
+
+
+SOURCE_DIRECT_REFERENCE_COLUMNS: set[tuple[str, str]] = {
+    ("annotations", "source_id"),
+    ("citations", "source_id"),
+    ("conversion_warnings", "source_id"),
+    ("evidence_links", "source_id"),
+    ("extracted_images", "source_id"),
+    ("ingestion_artifacts", "source_id"),
+    ("ingestion_jobs", "source_id"),
+    ("lexical_index_entries", "source_id"),
+    ("notes", "source_id"),
+    ("note_links", "target_source_id"),
+}
+
+# Convention: polymorphic source references use a sibling type column whose
+# value is "source" and an id/path column carrying the stable source id.
+SOURCE_POLYMORPHIC_REFERENCE_COLUMNS: set[tuple[str, str, str, str]] = {
+    ("claims", "location_type", "source", "location_id"),
+    ("index_queue_items", "target_type", "source", "target_id_or_path"),
+    ("kg_edges", "dst_type", "source", "dst_id_or_path"),
+    ("kg_edges", "src_type", "source", "src_id"),
+    ("note_links", "source_type", "source", "source_id"),
+    ("review_items", "origin_type", "source", "origin_id"),
+    ("review_items", "target_type", "source", "target_id"),
+    ("task_links", "target_type", "source", "target_id_or_path"),
+}
+
+_SOURCE_DIRECT_MODELS = {
+    ("annotations", "source_id"): (Annotation, Annotation.source_id),
+    ("citations", "source_id"): (Citation, Citation.source_id),
+    ("conversion_warnings", "source_id"): (ConversionWarning, ConversionWarning.source_id),
+    ("evidence_links", "source_id"): (EvidenceLink, EvidenceLink.source_id),
+    ("extracted_images", "source_id"): (ExtractedImage, ExtractedImage.source_id),
+    ("ingestion_artifacts", "source_id"): (IngestionArtifact, IngestionArtifact.source_id),
+    ("ingestion_jobs", "source_id"): (IngestionJob, IngestionJob.source_id),
+    ("lexical_index_entries", "source_id"): (LexicalIndexEntry, LexicalIndexEntry.source_id),
+    ("notes", "source_id"): (Note, Note.source_id),
+    ("note_links", "target_source_id"): (NoteLink, NoteLink.target_source_id),
+}
+
+_SOURCE_POLYMORPHIC_MODELS = {
+    ("claims", "location_type", "source", "location_id"): (Claim, Claim.location_type, Claim.location_id),
+    ("index_queue_items", "target_type", "source", "target_id_or_path"): (
+        IndexQueueItem,
+        IndexQueueItem.target_type,
+        IndexQueueItem.target_id_or_path,
+    ),
+    ("kg_edges", "dst_type", "source", "dst_id_or_path"): (KgEdge, KgEdge.dst_type, KgEdge.dst_id_or_path),
+    ("kg_edges", "src_type", "source", "src_id"): (KgEdge, KgEdge.src_type, KgEdge.src_id),
+    ("note_links", "source_type", "source", "source_id"): (NoteLink, NoteLink.source_type, NoteLink.source_id),
+    ("review_items", "origin_type", "source", "origin_id"): (ReviewItem, ReviewItem.origin_type, ReviewItem.origin_id),
+    ("review_items", "target_type", "source", "target_id"): (ReviewItem, ReviewItem.target_type, ReviewItem.target_id),
+    ("task_links", "target_type", "source", "target_id_or_path"): (
+        TaskLink,
+        TaskLink.target_type,
+        TaskLink.target_id_or_path,
+    ),
+}
 
 
 class Repository:
@@ -865,50 +929,42 @@ class Repository:
 
         await self.session.flush()
         for duplicate in merged:
-            if await self.count_references_to_source(duplicate.id) != 0:
+            duplicate_id = duplicate.id
+            if await self.count_references_to_source(duplicate_id) != 0:
                 await self.session.rollback()
-                raise RuntimeError(f"dangling references remain for {duplicate.id}")
+                raise RuntimeError(f"dangling references remain for {duplicate_id}")
 
         await self.session.commit()
         return {"survivor_id": survivor.id, "merged_ids": [s.id for s in merged], "merge_record_id": record.id}
 
     async def _repoint_source_references(self, old_id: str, survivor_id: str) -> None:
-        evidence = await self.session.exec(select(EvidenceLink).where(EvidenceLink.source_id == old_id))
-        for row in evidence.all():
-            row.source_id = survivor_id
-            self.session.add(row)
+        for table_name, column_name in SOURCE_DIRECT_REFERENCE_COLUMNS:
+            model, column = _SOURCE_DIRECT_MODELS[(table_name, column_name)]
+            rows = await self.session.exec(select(model).where(column == old_id))
+            for row in rows.all():
+                setattr(row, column_name, survivor_id)
+                self.session.add(row)
 
-        claims = await self.session.exec(select(Claim).where(and_(Claim.location_type == "source", Claim.location_id == old_id)))
-        for row in claims.all():
-            row.location_id = survivor_id
-            self.session.add(row)
-
-        task_links = await self.session.exec(select(TaskLink).where(and_(TaskLink.target_type == "source", TaskLink.target_id_or_path == old_id)))
-        for row in task_links.all():
-            row.target_id_or_path = survivor_id
-            self.session.add(row)
-
-        annotations = await self.session.exec(select(Annotation).where(Annotation.source_id == old_id))
-        for row in annotations.all():
-            row.source_id = survivor_id
-            self.session.add(row)
-
-        citations = await self.session.exec(select(Citation).where(Citation.source_id == old_id))
-        for row in citations.all():
-            row.source_id = survivor_id
-            self.session.add(row)
+        for table_name, type_column_name, type_value, id_column_name in SOURCE_POLYMORPHIC_REFERENCE_COLUMNS:
+            model, type_column, id_column = _SOURCE_POLYMORPHIC_MODELS[
+                (table_name, type_column_name, type_value, id_column_name)
+            ]
+            rows = await self.session.exec(select(model).where(and_(type_column == type_value, id_column == old_id)))
+            for row in rows.all():
+                setattr(row, id_column_name, survivor_id)
+                self.session.add(row)
 
     async def count_references_to_source(self, source_id: str) -> int:
         count = 0
-        queries = [
-            select(EvidenceLink).where(EvidenceLink.source_id == source_id),
-            select(Claim).where(and_(Claim.location_type == "source", Claim.location_id == source_id)),
-            select(TaskLink).where(and_(TaskLink.target_type == "source", TaskLink.target_id_or_path == source_id)),
-            select(Annotation).where(Annotation.source_id == source_id),
-            select(Citation).where(Citation.source_id == source_id),
-        ]
-        for query in queries:
-            rows = await self.session.exec(query)
+        for table_name, column_name in SOURCE_DIRECT_REFERENCE_COLUMNS:
+            model, column = _SOURCE_DIRECT_MODELS[(table_name, column_name)]
+            rows = await self.session.exec(select(model).where(column == source_id))
+            count += len(rows.all())
+        for table_name, type_column_name, type_value, id_column_name in SOURCE_POLYMORPHIC_REFERENCE_COLUMNS:
+            model, type_column, id_column = _SOURCE_POLYMORPHIC_MODELS[
+                (table_name, type_column_name, type_value, id_column_name)
+            ]
+            rows = await self.session.exec(select(model).where(and_(type_column == type_value, id_column == source_id)))
             count += len(rows.all())
         return count
 
