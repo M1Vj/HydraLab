@@ -303,6 +303,8 @@ class AgentRun(SQLModel, table=True):
     mode: str = Field(default="passive")
     inputs_ref: str = Field(default="[]")
     status: str = Field(default="queued")
+    paused: bool = Field(default=False)
+    tokens_used: int = Field(default=0)
     started_at: Optional[datetime] = Field(default=None)
     ended_at: Optional[datetime] = Field(default=None)
     artifacts: str = Field(default="[]")
@@ -310,6 +312,68 @@ class AgentRun(SQLModel, table=True):
     trust_decisions: str = Field(default="[]")
     soft_deleted: bool = Field(default=False)
     created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AgentRunStep(SQLModel, table=True):
+    """One incrementally-persisted step of a run trace (HL-ASSIST-04).
+
+    Steps are flushed one row at a time so a cancelled run keeps its completed
+    prefix intact; ``step_index`` preserves order independent of timestamps.
+    """
+
+    __tablename__ = "agent_run_steps"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(foreign_key="agent_runs.id", index=True)
+    step_index: int = Field(default=0)
+    kind: str = Field(default="")
+    status: str = Field(default="completed")
+    summary: str = Field(default="")
+    payload_json: str = Field(default="{}")
+    tokens: int = Field(default=0)
+    trust_origin: str = Field(default="user")
+    skill_id: Optional[str] = Field(default=None)
+    capability: Optional[str] = Field(default=None)
+    denied_capability: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class AgentApproval(SQLModel, table=True):
+    """A per-item Co-pilot approval / Full-Access downgrade record (HL-MODE-02).
+
+    Rejecting an approval mutates no workspace state; the apply callback only
+    runs on an ``approved`` decision. ``target_kind``/``target_ref`` intentionally
+    avoid the source-polymorphic ``*_type``/``*_id`` column-name convention.
+    """
+
+    __tablename__ = "agent_approvals"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: Optional[str] = Field(default=None, foreign_key="agent_runs.id", index=True, nullable=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    mode: str = Field(default="copilot")
+    action_kind: str = Field(default="")
+    target_kind: Optional[str] = Field(default=None)
+    target_ref: Optional[str] = Field(default=None)
+    summary: str = Field(default="")
+    payload_json: str = Field(default="{}")
+    status: str = Field(default="pending")
+    decision: Optional[str] = Field(default=None)
+    reason: str = Field(default="")
+    trust_origin: str = Field(default="user")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class AgentModePolicy(SQLModel, table=True):
+    """Per-project Agent Access Mode + Full-Access opt-in (HL-MODE-01/03).
+
+    Full Access defaults OFF and requires explicit per-project enablement.
+    """
+
+    __tablename__ = "agent_mode_policies"
+    project_id: str = Field(primary_key=True)
+    default_mode: str = Field(default="passive")
+    full_access_enabled: bool = Field(default=False)
     updated_at: datetime = Field(default_factory=utcnow)
 
 
