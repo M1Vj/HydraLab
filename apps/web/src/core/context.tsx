@@ -201,7 +201,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const fetchTasks = async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/tasks");
+      const res = await fetch("/api/tasks");
       const data = await res.json();
       setTasks(data.tasks || []);
     } catch (err) {
@@ -211,7 +211,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const fetchSources = async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/export/workspace");
+      const res = await fetch("/api/export/workspace");
       const data = await res.json();
       setSources(data.sources || []);
     } catch (err) {
@@ -222,7 +222,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const handleCreateOrUpdateTask = async (taskData: { title: string; detail: string; column: string; progress: number; phase_indicator: string; position: number }) => {
     try {
       if (editingTask?.id) {
-        const res = await fetch(`http://localhost:8000/api/tasks/${editingTask.id}`, {
+        const res = await fetch(`/api/tasks/${editingTask.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(taskData)
@@ -233,7 +233,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
           setEditingTask(null);
         }
       } else {
-        const res = await fetch("http://localhost:8000/api/tasks", {
+        const res = await fetch("/api/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(taskData)
@@ -252,7 +252,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const handleDeleteTask = async (taskId: string) => {
     if (!confirm("Are you sure you want to delete this task?")) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/tasks/${taskId}`, {
+      const res = await fetch(`/api/tasks/${taskId}`, {
         method: "DELETE"
       });
       if (res.ok) {
@@ -279,7 +279,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
       // Optimistic update
       setTasks(prev => prev.map(t => t.id === taskId ? { ...t, column: targetColumn, position } : t));
 
-      await fetch(`http://localhost:8000/api/tasks/${taskId}`, {
+      await fetch(`/api/tasks/${taskId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ column: targetColumn, position })
@@ -336,7 +336,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const fetchNotes = async (q = "") => {
     try {
-      const res = await fetch(`http://localhost:8000/api/notes${q ? `?query=${encodeURIComponent(q)}` : ""}`);
+      const res = await fetch(`/api/notes${q ? `?query=${encodeURIComponent(q)}` : ""}`);
       const data = await res.json();
       setNotes(data.notes || []);
     } catch (err) {
@@ -346,7 +346,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const fetchNoteLinks = async (noteId: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/notes/${noteId}/links`);
+      const res = await fetch(`/api/notes/${noteId}/links`);
       const data = await res.json();
       setNoteLinks(data);
     } catch (err) {
@@ -362,7 +362,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const createNewNote = async () => {
     try {
-      const res = await fetch("http://localhost:8000/api/notes", {
+      const res = await fetch("/api/notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -382,7 +382,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const saveNote = async () => {
     if (!selectedNote) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/notes/${selectedNote.id}`, {
+      const res = await fetch(`/api/notes/${selectedNote.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -402,7 +402,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const deleteNote = async (noteId: string) => {
     try {
-      await fetch(`http://localhost:8000/api/notes/${noteId}`, {
+      await fetch(`/api/notes/${noteId}`, {
         method: "DELETE"
       });
       setSelectedNote(null);
@@ -479,7 +479,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
   const handleExportPreview = async () => {
     setIsExportLoading(true);
     try {
-      const res = await fetch("http://localhost:8000/api/export/preview");
+      const res = await fetch("/api/export/preview");
       const data = await res.json();
       setPreviewData(data);
       setIsPreviewModalOpen(true);
@@ -493,7 +493,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   const handleTriggerExport = async () => {
     try {
-      const response = await fetch("http://localhost:8000/api/export", {
+      const response = await fetch("/api/export", {
         method: "POST"
       });
       if (!response.ok) throw new Error("Export failed");
@@ -517,7 +517,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     if (!draftText.trim()) return;
     setIsReviewing(true);
     try {
-      const res = await fetch("http://localhost:8000/api/reviews/analyze", {
+      const res = await fetch("/api/reviews/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: draftText })
@@ -540,7 +540,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
     setStatusMessage("Starting request...");
     
     try {
-      const res = await fetch("http://localhost:8000/api/chat/completions", {
+      const res = await fetch("/api/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: inputValue, conversation_id: conversationId })
@@ -610,7 +610,7 @@ export function AppContextProvider({ children }: { children: React.ReactNode }) 
 
   useEffect(() => {
     if (activeActivity === "evidence") {
-      fetch("http://localhost:8000/api/evidence")
+      fetch("/api/evidence")
         .then(r => r.json())
         .then(data => setEvidenceList(data.evidence || []))
         .catch(console.error);
