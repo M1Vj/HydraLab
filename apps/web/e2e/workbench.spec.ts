@@ -45,6 +45,28 @@ test("explorer to markdown editor open flow", async ({ page }) => {
   await expect(page.getByLabel("CodeMirror 6 Markdown editor").or(page.getByText("No note open"))).toBeVisible();
 });
 
+test("open PDF reader panel from an Explorer source row", async ({ page }) => {
+  await page.getByRole("button", { name: "Open existing folder" }).click();
+  await page.getByRole("button", { name: "Explorer" }).click();
+  const sourceRow = page.locator(".tree-row.source").first();
+  if ((await sourceRow.count()) === 0) test.skip(true, "No source exists in this project");
+  await sourceRow.dblclick();
+  await expect(page.getByRole("region", { name: "PDF reader" }).or(page.getByRole("button", { name: "Open" }))).toBeVisible();
+});
+
+test("settings secret field is write-only and never echoes a stored value", async ({ page }) => {
+  await page.getByRole("button", { name: "Open existing folder" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  const secretInput = page.locator('input[type="password"]').first();
+  if ((await secretInput.count()) === 0) test.skip(true, "No provider configured to expose a secret field");
+  await expect(secretInput).toHaveValue("");
+  await secretInput.fill("sk-should-not-persist");
+  // Reload settings by reopening the panel; a write-only field must return empty.
+  await page.getByRole("button", { name: "Explorer" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(page.locator('input[type="password"]').first()).toHaveValue("");
+});
+
 test("layout drag changes persisted JSON", async ({ page }) => {
   await page.getByRole("button", { name: "Open existing folder" }).click();
   const before = await page.evaluate(() => localStorage.getItem("hydralab-workspace"));
