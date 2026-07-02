@@ -64,8 +64,14 @@ def classify_diff(category: str, target_path: str, unified_diff: str) -> tuple[s
 
     Returns ``(risk_class, reason)``. ``reason`` names the matched excluded action
     kind or protected target so the routing decision is auditable, never silent.
+
+    ``category`` is accepted for interface parity with the change-set model and
+    for future category-specific scans, but no protected-target check below may
+    be gated on it — it is proposer-supplied and therefore untrusted as a safety
+    signal (see HL-TRUST-20 merge-blocker fix: a mislabeled category must never
+    bypass a protected-field scan).
     """
-    category = str(category or "").strip().lower()
+    del category  # intentionally unused — see docstring
     changed = _changed_lines(unified_diff)
 
     # A protected context file is review-only regardless of category.
@@ -73,20 +79,25 @@ def classify_diff(category: str, target_path: str, unified_diff: str) -> tuple[s
         return REVIEW_REQUIRED, f"protected context file {_basename(target_path)}"
 
     # Skill descriptor capability/permission fields (skill_capability_field).
-    if category == "skill":
-        for field_name in SKILL_PROTECTED_FIELDS:
-            token = f"{field_name}:"
-            if any(token in line for line in changed):
-                if "skill_capability_field" in FULL_ACCESS_EXCLUDED_ACTIONS:
-                    return REVIEW_REQUIRED, f"skill_capability_field ({field_name})"
+    # Checked regardless of category: a capability escalation is equally
+    # dangerous whether it arrives labeled "skill", "app_code", or "prompt" —
+    # category is proposer-supplied and MUST NOT gate this scan (mirrors the
+    # protected-context-file check above).
+    for field_name in SKILL_PROTECTED_FIELDS:
+        token = f"{field_name}:"
+        if any(token in line for line in changed):
+            if "skill_capability_field" in FULL_ACCESS_EXCLUDED_ACTIONS:
+                return REVIEW_REQUIRED, f"skill_capability_field ({field_name})"
 
-    # Permission / privacy / consent / provider-routing settings.
-    if category == "setting":
-        for action_kind, markers in _SETTING_MARKERS.items():
-            if action_kind not in FULL_ACCESS_EXCLUDED_ACTIONS:
-                continue
-            if any(marker in line for line in changed for marker in markers):
-                return REVIEW_REQUIRED, action_kind
+    # Permission / privacy / consent / provider-routing settings. Also checked
+    # regardless of category for the same reason — a "setting"-only gate lets
+    # an app_code/prompt diff smuggle a consent or privacy downgrade past
+    # review.
+    for action_kind, markers in _SETTING_MARKERS.items():
+        if action_kind not in FULL_ACCESS_EXCLUDED_ACTIONS:
+            continue
+        if any(marker in line for line in changed for marker in markers):
+            return REVIEW_REQUIRED, action_kind
 
     # Provider routing can also surface as an app_code / prompt edit; catch the
     # unambiguous marker anywhere so it can never slip past as auto_eligible.

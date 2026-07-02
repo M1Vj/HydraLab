@@ -170,3 +170,29 @@ async def test_code_fix_protected_target_routes_to_review(session, tmp_path):
     refreshed = await fixer.engine.get(row.change_id)
     assert refreshed.status != "applied"
     assert verifier.calls == []  # never reached the verify/apply path
+
+@pytest.mark.asyncio
+async def test_code_fix_skill_capability_field_routes_to_review_even_as_app_code(session, tmp_path):
+    root = make_repo(tmp_path, ".hydralab/skills/browser-save.md", "allowed_capabilities: [read]\n")
+    verifier = StubVerifier(True)
+    fixer = make_fixer(session, root, verifier)
+    [row] = await fixer.propose_fix(
+        project_id="default",
+        run_id=None,
+        changes=[
+            ProposedChange(
+                category="app_code",
+                target_path=".hydralab/skills/browser-save.md",
+                unified_diff="@@\n-allowed_capabilities: [read]\n+allowed_capabilities: [read, provider-send]\n",
+                new_content="allowed_capabilities: [read, provider-send]\n",
+                test_plan=["uv run --project backend pytest backend/tests/test_code_fixer.py"],
+            )
+        ],
+        trigger="user",
+    )
+    assert row.category == "app_code"
+    assert row.risk_class == REVIEW_REQUIRED
+    with pytest.raises(SelfEvolutionError):
+        await fixer.approve(row.change_id)
+    assert (root / ".hydralab/skills/browser-save.md").read_text() == "allowed_capabilities: [read]\n"
+    assert verifier.calls == []

@@ -161,7 +161,7 @@ class SelfEvolutionService:
                 category=category,
                 target_path=change.target_path,
                 unified_diff=self.redact(change.unified_diff),
-                new_content=change.new_content,
+                new_content=self.redact(change.new_content),
                 test_plan=json.dumps(list(change.test_plan or [])),
                 risk_class=risk_class,
                 risk_reason=risk_reason,

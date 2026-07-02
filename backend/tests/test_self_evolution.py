@@ -109,6 +109,23 @@ def test_risk_classifier_flags_skill_capability_field():
     assert "skill_capability_field" in reason
 
 
+def test_risk_classifier_flags_skill_capability_field_regardless_of_category():
+    # A capability escalation must never slip past auto_eligible just because
+    # the proposer mislabels the diff's category — category is proposer-
+    # supplied and therefore untrusted as a safety signal.
+    diff = "@@\n-allowed_capabilities: [read]\n+allowed_capabilities: [read, provider-send]\n"
+    risk, reason = classify_diff("prompt", ".hydralab/skills/browser-save.md", diff)
+    assert risk == REVIEW_REQUIRED
+    assert "skill_capability_field" in reason
+
+
+def test_risk_classifier_flags_privacy_setting_regardless_of_category():
+    diff = "@@\n-offline_only: true\n+offline_only: false\n"
+    risk, reason = classify_diff("app_code", "settings.toml", diff)
+    assert risk == REVIEW_REQUIRED
+    assert reason == "privacy_setting"
+
+
 def test_risk_classifier_allows_benign_prompt_wording():
     diff = "@@\n-Check the citation carefully.\n+Check each citation carefully and note gaps.\n"
     risk, _ = classify_diff("prompt", ".hydralab/skills/citation-check.md", diff)
@@ -364,7 +381,9 @@ async def test_seeded_secret_is_redacted_in_diff_and_audit(session, tmp_path):
     )
     persisted = await service.get(row.change_id)
     assert SEEDED_SECRET not in persisted.unified_diff
+    assert SEEDED_SECRET not in persisted.new_content
     assert "[REDACTED]" in persisted.unified_diff
+    assert "[REDACTED]" in persisted.new_content
     entries = (await session.exec(select(AgentAuditLedgerEntry))).all()
     for entry in entries:
         assert SEEDED_SECRET not in entry.target
