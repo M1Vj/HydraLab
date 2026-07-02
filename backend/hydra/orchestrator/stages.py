@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+from hydra.orchestrator.ranking import rank_candidates
+
 
 class StageEnum(str, Enum):
     GENERATE = "generate"
@@ -40,6 +42,12 @@ class StageResult:
     status: str = "completed"
     stop_state: str | None = None
     trust_origin: str = "user"
+    # Substantive write/send/tool actions a stage proposes. The run loop routes
+    # every one through the Phase-3 ActionGate (classify → checkpoint → audit →
+    # gate) before it can apply. Deterministic Phase-2 stages propose none.
+    proposed_actions: list[Any] = field(default_factory=list)
+    # GateResult objects produced by governing proposed_actions (trace/persist).
+    governed: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +57,11 @@ class StageContext:
     mode: str
     data: dict[str, Any]
     config: Any
+    # Phase-3 autonomy wiring. When an Autopilot run supplies a gate, stages that
+    # perform substantive actions MUST route them through it (directly or via
+    # StageResult.proposed_actions) rather than applying side effects unguarded.
+    full_access_enabled: bool = False
+    action_gate: Any = None
 
 
 class Stage(Protocol):
@@ -120,17 +133,7 @@ class CompareStage:
 
     async def run(self, ctx: StageContext) -> StageResult:
         candidates = list(ctx.data.get("candidates") or [])
-        ranking = sorted(
-            (
-                {
-                    "id": candidate.get("id"),
-                    "title": candidate.get("title"),
-                    "score": int(candidate.get("base_score") or 0),
-                }
-                for candidate in candidates
-            ),
-            key=lambda item: (-item["score"], str(item["id"])),
-        )
+        ranking = rank_candidates(candidates, self.scoring_method)
         artifact = {
             "id": f"{ctx.run_id}:compare:ranking",
             "kind": "ranking",

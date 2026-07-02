@@ -123,6 +123,61 @@ export type ExportOptionsResponse = {
   excluded_by_default: string[];
 };
 
+export type ReproducibilityRunSummary = {
+  id: string;
+  kind: "agent" | "experiment" | string;
+  label: string;
+  status: string;
+  created_at: number;
+};
+
+export type ReproducibilityRedactionDecision = {
+  id: string;
+  category: string;
+  path_or_ref: string;
+  reason: string;
+  decision: string;
+};
+
+export type ReproducibilityIncludedCategory = {
+  id: string;
+  label: string;
+  count: number;
+};
+
+export type ReproducibilityPreviewResponse = {
+  status: string;
+  project_id: string;
+  run_ids: string[];
+  included_categories: ReproducibilityIncludedCategory[];
+  redacted_item_count: number;
+  redaction_decisions: ReproducibilityRedactionDecision[];
+};
+
+export type ReproducibilityBundleResponse = {
+  status: string;
+  bundle_id: string;
+  bundle_dir: string;
+  manifest_content_hash: string;
+  evaluation_path: string;
+  ledger_path: string;
+  manifest: Record<string, unknown>;
+  gate: ManuscriptGateResult | null;
+};
+
+export type ReproducibilityVerificationResponse = {
+  ok: boolean;
+  hash_mismatches: string[];
+  dangling_ids: string[];
+  resolved_soft_deleted_or_merged: Array<Record<string, unknown>>;
+};
+
+export type ReproducibilityReportResponse = {
+  status: string;
+  report_path: string;
+  gate: ManuscriptGateResult | null;
+};
+
 export type ClaimStatus = "draft" | "supported" | "weak" | "contradicted" | "needs_review" | "rejected";
 
 export type ClaimRecord = {
@@ -397,6 +452,45 @@ export type AgentApproval = {
   summary: string;
 };
 
+export type AutonomyRiskLevel = "low" | "medium" | "high" | string;
+
+export type AutonomyPolicy = {
+  mode: "passive" | "copilot" | "full_access" | string;
+  allowed_action_types: string[];
+  blocked_action_types: string[];
+  budget_limits: { tokens: number; wall_clock_seconds: number };
+  max_loop_count: number;
+  stop_conditions: string[];
+  checkpoint_required: boolean;
+  approval_required: boolean;
+  rollback_behavior: string;
+  autopilot_enabled: boolean;
+};
+
+export type AutonomyPendingAction = {
+  id: string;
+  kind: "review_item" | "approval" | string;
+  action_kind: string;
+  summary?: string;
+  target_ref?: string | null;
+  risk_level: AutonomyRiskLevel;
+  status: string;
+  reason?: string;
+  payload?: Record<string, unknown>;
+};
+
+export type AutonomyAuditEntry = {
+  id: string;
+  project_id: string;
+  run_id?: string | null;
+  actor: string;
+  action: string;
+  risk_level: AutonomyRiskLevel;
+  target: string;
+  approval_state: string;
+  created_at: number;
+};
+
 export type AgentTraceStep = {
   index: number;
   kind: string;
@@ -410,7 +504,7 @@ export type AgentTraceStep = {
 };
 
 export type AgentRunTrace = {
-  run: { id: string; project_id: string; mode: string; status: string; paused: boolean };
+  run: { id: string; project_id: string; mode: string; status: string; paused: boolean; stop_reason?: string };
   trace: { run_id: string; steps: AgentTraceStep[] };
   artifacts?: AgentRunArtifact[];
 };
@@ -446,6 +540,7 @@ export type OrchestratorRunSummary = {
   status: string;
   state?: string;
   paused: boolean;
+  stop_reason?: string;
   tokens_used?: number;
   created_at?: number;
 };
@@ -583,6 +678,43 @@ export type SettingsResponse = {
   }>;
   workspace_preferences: Record<string, string>;
   global_settings: Record<string, unknown>;
+};
+
+export type CollaborationPermission = "read" | "comment" | "edit";
+export type SyncState = "offline" | "connecting" | "synced" | "syncing" | "conflict" | "revoked";
+
+export type CollaborationSettings = {
+  project_id: string;
+  enabled: boolean;
+  sync_server_url: string;
+  sync_server_kind: "self-hosted" | string;
+};
+
+export type CollaboratorRecord = {
+  collaborator_id: string;
+  display_name: string;
+  permission: CollaborationPermission;
+  revoked: boolean;
+  authenticated_at?: number | null;
+};
+
+export type CollaborationInvite = {
+  collaborator_id: string;
+  permission: CollaborationPermission;
+  invite_token: string;
+};
+
+export type CollaborationAuth = {
+  collaborator_id: string;
+  display_name: string;
+  permission: CollaborationPermission;
+  session_token: string;
+};
+
+export type CollaborationRevokeResponse = {
+  collaborator_id: string;
+  revoked: boolean;
+  disconnected: number;
 };
 
 export type ApiClient = {
@@ -801,6 +933,92 @@ export type ManuscriptExportResponse = {
   format: ManuscriptFormat;
 };
 
+export type ManuscriptSection = {
+  title: string;
+  content: string;
+  authorship: "human" | "assistant" | string;
+};
+
+export type ManuscriptFigure = {
+  id: string;
+  path: string;
+  caption: string;
+  number: number;
+  label?: string;
+};
+
+export type ManuscriptTable = {
+  id: string;
+  caption: string;
+  markdown: string;
+  number: number;
+  label?: string;
+};
+
+export type ManuscriptDocumentModel = {
+  manuscript_id: string;
+  source_dir: string;
+  format: ManuscriptFormat;
+  template_id: string;
+  sections: ManuscriptSection[];
+  figures: ManuscriptFigure[];
+  tables: ManuscriptTable[];
+  citation_keys: string[];
+  references: Record<string, Record<string, unknown>>;
+  source_files: string[];
+  include_paths: string[];
+  authorship_ledger: Array<{ section: string; authorship: string }>;
+};
+
+export type ManuscriptValidation = {
+  unresolved_citation_keys: string[];
+  missing_metadata: Array<{ citation_key: string; missing_fields: string }>;
+  has_issues: boolean;
+};
+
+export type ManuscriptRedactionItem = {
+  id: string;
+  category: string;
+  path: string;
+  reason: string;
+  decision: string;
+};
+
+export type ManuscriptRedaction = {
+  items: ManuscriptRedactionItem[];
+  has_unresolved: boolean;
+};
+
+export type ManuscriptPackageOutput = {
+  target: string;
+  status: string;
+  path: string | null;
+  message: string;
+  download_path: string | null;
+};
+
+export type ManuscriptGateResult = {
+  status: string;
+  applied: boolean;
+  risk_level: string;
+  reason: string;
+  audit_id: string;
+  checkpoint_id?: string | null;
+  review_item_id?: string | null;
+  approval_id?: string | null;
+};
+
+export type ManuscriptPackageResponse = {
+  status: string;
+  document: ManuscriptDocumentModel;
+  validation: ManuscriptValidation;
+  redaction: ManuscriptRedaction;
+  outputs: Record<string, ManuscriptPackageOutput>;
+  package_dir: string | null;
+  manifest_path: string;
+  gate: ManuscriptGateResult | null;
+};
+
 export function listManuscripts(client: ApiClient = api): Promise<{ manuscripts: string[] }> {
   return client.get("/api/writing/manuscripts");
 }
@@ -827,6 +1045,79 @@ export function exportManuscript(
   client: ApiClient = api,
 ): Promise<ManuscriptExportResponse> {
   return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/export`, input);
+}
+
+export function getManuscriptExportPreview(
+  manuscript: string,
+  projectId = "default",
+  client: ApiClient = api,
+): Promise<ManuscriptPackageResponse> {
+  return client.get(
+    `/api/writing/manuscripts/${encodeURIComponent(manuscript)}/export-preview?project_id=${encodeURIComponent(projectId)}`,
+  );
+}
+
+export function createManuscriptPackage(
+  manuscript: string,
+  input: {
+    approval_id?: string | null;
+    targets?: Array<"docx" | "latex" | "html" | "pdf">;
+    acknowledge_citation_issues?: boolean;
+    acknowledged_redaction_item_ids?: string[];
+    project_id?: string;
+  },
+  client: ApiClient = api,
+): Promise<ManuscriptPackageResponse> {
+  return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/package`, input);
+}
+
+export function submitManuscriptPackage(
+  manuscript: string,
+  input: { venue: string; approval_id?: string | null; project_id?: string },
+  client: ApiClient = api,
+): Promise<{ status: string; gate: ManuscriptGateResult }> {
+  return client.post(`/api/writing/manuscripts/${encodeURIComponent(manuscript)}/submit`, input);
+}
+
+// --- Reproducibility bundle / evaluation ledger (branch 03-07) -------------
+
+export function listReproducibilityRuns(
+  projectId = "default",
+  client: ApiClient = api,
+): Promise<{ project_id: string; runs: ReproducibilityRunSummary[] }> {
+  return client.get(`/api/reproducibility/bundleable-runs?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function getReproducibilityPreview(
+  projectId: string,
+  runIds: string[],
+  client: ApiClient = api,
+): Promise<ReproducibilityPreviewResponse> {
+  const query = new URLSearchParams({ project_id: projectId, run_ids: runIds.join(",") });
+  return client.get(`/api/reproducibility/preview?${query.toString()}`);
+}
+
+export function buildReproducibilityBundle(
+  input: { project_id: string; run_ids: string[]; approval_id?: string | null },
+  client: ApiClient = api,
+): Promise<ReproducibilityBundleResponse> {
+  return client.post("/api/reproducibility/bundles", input);
+}
+
+export function verifyReproducibilityBundle(
+  bundleId: string,
+  projectId = "default",
+  client: ApiClient = api,
+): Promise<ReproducibilityVerificationResponse> {
+  return client.get(`/api/reproducibility/bundles/${encodeURIComponent(bundleId)}/verify?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function exportReproducibilityReport(
+  bundleId: string,
+  input: { project_id: string; approval_id?: string | null },
+  client: ApiClient = api,
+): Promise<ReproducibilityReportResponse> {
+  return client.post(`/api/reproducibility/bundles/${encodeURIComponent(bundleId)}/report`, input);
 }
 
 // --- DOCX OpenXML assisted edits (branch 02-08, Phase 2) --------------------

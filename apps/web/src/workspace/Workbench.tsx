@@ -3,6 +3,9 @@ import { Layout, Model, type IJsonModel, type ILayoutApi, type TabNode } from "f
 import "flexlayout-react/style/dark.css";
 import { CheckCircle2, FolderOpen, PanelBottom, Plus, RotateCcw, Save, X } from "lucide-react";
 import { api } from "../lib/api";
+import { useSurface } from "../lib/responsive";
+import { MobileShell } from "../components/mobile/MobileShell";
+import { usePhase3MobileSurfaceEnabled } from "../components/mobile/useMobileSurfaceFlag";
 import { CommandPalette, ShortcutReference } from "./CommandPalette";
 import { CommandRegistry } from "./commands";
 import { WorkspaceDataProvider, useWorkspaceData } from "./data";
@@ -13,10 +16,13 @@ import { ExplorerPanel } from "./panels/ExplorerPanel";
 import { SourceDiscoveryPanel } from "./panels/SourceDiscoveryPanel";
 import { ResearchChatPanel } from "./panels/ResearchChatPanel";
 import { AgentRunsPanel } from "./panels/AgentRunsPanel";
+import { ExperimentsPanel } from "./panels/ExperimentsPanel";
 import { IdeaBoardPanel } from "./panels/IdeaBoardPanel";
 import { MarkdownEditorPanel } from "./panels/MarkdownEditorPanel";
 import { WritingPanel } from "./panels/WritingPanel";
 import { TasksPanel } from "./panels/TasksPanel";
+import { SelfEvolutionPanel } from "./panels/SelfEvolutionPanel";
+import { ReproducibilityPanel } from "./panels/ReproducibilityPanel";
 import { BrowserPanel } from "./panels/BrowserPanel";
 import {
   CitationEvidencePanel,
@@ -32,12 +38,25 @@ import {
 
 export function WorkbenchRoot() {
   const activeProject = useWorkspaceStore((state) => state.activeProject);
-  return activeProject ? (
+  const surface = useSurface();
+  const mobileEnabled = usePhase3MobileSurfaceEnabled();
+  // Phase-3 mobile surface: only when the flag is ON and a touch-primary surface is
+  // detected. Flag OFF or a desktop surface keeps the existing FlexLayout path
+  // byte-for-byte unchanged (HL-UX-30/32). WorkbenchShell itself is never modified.
+  const useMobileSurface = mobileEnabled && surface !== "desktop";
+
+  if (!activeProject) return <WelcomeSurface />;
+  if (useMobileSurface) {
+    return (
+      <WorkspaceDataProvider projectId={activeProject.id}>
+        <MobileShell project={activeProject} surface={surface} />
+      </WorkspaceDataProvider>
+    );
+  }
+  return (
     <WorkspaceDataProvider projectId={activeProject.id}>
       <WorkbenchShell project={activeProject} />
     </WorkspaceDataProvider>
-  ) : (
-    <WelcomeSurface />
   );
 }
 
@@ -63,6 +82,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         git: GitPanel,
         "research-chat": ResearchChatPanel,
         "agent-runs": AgentRunsPanel,
+        experiments: ExperimentsPanel,
         "idea-board": IdeaBoardPanel,
         "markdown-editor": MarkdownEditorPanel,
         writing: WritingPanel,
@@ -71,6 +91,8 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
         "citation-evidence": CitationEvidencePanel,
         tasks: TasksPanel,
         exports: ExportPanel,
+        reproducibility: ReproducibilityPanel,
+        "self-evolution": SelfEvolutionPanel,
         settings: SettingsPanel,
         logs: LogsPanel,
         terminal: TerminalPanel,
@@ -107,6 +129,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
       { id: "workbench.toggle-terminal", title: "Toggle bottom panel", run: () => setBottomVisible((current) => !current) },
       { id: "workbench.close-project", title: "Close project", run: () => store.setActiveProject(null) },
       { id: "review.open", title: "Open Review Inbox", run: () => openPanel("review-inbox") },
+      { id: "self-evolution.open", title: "Open Self-Evolution", run: () => openPanel("self-evolution") },
       { id: "git.init", title: "Initialize Git", disabledReason: "Existing folders require explicit confirmation before Git init.", run: () => undefined },
       { id: "view.reset-layout", title: "View: Reset layout", run: () => resetLayout() },
       { id: "view.save-layout-as", title: "View: Save layout as...", run: () => saveLayoutAs() },
@@ -218,7 +241,7 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
 }
 
 function ActivityBar({ openPanel, reviewCount }: { openPanel: (id: PanelId) => void; reviewCount: number }) {
-  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "agent-runs", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "settings"];
+  const ids: PanelId[] = ["explorer", "source-discovery", "review-inbox", "research-chat", "agent-runs", "experiments", "browser", "writing", "citation-evidence", "tasks", "git", "terminal", "exports", "reproducibility", "self-evolution", "settings"];
   return (
     <nav className="activity-bar" aria-label="Activity Bar">
       {ids.map((id) => {

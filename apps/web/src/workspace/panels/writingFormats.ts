@@ -1,6 +1,7 @@
 import type {
   DocxAvailabilityResponse,
   LatexAvailabilityResponse,
+  ManuscriptPackageResponse,
   ManuscriptFormat,
   ManuscriptFormatResponse,
 } from "../../lib/api";
@@ -95,4 +96,35 @@ export function formatValidationMessage(response: ManuscriptFormatResponse | nul
 
 export function isLatexFile(name: string): boolean {
   return name.toLowerCase().endsWith(".tex");
+}
+
+export type ExportPreviewState = "empty" | "loading" | "failure" | "ready";
+
+export function exportPreviewState(input: {
+  active: string | null;
+  loading: boolean;
+  error: Error | null;
+  preview: ManuscriptPackageResponse | null;
+}): ExportPreviewState {
+  if (!input.active) return "empty";
+  if (input.loading) return "loading";
+  if (input.error) return "failure";
+  return input.preview ? "ready" : "empty";
+}
+
+export function manuscriptPackageBlockers(
+  preview: ManuscriptPackageResponse | null,
+  acknowledgeCitationIssues: boolean,
+  acknowledgedRedactionIds: string[],
+): string[] {
+  if (!preview) return [];
+  const blockers: string[] = [];
+  if (preview.validation.has_issues && !acknowledgeCitationIssues) {
+    blockers.push("citation-validation");
+  }
+  const acknowledged = new Set(acknowledgedRedactionIds);
+  if (preview.redaction.items.some((item) => !acknowledged.has(item.id))) {
+    blockers.push("redaction");
+  }
+  return blockers;
 }

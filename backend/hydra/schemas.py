@@ -33,6 +33,21 @@ class BrowserCopilotActionRequest(BaseModel):
     user_triggered: bool = False
 
 
+class AutonomousBrowserRunStartRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
+    task_id: str = Field(min_length=1, max_length=200)
+    task_label: str = Field(min_length=1, max_length=200)
+    start_urls: list[str] = Field(min_length=1, max_length=20)
+
+    @field_validator("start_urls")
+    @classmethod
+    def validate_start_urls(cls, value: list[str]) -> list[str]:
+        for url in value:
+            if "://" not in url:
+                raise ValueError("url must include a scheme")
+        return value
+
+
 class SourceDiscoveryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=400)
     project_id: str | None = Field(default=None, max_length=200)
@@ -71,6 +86,18 @@ class ManuscriptExportRequest(BaseModel):
         if ".." in value or value.startswith("/") or "\\" in value or "\x00" in value:
             raise ValueError("path traversal is not allowed")
         return value
+
+class ManuscriptPackageRequest(BaseModel):
+    approval_id: str | None = Field(default=None, max_length=200)
+    targets: list[Literal["docx", "latex", "html", "pdf"]] = Field(default_factory=lambda: ["docx", "latex", "html", "pdf"])
+    acknowledge_citation_issues: bool = False
+    acknowledged_redaction_item_ids: list[str] = Field(default_factory=list)
+    project_id: str = Field(default="default", max_length=200)
+
+class ManuscriptSubmissionRequest(BaseModel):
+    venue: str = Field(min_length=1, max_length=200)
+    approval_id: str | None = Field(default=None, max_length=200)
+    project_id: str = Field(default="default", max_length=200)
 
 
 class DocxEditProposalIn(BaseModel):
@@ -244,6 +271,17 @@ class ProjectZipRequest(BaseModel):
     include_annotations: bool = False
 
 
+class ReproducibilityBundleRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    run_ids: list[str] = Field(min_length=1, max_length=100)
+    approval_id: str | None = Field(default=None, max_length=200)
+
+
+class ReproducibilityReportRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    approval_id: str | None = Field(default=None, max_length=200)
+
+
 class BackupRequest(BaseModel):
     project_id: str = Field(default="default", max_length=200)
 
@@ -357,6 +395,27 @@ class ProviderSecretRequest(BaseModel):
 class SettingsUpdateRequest(BaseModel):
     provider_settings: list[ProviderSettingsRequest] | None = None
     workspace_preferences: dict[str, str] | None = None
+
+
+class CollaborationSettingsRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    enabled: bool = False
+    sync_server_url: str = Field(default="", max_length=500)
+
+
+class CollaborationInviteRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    display_name: str = Field(min_length=1, max_length=200)
+    permission: Literal["read", "comment", "edit"]
+
+
+class CollaborationAuthenticateRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    invite_token: str = Field(min_length=8, max_length=200)
+
+
+class CollaborationRevokeRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
 
 
 class BrowserHandshakeRequest(BaseModel):
@@ -480,6 +539,60 @@ class OrchestratorRunStartRequest(BaseModel):
     recipe_inputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class SelfEvolutionChangeInput(BaseModel):
+    category: Literal["skill", "prompt", "setting", "app_code"] = "app_code"
+    target_path: str = Field(min_length=1, max_length=2000)
+    unified_diff: str = Field(default="", max_length=400_000)
+    new_content: str = Field(default="", max_length=400_000)
+    test_plan: list[str] = Field(default_factory=list, max_length=20)
+    origin: str = Field(default="user", max_length=120)
+    origin_trust: Literal["user", "untrusted-external"] = "user"
+    justification_trust: Literal["user", "untrusted-external"] = "user"
+
+
+class SelfEvolutionRunRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    run_id: str | None = Field(default=None, max_length=200)
+    changes: list[SelfEvolutionChangeInput] = Field(min_length=1, max_length=50)
+
+
+class SelfEvolutionDecisionRequest(BaseModel):
+    actor: str = Field(default="user", max_length=120)
+
+
+class AutonomyPolicyRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    autopilot_enabled: bool = False
+    mode: Literal["passive", "copilot", "full_access"] = "passive"
+    allowed_action_types: list[str] = Field(default_factory=list)
+    blocked_action_types: list[str] = Field(default_factory=list)
+    budget_limits: dict[str, int] = Field(default_factory=lambda: {"tokens": 60000, "wall_clock_seconds": 120})
+    max_loop_count: int = Field(default=1, ge=1, le=100)
+    stop_conditions: list[str] = Field(default_factory=lambda: ["max_loop_count"])
+    checkpoint_required: bool = True
+    approval_required: bool = True
+    rollback_behavior: str = Field(default="restore_last_checkpoint", max_length=120)
+
+
+class AutopilotRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    inputs: list[Any] = Field(default_factory=list)
+    enabled_stages: dict[str, bool] = Field(default_factory=dict)
+    scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "pairwise"
+    advanced_config: dict[str, Any] | None = None
+    advanced_preset_id: str = Field(default="balanced", max_length=80)
+    advanced_config_trust_origin: str = Field(default="user", max_length=80)
+
+
+class AdvancedRunConfigValidateRequest(BaseModel):
+    preset_id: str = Field(default="balanced", max_length=80)
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class AutopilotCancelRequest(BaseModel):
+    stop_reason: str = Field(default="cancelled by user", max_length=400)
+
+
 class LiteratureReviewRunStartRequest(BaseModel):
     project_id: str = Field(default="default", max_length=200)
     question: str = Field(default="", max_length=2000)
@@ -554,3 +667,32 @@ class McpServerEnableRequest(BaseModel):
 class McpToolPermissionRequest(BaseModel):
     enabled: bool | None = None
     permission: Literal["allow", "deny"] | None = None
+
+
+# --- Phase-3 experiment execution & compute (branch 03-03) ------------------
+class ExperimentRunCreateRequest(BaseModel):
+    project_id: str = "default"
+    backend_id: str
+    label: str = Field(default="", max_length=200)
+    config: dict = Field(default_factory=dict)
+    trust_origin: str = Field(default="user", max_length=40)
+    justification_trust: str = Field(default="user", max_length=40)
+
+
+class ExperimentApprovalRequest(BaseModel):
+    decision: Literal["approve", "reject"] = "approve"
+
+
+class ExperimentStartRequest(BaseModel):
+    argv: list[str] | None = None
+
+
+class ExperimentEnableExecutionRequest(BaseModel):
+    project_id: str = "default"
+    enabled: bool = True
+
+
+class ExperimentCloudBudgetRequest(BaseModel):
+    project_id: str = "default"
+    budget_usd: float | None = None
+    spend_approved: bool = False

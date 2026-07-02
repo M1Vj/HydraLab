@@ -1,4 +1,19 @@
-import { api, type ApiClient, type SettingsResponse } from "../../lib/api";
+import {
+  api,
+  type ApiClient,
+  type CollaborationAuth,
+  type CollaborationInvite,
+  type CollaborationPermission,
+  type CollaborationRevokeResponse,
+  type CollaborationSettings,
+  type CollaboratorRecord,
+  type SettingsResponse,
+} from "../../lib/api";
+
+// Self-evolution audit/history is surfaced read-only on the Settings panel; the
+// canonical fetch lives in selfEvolutionController and is re-exported here so the
+// Settings surface and the Self-Evolution panel never drift on the endpoint.
+export { fetchSelfEvolutionAudit, type SelfEvolutionAuditEntry } from "./selfEvolutionController";
 
 type ProviderSetting = SettingsResponse["provider_settings"][number];
 
@@ -36,4 +51,43 @@ export function booleanPreference(preferences: Record<string, string> | undefine
   const value = preferences?.[key];
   if (value === undefined) return fallback;
   return value === "true";
+}
+
+export function getCollaborationSettings(projectId = "default", client: ApiClient = api): Promise<CollaborationSettings> {
+  return client.get<CollaborationSettings>(`/api/collaboration/settings?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function saveCollaborationSettings(
+  input: { project_id: string; enabled: boolean; sync_server_url: string },
+  client: ApiClient = api,
+): Promise<CollaborationSettings> {
+  return client.post<CollaborationSettings>("/api/collaboration/settings", input);
+}
+
+export function listCollaborators(projectId = "default", client: ApiClient = api): Promise<{ collaborators: CollaboratorRecord[] }> {
+  return client.get<{ collaborators: CollaboratorRecord[] }>(`/api/collaboration/collaborators?project_id=${encodeURIComponent(projectId)}`);
+}
+
+export function inviteCollaborator(
+  input: { project_id: string; display_name: string; permission: CollaborationPermission },
+  client: ApiClient = api,
+): Promise<CollaborationInvite> {
+  return client.post<CollaborationInvite>("/api/collaboration/invites", input);
+}
+
+export function authenticateCollaborator(
+  input: { project_id: string; invite_token: string },
+  client: ApiClient = api,
+): Promise<CollaborationAuth> {
+  return client.post<CollaborationAuth>("/api/collaboration/authenticate", input);
+}
+
+export function revokeCollaborator(
+  collaboratorId: string,
+  projectId = "default",
+  client: ApiClient = api,
+): Promise<CollaborationRevokeResponse> {
+  return client.post<CollaborationRevokeResponse>(`/api/collaboration/collaborators/${encodeURIComponent(collaboratorId)}/revoke`, {
+    project_id: projectId,
+  });
 }

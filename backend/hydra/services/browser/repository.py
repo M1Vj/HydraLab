@@ -24,7 +24,7 @@ class BrowserHostPermissionRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def get(self, project_id: str, host: str) -> dict[str, Any]:
+    async def get(self, project_id: str, host: str, task_group_id: str | None = None) -> dict[str, Any]:
         clean_host = (host or "").lower()
         query = select(BrowserHostPermission).where(
             and_(BrowserHostPermission.project_id == project_id, BrowserHostPermission.host == clean_host)
@@ -32,7 +32,21 @@ class BrowserHostPermissionRepository:
         row = (await self.session.exec(query)).first()
         if row is None:
             return {"id": None, "project_id": project_id, "host": clean_host, "state": "ask", "task_group_id": None}
-        return self._to_dict(row)
+        result = self._to_dict(row)
+        # "allow_for_task" is scoped to the task group it was granted for. When a
+        # task group is supplied and does not match the one the grant is bound to,
+        # downgrade to "ask" so a different task (or a redirect landing under
+        # another task) must re-request approval. A grant with no bound group
+        # (task_group_id is None) is honored for NO specific task and downgrades
+        # too, so it can never leak across task groups. "always_allow_host" stays
+        # project-wide (03-06).
+        if (
+            task_group_id is not None
+            and result["state"] == "allow_for_task"
+            and result["task_group_id"] != task_group_id
+        ):
+            result = {**result, "state": "ask"}
+        return result
 
     async def set(
         self,
@@ -44,6 +58,8 @@ class BrowserHostPermissionRepository:
     ) -> dict[str, Any]:
         if state not in HOST_PERMISSION_STATES:
             raise ValueError(f"invalid browser host permission state: {state}")
+        if state == "allow_for_task" and not task_group_id:
+            raise ValueError("allow_for_task requires a task_group_id")
         clean_host = (host or "").lower()
         query = select(BrowserHostPermission).where(
             and_(BrowserHostPermission.project_id == project_id, BrowserHostPermission.host == clean_host)

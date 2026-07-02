@@ -6,12 +6,15 @@ import {
   Bug,
   FileSearch,
   FileText,
+  FlaskConical,
   FolderTree,
   GitBranch,
+  GitPullRequestArrow,
   Globe2,
   Inbox,
   Lightbulb,
   ListTodo,
+  PackageCheck,
   PackageOpen,
   PenLine,
   ScrollText,
@@ -28,6 +31,7 @@ export type PanelId =
   | "git"
   | "research-chat"
   | "agent-runs"
+  | "experiments"
   | "idea-board"
   | "markdown-editor"
   | "pdf-reader"
@@ -36,6 +40,8 @@ export type PanelId =
   | "citation-evidence"
   | "tasks"
   | "exports"
+  | "reproducibility"
+  | "self-evolution"
   | "settings"
   | "logs"
   | "terminal"
@@ -81,6 +87,7 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
   git: { id: "git", title: "Git", icon: GitBranch, defaultLocation: "border-left", singleton: true, allowMultiple: false },
   "research-chat": { id: "research-chat", title: "Research Chat", icon: BotMessageSquare, defaultLocation: "center", singleton: true, allowMultiple: false },
   "agent-runs": { id: "agent-runs", title: "Agent Runs", icon: Workflow, defaultLocation: "center", singleton: true, allowMultiple: false },
+  experiments: { id: "experiments", title: "Experiments", icon: FlaskConical, defaultLocation: "center", singleton: true, allowMultiple: false },
   "idea-board": { id: "idea-board", title: "Idea Board", icon: Lightbulb, defaultLocation: "center", singleton: true, allowMultiple: false },
   "markdown-editor": { id: "markdown-editor", title: "Markdown Editor", icon: FileText, defaultLocation: "center", singleton: false, allowMultiple: true },
   "pdf-reader": { id: "pdf-reader", title: "PDF Reader", icon: ScrollText, defaultLocation: "center", singleton: false, allowMultiple: true },
@@ -96,6 +103,22 @@ export const panelChrome: Record<PanelId, Omit<PanelDefinition, "component">> = 
   },
   tasks: { id: "tasks", title: "Tasks", icon: ListTodo, defaultLocation: "border-right", singleton: true, allowMultiple: false },
   exports: { id: "exports", title: "Exports", icon: PackageOpen, defaultLocation: "border-right", singleton: true, allowMultiple: false },
+  reproducibility: {
+    id: "reproducibility",
+    title: "Reproducibility",
+    icon: PackageCheck,
+    defaultLocation: "border-right",
+    singleton: true,
+    allowMultiple: false,
+  },
+  "self-evolution": {
+    id: "self-evolution",
+    title: "Self-Evolution",
+    icon: GitPullRequestArrow,
+    defaultLocation: "border-right",
+    singleton: true,
+    allowMultiple: false,
+  },
   settings: { id: "settings", title: "Settings", icon: Settings, defaultLocation: "border-right", singleton: true, allowMultiple: false },
   logs: { id: "logs", title: "Logs", icon: Terminal, defaultLocation: "border-bottom", singleton: true, allowMultiple: false },
   terminal: { id: "terminal", title: "Console", icon: SquareTerminal, defaultLocation: "border-bottom", singleton: true, allowMultiple: false },
@@ -156,7 +179,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 76,
           selected: 0,
           enableMaximize: true,
-          children: [tab("research-chat"), tab("agent-runs"), tab("idea-board"), tab("markdown-editor"), tab("writing"), tab("pdf-reader"), tab("browser")],
+          children: [tab("research-chat"), tab("agent-runs"), tab("experiments"), tab("idea-board"), tab("markdown-editor"), tab("writing"), tab("pdf-reader"), tab("browser")],
         },
         {
           type: "tabset",
@@ -164,7 +187,7 @@ export function defaultWorkbenchLayout(): IJsonModel {
           weight: 24,
           selected: 0,
           enableMaximize: true,
-          children: [tab("citation-evidence"), tab("tasks"), tab("exports"), tab("settings")],
+          children: [tab("citation-evidence"), tab("tasks"), tab("exports"), tab("reproducibility"), tab("self-evolution"), tab("settings")],
         },
       ],
     },

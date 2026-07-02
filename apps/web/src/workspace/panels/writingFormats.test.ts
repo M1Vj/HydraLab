@@ -3,16 +3,19 @@ import type {
   DocxAvailabilityResponse,
   LatexAvailabilityResponse,
   ManuscriptFormat,
+  ManuscriptPackageResponse,
   ManuscriptFormatResponse,
 } from "../../lib/api";
 import {
   allowedDocxActions,
   docxActionState,
   exposesNativeDocxEditControls,
+  exportPreviewState,
   formatRows,
   formatValidationMessage,
   isLatexFile,
   latexCompileState,
+  manuscriptPackageBlockers,
 } from "./writingFormats";
 
 const BASE_FORMAT: ManuscriptFormat = {
@@ -111,4 +114,51 @@ describe("writing formats + DOCX controller", () => {
     expect(isLatexFile("main.tex")).toBe(true);
     expect(isLatexFile("draft.md")).toBe(false);
   });
+
+  test("export preview state reports empty, loading, failure, and ready states (HL-WRITE-32)", () => {
+    expect(exportPreviewState({ active: null, loading: false, error: null, preview: null })).toBe("empty");
+    expect(exportPreviewState({ active: "paper", loading: true, error: null, preview: null })).toBe("loading");
+    expect(exportPreviewState({ active: "paper", loading: false, error: new Error("nope"), preview: null })).toBe("failure");
+    expect(exportPreviewState({ active: "paper", loading: false, error: null, preview: previewFixture() })).toBe("ready");
+  });
+
+  test("package blockers require citation and redaction acknowledgement (HL-WRITE-34/38)", () => {
+    const preview = previewFixture({
+      validation: { unresolved_citation_keys: ["missing"], missing_metadata: [], has_issues: true },
+      redaction: {
+        has_unresolved: true,
+        items: [{ id: "redact-1", category: "internal_logs", path: ".hydralab/logs/run.log", reason: "log", decision: "remove-or-acknowledge" }],
+      },
+    });
+
+    expect(manuscriptPackageBlockers(preview, false, [])).toEqual(["citation-validation", "redaction"]);
+    expect(manuscriptPackageBlockers(preview, true, ["redact-1"])).toEqual([]);
+  });
 });
+
+function previewFixture(overrides: Partial<ManuscriptPackageResponse> = {}): ManuscriptPackageResponse {
+  return {
+    status: "preview",
+    document: {
+      manuscript_id: "paper",
+      source_dir: "writing/manuscripts/paper",
+      format: BASE_FORMAT,
+      template_id: "generic-academic",
+      sections: [],
+      figures: [],
+      tables: [],
+      citation_keys: [],
+      references: {},
+      source_files: [],
+      include_paths: [],
+      authorship_ledger: [],
+    },
+    validation: { unresolved_citation_keys: [], missing_metadata: [], has_issues: false },
+    redaction: { items: [], has_unresolved: false },
+    outputs: {},
+    package_dir: null,
+    manifest_path: "",
+    gate: null,
+    ...overrides,
+  };
+}

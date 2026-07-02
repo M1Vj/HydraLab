@@ -18,7 +18,7 @@ from hydra.services.export import (
     to_csl_json,
     to_ris,
 )
-from hydra.services.export.bundle import ExportOptions, should_exclude
+from hydra.services.export.bundle import ExportOptions, scrub_secret_text, should_exclude
 
 
 def _client(tmp_path, monkeypatch) -> TestClient:
@@ -109,6 +109,32 @@ def test_hl_export_04_should_exclude_rules():
     assert should_exclude("work/chats/session.md") is True  # opt-in default off
     assert should_exclude("work/chats/session.md", ExportOptions(include_chats=True)) is False
     assert should_exclude("knowledge/index.md") is False
+
+
+def test_hl_export_04_should_exclude_matches_nested_excluded_dirs():
+    # Privacy audit H2: nested/submodule .git and vendored node_modules must be
+    # excluded at ANY depth, not only when they are the first path segment.
+    assert should_exclude("apps/web/.git/config") is True
+    assert should_exclude("vendor/lib/node_modules/pkg/index.js") is True
+    assert should_exclude("sub/proj/.venv/pyvenv.cfg") is True
+    assert should_exclude("deep/nested/.hydralab/cache/x.bin") is True
+
+
+def test_hl_export_04_scrub_secret_text_catches_quoted_embedded_and_pem():
+    # Privacy audit H3: quoted, URL-embedded, Google and PEM-block secrets must be
+    # redacted, not only bare whitespace-delimited tokens.
+    samples = [
+        '{"api_key":"sk-proj-abcdefgh1234567890"}',
+        "url = https://x-access-token:ghp_abcdefghij0123456789abcd@github.com/o/r.git",
+        "export KEY=AIzaSyA1234567890abcdefghij1234567890ABCDE",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nMIIabc123secretbody\n-----END OPENSSH PRIVATE KEY-----",
+    ]
+    for sample in samples:
+        scrubbed = scrub_secret_text(sample)
+        assert "[REDACTED-SECRET]" in scrubbed
+    joined = scrub_secret_text("\n".join(samples))
+    for leaked in ("sk-proj-abcdefgh", "ghp_abcdefghij", "AIzaSyA1234567890", "MIIabc123secretbody"):
+        assert leaked not in joined
 
 
 # @HL-EXPORT-06 -------------------------------------------------------------

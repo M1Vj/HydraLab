@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlmodel import select
@@ -34,6 +35,7 @@ from hydra.schemas import (
     BrowserHandshakeRequest,
     BrowserHistoryRequest,
     BrowserHostPermissionUpdateRequest,
+    AutonomousBrowserRunStartRequest,
     AnnotationClaimRequest,
     AnnotationCreateRequest,
     EvidenceCreateRequest,
@@ -47,6 +49,8 @@ from hydra.schemas import (
     SourceTrashRequest,
     SourceUnmergeRequest,
     ManuscriptExportRequest,
+    ManuscriptPackageRequest,
+    ManuscriptSubmissionRequest,
     DocxEditPlanRequest,
     DocxOperationReviewRequest,
     NoteCreateRequest,
@@ -55,6 +59,11 @@ from hydra.schemas import (
     NoteUpdateRequest,
     ProviderSettingsRequest,
     ProviderSecretRequest,
+    ExperimentRunCreateRequest,
+    ExperimentApprovalRequest,
+    ExperimentStartRequest,
+    ExperimentEnableExecutionRequest,
+    ExperimentCloudBudgetRequest,
     McpServerRegisterRequest,
     McpServerEnableRequest,
     McpToolPermissionRequest,
@@ -74,6 +83,8 @@ from hydra.schemas import (
     ConsoleRunRequest,
     CitationExportRequest,
     ProjectZipRequest,
+    ReproducibilityBundleRequest,
+    ReproducibilityReportRequest,
     BackupRequest,
     RestoreRequest,
     WritingReviewRequest,
@@ -82,7 +93,15 @@ from hydra.schemas import (
     ChatUpdateRequest,
     ChatExportRequest,
     SendScopeRequest,
+    CollaborationAuthenticateRequest,
+    CollaborationInviteRequest,
+    CollaborationRevokeRequest,
+    CollaborationSettingsRequest,
     AgentModeUpdateRequest,
+    AutonomyPolicyRequest,
+    AutopilotCancelRequest,
+    AdvancedRunConfigValidateRequest,
+    AutopilotRunStartRequest,
     FullAccessUpdateRequest,
     SkillEnabledRequest,
     SkillEditRequest,
@@ -94,6 +113,8 @@ from hydra.schemas import (
     IdeaPromoteRequest,
     ContextFileSaveRequest,
     MemoryCandidateRequest,
+    SelfEvolutionRunRequest,
+    SelfEvolutionDecisionRequest,
 )
 from hydra.database.models import Annotation, Claim, IngestionJob, Task
 from hydra.database.session import get_session, init_db, async_session_maker
@@ -134,6 +155,7 @@ from hydra.services.writing import (
     list_manuscripts,
     resolve_manuscript_format,
 )
+from hydra.manuscripts import ManuscriptBuildError, ManuscriptPackageService, PackageRequest
 from hydra.services.ingestion import IngestionService
 from hydra.services.ingestion.safety import validate_source_file
 from hydra.services.ingestion.types import QuarantineError
@@ -146,6 +168,13 @@ from hydra.services.browser import (
     BrowserCopilotService,
     BrowserHostPermissionRepository,
 )
+from hydra.browser_automation.runner import (
+    AutonomousBrowserResearchRunner,
+    BrowserResearchStep,
+    BrowserRunRequest,
+    RECIPE_ID as AUTONOMOUS_BROWSER_RECIPE_ID,
+)
+from hydra.browser_automation.driver import PlaywrightBrowserResearchDriver
 from hydra.services.export import (
     build_project_zip,
     export_options,
@@ -172,9 +201,39 @@ from hydra.agents.policy import InvalidModeError, VALID_MODES, normalize_mode
 from hydra.agents.runs import RunBudget as AgentRunBudget
 from hydra.agents.runs import RunRepository
 from hydra.agents.approvals import ApprovalService, to_contract
-from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
+from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun, ExperimentRun
+from hydra.autonomy.audit import AuditLedger
+from hydra.autonomy.checkpoints import CheckpointService
+from hydra.self_evolution.models import ProposedChange
+from hydra.self_evolution.service import SelfEvolutionError, SelfEvolutionService, public_change
+from hydra.self_evolution.verification import ConsoleVerificationRunner
+from hydra.database.models import AgentAuditLedgerEntry, SelfEvolutionChange
+from hydra.autonomy.loop import AutopilotLoop
+from hydra.compute.registry import BackendNotSelectableError, ComputeRegistry
+from hydra.experiments.approval import ExperimentExecutionGate
+from hydra.experiments.logs import RunLogStore
+from hydra.experiments.runner import ExperimentRunner, RunLifecycleError
+from hydra.reproducibility import ReproducibilityBundleBuilder, ManifestVerifier, export_final_report
+from hydra.autonomy.policy import (
+    AutonomyPolicy,
+    AutonomyPolicyError,
+    BudgetLimits,
+    default_autonomy_policy,
+    policy_to_json,
+    resolve_autonomy_policy,
+)
 from hydra.orchestrator.run import OrchestratorConfigError, RunConfig, RunStateMachine
 from hydra.orchestrator.stages import StageEnum
+from hydra.orchestrator.advanced import (
+    ADVANCED_RUN_PRESETS,
+    AdvancedConfigValidationError,
+    advanced_validation_error_response,
+    build_advanced_run_config,
+    route_untrusted_advanced_preset,
+)
+from hydra.collaboration.exclusion import DocumentCandidate, SyncExclusionFilter
+from hydra.collaboration.identity import CollaborationPermissionError, IdentityProvider
+from hydra.collaboration.transport import InProcessSyncTransport, SelfHostedSyncTransport, SyncAuthenticationError
 from hydra.recipes.literature_review import (
     LiteratureReviewInput,
     LiteratureReviewSaveRequest,
@@ -233,6 +292,21 @@ BRIDGE_NONCE_TTL_SECONDS = 300
 
 _MEMORY_SECRET_STORE = InMemorySecretStore()
 _PROVIDER_CACHE = ProviderCache()
+_COLLAB_SYNC_TRANSPORT = InProcessSyncTransport()
+_COLLAB_EXCLUSION_FILTER = SyncExclusionFilter()
+# Idle poll interval so a collaborator revoked mid-session is disconnected within
+# the window (well under the 5s bound) instead of blocking on receive forever.
+_COLLAB_REVOKE_POLL_SECONDS = 1.0
+
+
+def _infer_collab_document_type(document_id: str) -> str:
+    """Map an allowlisted collaboration path to its editor document type."""
+    normalized = document_id.replace("\\", "/").lstrip("/")
+    if normalized.startswith("writing/manuscripts/"):
+        return "markdown-draft"
+    if normalized.startswith("notes/"):
+        return "note"
+    return "unsupported"
 
 
 def _assistant_privacy() -> dict[str, Any]:
@@ -312,6 +386,30 @@ def _resolve_providers(secret_store: SecretStore) -> list[Any]:
     if not providers:
         providers.append(MockProvider())
     return providers
+
+
+def _agent_run_public(run: AgentRun) -> dict[str, object]:
+    return {
+        "id": run.id,
+        "project_id": run.project_id,
+        "recipe": run.recipe,
+        "mode": run.mode,
+        "status": run.status,
+        "paused": bool(run.paused),
+        "tokens_used": run.tokens_used,
+        "created_at": run.created_at.timestamp(),
+        "artifacts": json.loads(run.artifacts or "[]"),
+    }
+
+
+def _parse_run_ids(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw = value
+    else:
+        raw = str(value).split(",")
+    return [item.strip() for item in raw if item and item.strip()]
 
 
 def create_app() -> FastAPI:
@@ -496,6 +594,68 @@ def create_app() -> FastAPI:
         session: AsyncSession = Depends(get_session),
     ) -> dict[str, object]:
         return {"actions": await BrowserActionLogRepository(session).list(project_id=project_id)}
+
+    @app.get("/api/browser/autonomous-runs")
+    async def list_autonomous_browser_runs(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        rows = (
+            await session.exec(
+                select(AgentRun)
+                .where(
+                    AgentRun.project_id == project_id,
+                    AgentRun.recipe == AUTONOMOUS_BROWSER_RECIPE_ID,
+                )
+                .order_by(AgentRun.created_at.desc())
+            )
+        ).all()
+        return {"runs": [_agent_run_public(row) for row in rows]}
+
+    @app.post("/api/browser/autonomous-runs")
+    async def start_autonomous_browser_run(
+        request: AutonomousBrowserRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        mode = policy.default_mode or privacy["default_mode"]
+        runner = AutonomousBrowserResearchRunner(
+            session,
+            driver=PlaywrightBrowserResearchDriver(headless=False),
+            artifact_root=hydra_project_root(),
+            token_budget=int(privacy["run_budget"]),
+            wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+        )
+        result = await runner.start(
+            BrowserRunRequest(
+                project_id=request.project_id,
+                mode=mode,
+                task_id=request.task_id,
+                task_label=request.task_label,
+                steps=[BrowserResearchStep(url=url) for url in request.start_urls],
+                full_access_enabled=bool(policy.full_access_enabled),
+            )
+        )
+        run = await session.get(AgentRun, result.run_id)
+        return {
+            "run": _agent_run_public(run) if run is not None else {"id": result.run_id, "status": result.state},
+            "state": result.state,
+            "host_prompt": result.host_prompt,
+            "budget_prompt": result.budget_prompt,
+            "rate_limit_state": result.rate_limit_state,
+        }
+
+    @app.post("/api/browser/autonomous-runs/{run_id}/cancel")
+    async def cancel_autonomous_browser_run(
+        run_id: str,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        await AutonomousBrowserResearchRunner(session).cancel(run_id)
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return {"run": _agent_run_public(run)}
 
     @app.post("/api/browser/copilot/actions")
     async def propose_browser_action(
@@ -989,7 +1149,14 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="run not found")
         trace = await runs.get_trace(run_id)
         return {
-            "run": {"id": run.id, "project_id": run.project_id, "mode": run.mode, "status": run.status, "paused": run.paused},
+            "run": {
+                "id": run.id,
+                "project_id": run.project_id,
+                "mode": run.mode,
+                "status": run.status,
+                "paused": run.paused,
+                "stop_reason": run.stop_reason,
+            },
             "trace": trace.public_dict(),
             "artifacts": json.loads(run.artifacts or "[]"),
         }
@@ -1006,7 +1173,7 @@ def create_app() -> FastAPI:
         run = await RunRepository(session).cancel_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
-        return {"id": run.id, "status": run.status, "paused": run.paused}
+        return {"id": run.id, "status": run.status, "paused": run.paused, "stop_reason": run.stop_reason}
 
     @app.get("/api/agent/approvals")
     async def list_agent_approvals(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
@@ -1031,6 +1198,816 @@ def create_app() -> FastAPI:
             }
         result = await service.resolve(approval_id, decision=request.decision)
         return {"applied": result.applied, "status": result.status, "reason": result.reason}
+
+    # ------------------------------------------- collaboration
+    @app.get("/api/collaboration/settings")
+    async def get_collaboration_settings(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        settings = await IdentityProvider(session).settings(project_id)
+        return {
+            "project_id": settings.project_id,
+            "enabled": settings.enabled,
+            "sync_server_url": settings.sync_server_url,
+            "sync_server_kind": settings.sync_server_kind,
+        }
+
+    @app.post("/api/collaboration/settings")
+    async def save_collaboration_settings(
+        request: CollaborationSettingsRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        if request.enabled:
+            if not request.sync_server_url:
+                raise HTTPException(status_code=400, detail="sync_server_url is required when collaboration is enabled")
+            try:
+                SelfHostedSyncTransport(request.sync_server_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        settings = await IdentityProvider(session).set_project_settings(
+            project_id=request.project_id,
+            enabled=request.enabled,
+            sync_server_url=request.sync_server_url,
+        )
+        return {
+            "project_id": settings.project_id,
+            "enabled": settings.enabled,
+            "sync_server_url": settings.sync_server_url,
+            "sync_server_kind": settings.sync_server_kind,
+        }
+
+    @app.get("/api/collaboration/collaborators")
+    async def list_collaborators(
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return {"collaborators": await IdentityProvider(session).list_collaborators(project_id)}
+
+    @app.post("/api/collaboration/invites")
+    async def invite_collaborator(
+        request: CollaborationInviteRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            invite = await IdentityProvider(session).invite(
+                project_id=request.project_id,
+                display_name=request.display_name,
+                permission=request.permission,
+            )
+        except CollaborationPermissionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "collaborator_id": invite.collaborator_id,
+            "permission": invite.permission,
+            "invite_token": invite.invite_token,
+        }
+
+    @app.post("/api/collaboration/authenticate")
+    async def authenticate_collaborator(
+        request: CollaborationAuthenticateRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            auth = await IdentityProvider(session).authenticate(
+                project_id=request.project_id,
+                invite_token=request.invite_token,
+            )
+        except CollaborationPermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return {
+            "collaborator_id": auth.collaborator_id,
+            "display_name": auth.display_name,
+            "permission": auth.permission,
+            "session_token": auth.session_token,
+        }
+
+    @app.post("/api/collaboration/collaborators/{collaborator_id}/revoke")
+    async def revoke_collaborator(
+        collaborator_id: str,
+        request: CollaborationRevokeRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        await IdentityProvider(session).revoke(project_id=request.project_id, collaborator_id=collaborator_id)
+        disconnected = await _COLLAB_SYNC_TRANSPORT.disconnect_revoked(session)
+        return {"collaborator_id": collaborator_id, "revoked": True, "disconnected": disconnected}
+
+    # ------------------------------------------- self-evolution (branch 03-05)
+    def _build_self_evolution_service(session: AsyncSession) -> SelfEvolutionService:
+        project_root = hydra_project_root()
+        return SelfEvolutionService(
+            session,
+            project_root=project_root,
+            checkpoints=CheckpointService(session, project_root=project_root, git=GitService(project_root)),
+            audit=AuditLedger(session),
+            verifier=ConsoleVerificationRunner(project_root, console=ConsoleService(project_root, offline=_offline_posture())),
+        )
+
+    @app.get("/api/self-evolution/changes")
+    async def list_self_evolution_changes(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        rows = await service.list_changes(project_id=project_id)
+        return {"changes": [public_change(row) for row in rows]}
+
+    @app.post("/api/self-evolution/runs")
+    async def start_self_evolution_run(
+        request: SelfEvolutionRunRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        proposed = [
+            ProposedChange(
+                category=change.category,
+                target_path=change.target_path,
+                unified_diff=change.unified_diff,
+                new_content=change.new_content,
+                test_plan=list(change.test_plan),
+                origin=change.origin,
+                origin_trust=change.origin_trust,
+                justification_trust=change.justification_trust,
+            )
+            for change in request.changes
+        ]
+        try:
+            # A self-evolution run fires only on a user-originated trigger.
+            rows = await service.propose(
+                project_id=request.project_id, run_id=request.run_id, changes=proposed, trigger="user"
+            )
+        except SelfEvolutionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"changes": [public_change(row) for row in rows]}
+
+    @app.post("/api/self-evolution/changes/{change_id}/approve")
+    async def approve_self_evolution_change(
+        change_id: str,
+        request: SelfEvolutionDecisionRequest | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        actor = request.actor if request else "user"
+        try:
+            row = await service.approve(change_id, actor=actor)
+        except SelfEvolutionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"change": public_change(row)}
+
+    @app.post("/api/self-evolution/changes/{change_id}/deny")
+    async def deny_self_evolution_change(
+        change_id: str,
+        request: SelfEvolutionDecisionRequest | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        service = _build_self_evolution_service(session)
+        actor = request.actor if request else "user"
+        try:
+            row = await service.deny(change_id, actor=actor)
+        except SelfEvolutionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"change": public_change(row)}
+
+    @app.get("/api/self-evolution/audit")
+    async def list_self_evolution_audit(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        rows = (
+            await session.exec(
+                select(AgentAuditLedgerEntry)
+                .where(AgentAuditLedgerEntry.project_id == project_id)
+                .where(AgentAuditLedgerEntry.action.startswith("self_evolution."))
+                .order_by(AgentAuditLedgerEntry.created_at.desc())
+            )
+        ).all()
+        return {
+            "entries": [
+                {
+                    "id": row.id,
+                    "action": row.action,
+                    "actor": row.actor,
+                    "risk_level": row.risk_level,
+                    "target": row.target,
+                    "approval_state": row.approval_state,
+                    "created_at": row.created_at.timestamp(),
+                }
+                for row in rows
+            ]
+        }
+
+    @app.websocket("/api/collaboration/ws/{project_id}/{document_id:path}")
+    async def collaboration_websocket(websocket: WebSocket, project_id: str, document_id: str) -> None:
+        origin = websocket.headers.get("origin")
+        authorization = websocket.headers.get("authorization", "")
+        token = websocket.query_params.get("token")
+        if authorization.startswith("Bearer "):
+            token = authorization[len("Bearer "):]
+        document_type = _infer_collab_document_type(document_id)
+        async with async_session_maker() as session:
+            try:
+                connection = await _COLLAB_SYNC_TRANSPORT.connect(
+                    session,
+                    project_id=project_id,
+                    document_id=document_id,
+                    auth_token=token,
+                    origin=origin,
+                )
+            except SyncAuthenticationError:
+                await websocket.close(code=1008)
+                return
+            # Decide document eligibility BEFORE accepting: an excluded target
+            # (.hydralab cache, outputs, protected context file, outside the
+            # notes/manuscripts allowlist, or an unsupported type) never receives
+            # a single byte over the live transport (HL-CORE-87).
+            eligibility = _COLLAB_EXCLUSION_FILTER.decide(
+                DocumentCandidate(path=document_id, document_type=document_type, content="")
+            )
+            if not eligibility.allowed:
+                connection.disconnect()
+                await websocket.close(code=1008)
+                return
+            await websocket.accept()
+            await websocket.send_json(
+                {
+                    "type": "presence",
+                    "sync_state": "synced",
+                    "document_id": document_id,
+                    "collaborator": {
+                        "id": connection.collaborator_id,
+                        "display_name": connection.display_name,
+                        "permission": connection.permission,
+                    },
+                }
+            )
+            try:
+                while connection.connected:
+                    try:
+                        message = await asyncio.wait_for(
+                            websocket.receive_text(), timeout=_COLLAB_REVOKE_POLL_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        # Poll tick: a revoke() elsewhere flips connection.connected,
+                        # so a revoked IDLE socket is closed on the next loop check
+                        # instead of hanging on receive indefinitely.
+                        continue
+                    # Re-run the exclusion filter on EVERY frame: even on an
+                    # allowlisted document, a payload carrying secret-like content
+                    # is dropped rather than relayed to collaborators.
+                    if _COLLAB_EXCLUSION_FILTER.serialize(
+                        DocumentCandidate(path=document_id, document_type=document_type, content=message)
+                    ) is None:
+                        continue
+                    await websocket.send_text(message)
+            except WebSocketDisconnect:
+                pass
+            finally:
+                connection.disconnect()
+                try:
+                    await websocket.close(code=1000)
+                except RuntimeError:
+                    # Socket already closed by the peer or the disconnect path.
+                    pass
+
+    # ------------------------------------------- autonomy safety shell
+    @app.get("/api/autonomy/policy")
+    async def get_autonomy_policy(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        stored = await _mode_policy(session, project_id)
+        if stored.autonomy_policy_json:
+            try:
+                resolved = resolve_autonomy_policy(stored, require_enabled=False)
+            except AutonomyPolicyError:
+                resolved = default_autonomy_policy(stored.default_mode, autopilot_enabled=bool(stored.autopilot_enabled))
+        else:
+            resolved = default_autonomy_policy(stored.default_mode, autopilot_enabled=bool(stored.autopilot_enabled))
+        return {"project_id": project_id, "policy": resolved.public_dict()}
+
+    @app.post("/api/autonomy/policy")
+    async def set_autonomy_policy(request: AutonomyPolicyRequest, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        stored = await _mode_policy(session, request.project_id)
+        resolved = AutonomyPolicy(
+            mode=request.mode,
+            allowed_action_types=request.allowed_action_types,
+            blocked_action_types=request.blocked_action_types,
+            budget_limits=BudgetLimits(
+                tokens=int(request.budget_limits.get("tokens", 60000)),
+                wall_clock_seconds=int(request.budget_limits.get("wall_clock_seconds", 120)),
+            ),
+            max_loop_count=request.max_loop_count,
+            stop_conditions=request.stop_conditions,
+            checkpoint_required=request.checkpoint_required,
+            approval_required=request.approval_required,
+            rollback_behavior=request.rollback_behavior,
+            autopilot_enabled=request.autopilot_enabled,
+        )
+        stored.default_mode = request.mode
+        stored.autopilot_enabled = request.autopilot_enabled
+        stored.autonomy_policy_json = policy_to_json(resolved)
+        stored.updated_at = datetime.now(timezone.utc)
+        session.add(stored)
+        await session.commit()
+        await session.refresh(stored)
+        return {"project_id": request.project_id, "policy": resolved.public_dict()}
+
+    @app.get("/api/autonomy/advanced-config/presets")
+    async def list_advanced_run_presets() -> dict[str, object]:
+        return {
+            "presets": [
+                {"id": preset_id, "config": preset.model_dump()}
+                for preset_id, preset in ADVANCED_RUN_PRESETS.items()
+            ]
+        }
+
+    @app.post("/api/autonomy/advanced-config/validate")
+    async def validate_advanced_run_config(request: AdvancedRunConfigValidateRequest) -> dict[str, object]:
+        try:
+            config = build_advanced_run_config(preset_id=request.preset_id, overrides=request.overrides)
+        except AdvancedConfigValidationError as exc:
+            raise HTTPException(status_code=400, detail=advanced_validation_error_response(exc)) from exc
+        return {"valid": True, "config": config.model_dump()}
+
+    @app.post("/api/autonomy/runs")
+    async def start_autopilot_run(
+        request: AutopilotRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        stored = await _mode_policy(session, request.project_id)
+        try:
+            policy = resolve_autonomy_policy(stored)
+            if request.advanced_config is not None:
+                advanced = build_advanced_run_config(
+                    preset_id=request.advanced_preset_id,
+                    overrides=request.advanced_config,
+                )
+                if request.advanced_config_trust_origin == "untrusted-external":
+                    item = await route_untrusted_advanced_preset(
+                        session,
+                        project_id=request.project_id,
+                        config=advanced,
+                        provenance=request.advanced_config_trust_origin,
+                    )
+                    return {
+                        "run": {
+                            "id": "",
+                            "project_id": request.project_id,
+                            "mode": policy.mode,
+                            "status": "review_inbox",
+                            "state": "review_inbox",
+                            "paused": False,
+                        },
+                        "trace": {"run_id": "", "steps": []},
+                        "artifacts": [],
+                        "review_item_id": item.get("id"),
+                    }
+                config = advanced.to_run_config()
+                policy = AutonomyPolicy(
+                    mode=policy.mode,
+                    allowed_action_types=policy.allowed_action_types,
+                    blocked_action_types=policy.blocked_action_types,
+                    budget_limits=BudgetLimits(
+                        tokens=advanced.budget_policy.tokens,
+                        wall_clock_seconds=advanced.budget_policy.wall_clock_seconds,
+                    ),
+                    max_loop_count=advanced.max_loop_iterations,
+                    stop_conditions=advanced.stop_conditions,
+                    checkpoint_required=policy.checkpoint_required,
+                    approval_required=policy.approval_required,
+                    rollback_behavior=policy.rollback_behavior,
+                    autopilot_enabled=policy.autopilot_enabled,
+                )
+            else:
+                config = RunConfig.resolve(
+                    stage_overrides=request.enabled_stages or {stage.value: True for stage in StageEnum},
+                    scoring_method=request.scoring_method,
+                )
+        except AdvancedConfigValidationError as exc:
+            raise HTTPException(status_code=400, detail=advanced_validation_error_response(exc)) from exc
+        except (AutonomyPolicyError, OrchestratorConfigError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await AutopilotLoop(
+            session, policy, config, full_access_enabled=bool(stored.full_access_enabled)
+        ).start(project_id=request.project_id, inputs=request.inputs)
+        return await _autonomy_run_response(session, result.run_id, state=result.state)
+
+    @app.post("/api/autonomy/runs/{run_id}/pause")
+    async def pause_autopilot_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await RunRepository(session).pause_run(run_id, True)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused, "stop_reason": run.stop_reason}
+
+    @app.post("/api/autonomy/runs/{run_id}/resume")
+    async def resume_autopilot_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        stored = await _mode_policy(session, run.project_id)
+        try:
+            policy = resolve_autonomy_policy(stored)
+        except AutonomyPolicyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await AutopilotLoop(
+            session, policy, RunConfig.all_enabled(), full_access_enabled=bool(stored.full_access_enabled)
+        ).resume(run_id=run_id, project_id=run.project_id)
+        return await _autonomy_run_response(session, result.run_id, state=result.state)
+
+    @app.post("/api/autonomy/runs/{run_id}/cancel")
+    async def cancel_autopilot_run(
+        run_id: str,
+        request: AutopilotCancelRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        run = await RunRepository(session).cancel_run(run_id, stop_reason=request.stop_reason)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused, "stop_reason": run.stop_reason}
+
+    @app.post("/api/autonomy/runs/{run_id}/retry")
+    async def retry_autopilot_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        stored = await _mode_policy(session, run.project_id)
+        try:
+            policy = resolve_autonomy_policy(stored)
+        except AutonomyPolicyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        result = await AutopilotLoop(
+            session, policy, RunConfig.all_enabled(), full_access_enabled=bool(stored.full_access_enabled)
+        ).retry(project_id=run.project_id)
+        return await _autonomy_run_response(session, result.run_id, state=result.state)
+
+    @app.get("/api/autonomy/pending-actions")
+    async def list_pending_governed_actions(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        review_items = [
+            item
+            for item in await Repository(session).list_review_items("agent-stage-proposal")
+            if item.get("project_id") in (None, project_id)
+        ]
+        approvals = await ApprovalService(session).list_pending(project_id)
+        pending: list[dict[str, object]] = []
+        for item in review_items:
+            payload = item.get("payload") or {}
+            pending.append(
+                {
+                    "id": item["id"],
+                    "kind": "review_item",
+                    "action_kind": payload.get("action_kind", item.get("item_type")),
+                    "summary": item.get("summary") or item.get("title"),
+                    "target_ref": item.get("target_id"),
+                    "risk_level": payload.get("risk_level", "high"),
+                    "status": item.get("status", "pending"),
+                    "reason": item.get("summary", ""),
+                    "payload": payload,
+                }
+            )
+        for approval in approvals:
+            payload = json.loads(approval.payload_json or "{}")
+            pending.append(
+                {
+                    "id": approval.id,
+                    "kind": "approval",
+                    "action_kind": approval.action_kind,
+                    "summary": approval.summary,
+                    "target_ref": approval.target_ref,
+                    "risk_level": payload.get("risk_level", "medium"),
+                    "status": approval.status,
+                    "reason": approval.reason,
+                    "payload": payload,
+                }
+            )
+        return {"pending_actions": pending}
+
+    @app.post("/api/autonomy/pending-actions/{approval_id}/resolve")
+    async def resolve_pending_governed_action(
+        approval_id: str,
+        request: ApprovalResolveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        result = await ApprovalService(session).resolve(approval_id, decision=request.decision)
+        return {"applied": result.applied, "status": result.status, "reason": result.reason}
+
+    @app.get("/api/autonomy/audit-ledger")
+    async def read_autonomy_audit_ledger(
+        project_id: str = "default",
+        run_id: str | None = None,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        rows = await AuditLedger(session).list(project_id=project_id, run_id=run_id)
+        return {
+            "entries": [
+                {
+                    "id": row.id,
+                    "project_id": row.project_id,
+                    "run_id": row.run_id,
+                    "actor": row.actor,
+                    "action": row.action,
+                    "risk_level": row.risk_level,
+                    "target": row.target,
+                    "approval_state": row.approval_state,
+                    "created_at": row.created_at.timestamp(),
+                }
+                for row in rows
+            ]
+        }
+
+    async def _autonomy_run_response(session: AsyncSession, run_id: str, *, state: str) -> dict[str, object]:
+        run = await session.get(AgentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        trace = await RunRepository(session).get_trace(run_id)
+        return {
+            "run": {
+                "id": run.id,
+                "project_id": run.project_id,
+                "mode": run.mode,
+                "status": run.status,
+                "state": state,
+                "paused": bool(run.paused),
+                "stop_reason": run.stop_reason,
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads(run.artifacts or "[]"),
+        }
+
+    # --- Phase-3 experiment execution & compute (branch 03-03) --------------
+    def _experiment_run_dict(run: ExperimentRun) -> dict[str, object]:
+        return {
+            "id": run.id,
+            "project_id": run.project_id,
+            "backend_id": run.backend_id,
+            "label": run.label,
+            "status": run.status,
+            "reason": run.reason,
+            "config": json.loads(run.config_json or "{}"),
+            "checkpoint_ref": run.checkpoint_ref,
+            "metrics": json.loads(run.metrics_json or "{}"),
+            "artifact_manifest": json.loads(run.artifact_manifest_json or "{}"),
+            "trust_origin": run.trust_origin,
+            "enforcement": run.enforcement,
+            "exit_code": run.exit_code,
+            "approval_id": run.approval_id,
+            "review_item_id": run.review_item_id,
+            "created_at": run.created_at.timestamp(),
+            "ended_at": run.ended_at.timestamp() if run.ended_at else None,
+        }
+
+    @app.get("/api/compute/backends")
+    async def list_compute_backends(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        backends = await ComputeRegistry(session).list_backends()
+        return {
+            "backends": [
+                {
+                    "id": backend.id,
+                    "kind": backend.kind,
+                    "display_name": backend.display_name,
+                    "enabled": backend.enabled,
+                    "capabilities": json.loads(backend.capabilities_json or "{}"),
+                    "default_limits": json.loads(backend.default_limits_json or "{}"),
+                }
+                for backend in backends
+            ]
+        }
+
+    @app.get("/api/experiments/execution")
+    async def get_experiment_execution(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        setting = await ExperimentExecutionGate(session).get_setting(project_id)
+        return {
+            "project_id": project_id,
+            "execution_enabled": setting.execution_enabled,
+            "cloud_budget_usd": setting.cloud_budget_usd,
+            "cloud_spend_approved": setting.cloud_spend_approved,
+        }
+
+    @app.post("/api/experiments/execution/enable")
+    async def enable_experiment_execution(
+        request: ExperimentEnableExecutionRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        setting = await ExperimentExecutionGate(session).enable_execution(request.project_id, request.enabled)
+        return {"project_id": request.project_id, "execution_enabled": setting.execution_enabled}
+
+    @app.post("/api/experiments/cloud-budget")
+    async def set_experiment_cloud_budget(
+        request: ExperimentCloudBudgetRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        setting = await ExperimentExecutionGate(session).set_cloud_budget(
+            request.project_id, budget_usd=request.budget_usd, spend_approved=request.spend_approved
+        )
+        return {
+            "project_id": request.project_id,
+            "cloud_budget_usd": setting.cloud_budget_usd,
+            "cloud_spend_approved": setting.cloud_spend_approved,
+        }
+
+    @app.get("/api/experiments/runs")
+    async def list_experiment_runs(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        res = await session.exec(
+            select(ExperimentRun)
+            .where(ExperimentRun.project_id == project_id)
+            .order_by(ExperimentRun.created_at.desc())
+        )
+        return {"runs": [_experiment_run_dict(run) for run in res.all()]}
+
+    @app.post("/api/experiments/runs")
+    async def create_experiment_run(
+        request: ExperimentRunCreateRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        proposal = await runner.create_run(
+            project_id=request.project_id,
+            backend_id=request.backend_id,
+            config=request.config,
+            label=request.label,
+            trust_origin=request.trust_origin,
+            justification_trust=request.justification_trust,
+        )
+        return {
+            "run": _experiment_run_dict(proposal.run),
+            "approval_id": proposal.approval_id,
+            "review_item_id": proposal.review_item_id,
+        }
+
+    @app.get("/api/experiments/runs/{run_id}")
+    async def get_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await session.get(ExperimentRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="experiment run not found")
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/approve")
+    async def approve_experiment_run(
+        run_id: str, request: ExperimentApprovalRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            await runner.approve_run(run_id, decision=request.decision)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        run = await session.get(ExperimentRun, run_id)
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/start")
+    async def start_experiment_run(
+        run_id: str, request: ExperimentStartRequest, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.start_run(run_id, argv=request.argv)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except BackendNotSelectableError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/pause")
+    async def pause_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.pause_run(run_id)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/cancel")
+    async def cancel_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.cancel_run(run_id)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.post("/api/experiments/runs/{run_id}/rollback")
+    async def rollback_experiment_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        runner = ExperimentRunner(session, workspace_root=hydra_project_root())
+        try:
+            run = await runner.rollback_run(run_id)
+        except RunLifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"run": _experiment_run_dict(run)}
+
+    @app.get("/api/experiments/runs/{run_id}/logs")
+    async def get_experiment_run_logs(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        rows = await RunLogStore(session).read(run_id)
+        return {
+            "logs": [
+                {
+                    "id": row.id,
+                    "run_id": row.run_id,
+                    "stream": row.stream,
+                    "seq": row.seq,
+                    "content": row.content,
+                    "truncated": row.truncated,
+                    "created_at": row.created_at.timestamp(),
+                }
+                for row in rows
+            ]
+        }
+
+    # --- Phase-3 reproducibility & evaluation ledger (branch 03-07) ---------
+    @app.get("/api/reproducibility/bundleable-runs")
+    async def list_reproducibility_bundleable_runs(
+        project_id: str = "default", session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        agent_runs = (
+            await session.exec(
+                select(AgentRun)
+                .where(AgentRun.project_id == project_id)
+                .where(AgentRun.status.in_(["completed", "succeeded"]))
+                .order_by(AgentRun.created_at.desc())
+            )
+        ).all()
+        experiment_runs = (
+            await session.exec(
+                select(ExperimentRun)
+                .where(ExperimentRun.project_id == project_id)
+                .where(ExperimentRun.status.in_(["succeeded", "completed"]))
+                .order_by(ExperimentRun.created_at.desc())
+            )
+        ).all()
+        runs = [
+            {
+                "id": run.id,
+                "kind": "agent",
+                "label": run.recipe or run.stage or run.id,
+                "status": run.status,
+                "created_at": run.created_at.timestamp(),
+            }
+            for run in agent_runs
+        ] + [
+            {
+                "id": run.id,
+                "kind": "experiment",
+                "label": run.label or run.id,
+                "status": run.status,
+                "created_at": run.created_at.timestamp(),
+            }
+            for run in experiment_runs
+        ]
+        return {"project_id": project_id, "runs": runs}
+
+    @app.get("/api/reproducibility/preview")
+    async def preview_reproducibility_bundle(
+        project_id: str = "default",
+        run_ids: str = "",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        selected = _parse_run_ids(run_ids)
+        if not selected:
+            selected = [
+                str(item["id"])
+                for item in (await list_reproducibility_bundleable_runs(project_id, session))["runs"]
+            ]
+        try:
+            return await ReproducibilityBundleBuilder(session).preview(project_id, selected, hydra_project_root())
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+
+    @app.post("/api/reproducibility/bundles")
+    async def build_reproducibility_bundle(
+        request: ReproducibilityBundleRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ReproducibilityBundleBuilder(session).build(
+                request.project_id,
+                request.run_ids,
+                hydra_project_root(),
+                approval_id=request.approval_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"reason": str(exc)}) from exc
+        if result.status != "created":
+            reason = result.gate.reason if result.gate else "user-initiated approval required"
+            raise HTTPException(status_code=403, detail={"reason": reason, "status": result.status})
+        return result.public_dict()
+
+    @app.get("/api/reproducibility/bundles/{bundle_id}/verify")
+    async def verify_reproducibility_bundle(
+        bundle_id: str,
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        bundle_dir = hydra_project_root() / "outputs" / "reproducibility" / project_id / bundle_id
+        if not bundle_dir.exists():
+            raise HTTPException(status_code=404, detail={"reason": f"bundle not found: {bundle_id}"})
+        return (await ManifestVerifier(session).verify(bundle_dir)).public_dict()
+
+    @app.post("/api/reproducibility/bundles/{bundle_id}/report")
+    async def export_reproducibility_report(
+        bundle_id: str,
+        request: ReproducibilityReportRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        bundle_dir = hydra_project_root() / "outputs" / "reproducibility" / request.project_id / bundle_id
+        if not bundle_dir.exists():
+            raise HTTPException(status_code=404, detail={"reason": f"bundle not found: {bundle_id}"})
+        result = await export_final_report(session, bundle_dir, approval_id=request.approval_id)
+        if result.status != "created":
+            reason = result.gate.reason if result.gate else "user-initiated approval required"
+            raise HTTPException(status_code=403, detail={"reason": reason, "status": result.status})
+        return result.public_dict()
 
     # ------------------------------------------- idea recipe (02-06, HL-ASSIST-*)
     def _idea_candidate_public(candidate: IdeaCandidateModel) -> dict[str, object]:
@@ -1613,6 +2590,56 @@ def create_app() -> FastAPI:
             "validation_error": resolved.validation_error,
             "source": resolved.source,
         }
+
+    @app.get("/api/writing/manuscripts/{manuscript}/export-preview")
+    async def get_manuscript_export_preview(
+        manuscript: str,
+        project_id: str = "default",
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ManuscriptPackageService(hydra_project_root(), session).preview(manuscript, project_id=project_id)
+        except ManuscriptBuildError as exc:
+            raise HTTPException(status_code=404, detail={"reason": "manuscript-missing", "message": str(exc)}) from exc
+        return result.public_dict()
+
+    @app.post("/api/writing/manuscripts/{manuscript}/package")
+    async def create_manuscript_package(
+        manuscript: str,
+        request: ManuscriptPackageRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ManuscriptPackageService(hydra_project_root(), session).create_package(
+                manuscript,
+                PackageRequest(
+                    approval_id=request.approval_id,
+                    targets=list(request.targets),
+                    acknowledge_citation_issues=request.acknowledge_citation_issues,
+                    acknowledged_redaction_item_ids=list(request.acknowledged_redaction_item_ids),
+                    project_id=request.project_id,
+                ),
+            )
+        except ManuscriptBuildError as exc:
+            raise HTTPException(status_code=404, detail={"reason": "manuscript-missing", "message": str(exc)}) from exc
+        return result.public_dict()
+
+    @app.post("/api/writing/manuscripts/{manuscript}/submit")
+    async def submit_manuscript_package(
+        manuscript: str,
+        request: ManuscriptSubmissionRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        try:
+            result = await ManuscriptPackageService(hydra_project_root(), session).request_external_submission(
+                manuscript,
+                venue=request.venue,
+                approval_id=request.approval_id,
+                project_id=request.project_id,
+            )
+        except ManuscriptBuildError as exc:
+            raise HTTPException(status_code=404, detail={"reason": "manuscript-missing", "message": str(exc)}) from exc
+        return result.public_dict()
 
     @app.get("/api/writing/latex/availability")
     async def get_latex_availability() -> dict[str, object]:

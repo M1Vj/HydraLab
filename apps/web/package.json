@@ -33,6 +33,8 @@
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4",
     "vite": "^7.2.7",
+    "y-codemirror.next": "^0.3.5",
+    "yjs": "^13.6.31",
     "zustand": "^5"
   },
   "devDependencies": {

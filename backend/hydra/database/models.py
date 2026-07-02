@@ -329,6 +329,7 @@ class AgentRun(SQLModel, table=True):
     inputs_ref: str = Field(default="[]")
     status: str = Field(default="queued")
     paused: bool = Field(default=False)
+    stop_reason: str = Field(default="")
     tokens_used: int = Field(default=0)
     started_at: Optional[datetime] = Field(default=None)
     ended_at: Optional[datetime] = Field(default=None)
@@ -360,6 +361,20 @@ class AgentRunStep(SQLModel, table=True):
     skill_id: Optional[str] = Field(default=None)
     capability: Optional[str] = Field(default=None)
     denied_capability: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class AgentRunCandidate(SQLModel, table=True):
+    """Persisted population/candidate artifact for Phase-3 Autopilot runs."""
+
+    __tablename__ = "agent_run_candidates"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(foreign_key="agent_runs.id", index=True)
+    project_id: Optional[str] = Field(default=None, index=True)
+    candidate_id: str = Field(index=True)
+    candidate_artifact_json: str = Field(default="{}")
+    ranking_score: float = Field(default=0.0)
+    ranking_method: str = Field(default="pairwise", index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -399,7 +414,110 @@ class AgentModePolicy(SQLModel, table=True):
     project_id: str = Field(primary_key=True)
     default_mode: str = Field(default="passive")
     full_access_enabled: bool = Field(default=False)
+    autopilot_enabled: bool = Field(default=False)
+    autonomy_policy_json: str = Field(default="{}")
     updated_at: datetime = Field(default_factory=utcnow)
+
+class AgentCheckpoint(SQLModel, table=True):
+    __tablename__ = "agent_checkpoints"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    run_id: Optional[str] = Field(default=None, foreign_key="agent_runs.id", index=True, nullable=True)
+    git_ref: Optional[str] = Field(default=None)
+    commit: Optional[str] = Field(default=None)
+    label: str = Field(default="checkpoint")
+    target: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+
+class AgentAuditLedgerEntry(SQLModel, table=True):
+    __tablename__ = "agent_audit_ledger"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    run_id: Optional[str] = Field(default=None, foreign_key="agent_runs.id", index=True, nullable=True)
+    actor: str = Field(default="autopilot")
+    action: str = Field(default="")
+    risk_level: str = Field(default="high")
+    target: str = Field(default="")
+    approval_state: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SelfEvolutionChange(SQLModel, table=True):
+    """One typed, reviewable self-evolution change (branch 03-05, HL-ASSIST-30..35).
+
+    A change-set is a group of these rows sharing ``changeset_id``. Each row is a
+    single typed diff (``category`` skill|prompt|setting|app_code) rendered as a
+    human-readable ``unified_diff`` (redacted before persistence) plus the exact
+    ``new_content`` payload written to ``target_path`` on apply. ``test_plan`` names
+    the verification-allowlist commands that gate it; an empty plan is not
+    approvable. ``risk_class`` (auto_eligible|review_required) and ``trust_level``
+    (user|untrusted-external) force protected-field and untrusted-traced proposals
+    to the Review Inbox and bar them from the apply path. Status transitions on the
+    same row are expected (proposed→approved→applied|rolled_back|denied); the
+    forensic trail is the append-only ``agent_audit_ledger``.
+    """
+
+    __tablename__ = "self_evolution_changes"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    run_id: Optional[str] = Field(default=None, index=True)
+    changeset_id: str = Field(default="", index=True)
+    change_id: str = Field(default_factory=uuid_text, index=True)
+    category: str = Field(default="prompt")  # skill | prompt | setting | app_code
+    target_path: str = Field(default="")
+    unified_diff: str = Field(default="")  # redacted, human-readable
+    new_content: str = Field(default="")  # payload written to target_path on apply
+    test_plan: str = Field(default="[]")  # json list[str] of allowlisted commands
+    risk_class: str = Field(default="auto_eligible")  # auto_eligible | review_required
+    risk_reason: str = Field(default="")
+    trust_level: str = Field(default="user")  # user | untrusted-external
+    origin: str = Field(default="user")
+    status: str = Field(default="proposed")  # proposed|approved|applied|rolled_back|denied
+    checkpoint_ref: Optional[str] = Field(default=None)
+    verification_result: str = Field(default="")  # pass | fail | ""
+    review_inbox: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ProjectCollaborationSettings(SQLModel, table=True):
+    __tablename__ = "project_collaboration_settings"
+    project_id: str = Field(primary_key=True)
+    enabled: bool = Field(default=False)
+    sync_server_url: str = Field(default="")
+    sync_server_kind: str = Field(default="self-hosted")
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class CollaboratorIdentity(SQLModel, table=True):
+    __tablename__ = "collaborator_identities"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    display_name: str = Field(index=True)
+    auth_token_hash: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    revoked_at: Optional[datetime] = Field(default=None, nullable=True)
+
+
+class ProjectCollaborationPermission(SQLModel, table=True):
+    __tablename__ = "project_collaboration_permissions"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    collaborator_id: str = Field(foreign_key="collaborator_identities.id", index=True)
+    permission: str = Field(index=True)
+    invite_token_hash: str = Field(default="", index=True)
+    invited_at: datetime = Field(default_factory=utcnow)
+    authenticated_at: Optional[datetime] = Field(default=None, nullable=True)
+    revoked_at: Optional[datetime] = Field(default=None, nullable=True)
+
+
+class CollaborativeEditAuditEntry(SQLModel, table=True):
+    __tablename__ = "collaborative_edit_audit"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    collaborator_id: str = Field(index=True)
+    document_id: str = Field(index=True)
+    change_summary: str = Field(default="")
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class Annotation(SQLModel, table=True):
@@ -797,3 +915,134 @@ class IdeaCandidate(SQLModel, table=True):
     trust_origin: str = Field(default="user")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+
+
+# --- Phase-3 experiment execution & compute (branch 03-03, HL-SAFE-10..19) ---
+# The FIRST HydraLab subsystem that runs real user-authored code. Every table
+# here backs a gated, sandboxed, checkpointed, audited execution path; nothing
+# in this subsystem widens the Phase-1/2 safe command console.
+class ComputeBackend(SQLModel, table=True):
+    """A registered compute backend (HL-SAFE-10).
+
+    ``kind`` is ``local_sandbox`` or ``cloud``. A disabled or unregistered
+    backend is never selectable for a run. ``default_limits_json`` carries the
+    resource ceilings (cpu_seconds/memory_bytes/wall_clock_seconds/log_cap_bytes)
+    the SandboxPolicy builder consumes.
+    """
+
+    __tablename__ = "compute_backends"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    kind: str = Field(default="local_sandbox", index=True)
+    display_name: str = Field(default="")
+    enabled: bool = Field(default=True, index=True)
+    capabilities_json: str = Field(default="{}")
+    default_limits_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ExperimentRun(SQLModel, table=True):
+    """A single gated experiment run record (HL-SAFE-13).
+
+    ``status`` is a plain string; ``killed:<reason>`` terminal values are written
+    verbatim. ``checkpoint_ref`` pins the pre-run checkpoint (HL-SAFE-16),
+    ``trust_origin``/``justification_trust`` drive the untrusted-provenance
+    Review-Inbox routing (HL-SAFE-18), and ``enforcement`` records whether real
+    Seatbelt filesystem/network confinement was applied or a best-effort
+    resource-only fallback was used (honest, never silently unsafe).
+    """
+
+    __tablename__ = "experiment_runs"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    backend_id: Optional[str] = Field(default=None, index=True)
+    label: str = Field(default="")
+    config_json: str = Field(default="{}")
+    status: str = Field(default="pending", index=True)
+    reason: str = Field(default="")
+    checkpoint_ref: Optional[str] = Field(default=None)
+    artifact_manifest_json: str = Field(default="{}")
+    metrics_json: str = Field(default="{}")
+    trust_origin: str = Field(default="user")
+    justification_trust: str = Field(default="user")
+    requested_by: str = Field(default="user")
+    approval_id: Optional[str] = Field(default=None)
+    review_item_id: Optional[str] = Field(default=None)
+    enforcement: str = Field(default="seatbelt")
+    exit_code: Optional[int] = Field(default=None)
+    created_at: datetime = Field(default_factory=utcnow)
+    started_at: Optional[datetime] = Field(default=None)
+    ended_at: Optional[datetime] = Field(default=None)
+
+
+class ExperimentRunLog(SQLModel, table=True):
+    """Bounded per-run stdout/stderr/metric rows keyed by ``run_id`` (HL-SAFE-14).
+
+    Every row references its run; when the persisted stream reaches the byte cap
+    the final row carries an explicit ``[truncated: N bytes omitted]`` marker so
+    log loss is never silent.
+    """
+
+    __tablename__ = "experiment_run_logs"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(index=True)
+    stream: str = Field(default="stdout", index=True)  # stdout | stderr | metric
+    seq: int = Field(default=0)
+    content: str = Field(default="")
+    byte_len: int = Field(default=0)
+    truncated: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class ExperimentExecutionSetting(SQLModel, table=True):
+    """Per-project execution enablement + cloud budget (HL-SAFE-17).
+
+    ``execution_enabled`` is the per-project first-use gate (default OFF); the
+    Experiments panel renders its permission-denied "Enable execution" state
+    until it is true. ``cloud_budget_usd`` must be configured AND
+    ``cloud_spend_approved`` true before any ``cloud`` backend run may proceed.
+    """
+
+    __tablename__ = "experiment_execution_settings"
+    project_id: str = Field(primary_key=True)
+    execution_enabled: bool = Field(default=False)
+    cloud_budget_usd: Optional[float] = Field(default=None)
+    cloud_spend_approved: bool = Field(default=False)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ReproducibilityManifest(SQLModel, table=True):
+    """Persisted reproducibility-bundle manifest wrapper (HL-QUAL-30/31)."""
+
+    __tablename__ = "reproducibility_manifests"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    package_version: str
+    schema_version: str = Field(default="reproducibility-manifest.v1")
+    hash_algorithm: str = Field(default="sha256")
+    source_ids_json: str = Field(default="[]")
+    sources_json: str = Field(default="[]")
+    artifacts_json: str = Field(default="[]")
+    prompts_json: str = Field(default="[]")
+    model_calls_json: str = Field(default="[]")
+    tool_calls_json: str = Field(default="[]")
+    code_version_json: str = Field(default="{}")
+    environment_version_json: str = Field(default="{}")
+    approvals_json: str = Field(default="[]")
+    checkpoints_json: str = Field(default="[]")
+    redaction_decisions_json: str = Field(default="[]")
+    run_ids_json: str = Field(default="[]")
+    manifest_content_hash: str = Field(default="", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class EvaluationResult(SQLModel, table=True):
+    """One metric result produced by an experiment/autonomy run (HL-QUAL-32)."""
+
+    __tablename__ = "evaluation_results"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    run_id: str = Field(index=True)
+    metric_name: str = Field(index=True)
+    value: float
+    evaluated_artifact_hash: str
+    created_at: datetime = Field(default_factory=utcnow)
