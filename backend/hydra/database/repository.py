@@ -118,6 +118,12 @@ class Repository:
             if model.__tablename__ == "tasks":
                 if "column_name" in d:
                     d["column"] = d.pop("column_name")
+                d["status"] = d.get("column")
+                if isinstance(d.get("tags"), str):
+                    try:
+                        d["tags"] = json.loads(d["tags"] or "[]")
+                    except json.JSONDecodeError:
+                        d["tags"] = []
             if model.__tablename__ in {"browser_events", "sources"} and d.get("detected_metadata"):
                 d["detected_metadata"] = json.loads(d["detected_metadata"] or "{}")
             if model.__tablename__ == "sources" and d.get("metadata_json"):
@@ -593,6 +599,15 @@ class Repository:
         phase_indicator: str = "",
         position: int = 0,
         workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        due: Optional[str] = None,
+        priority: str = "normal",
+        tags: Optional[list[str]] = None,
+        origin: str = "manual",
+        assistant_created: bool = False,
+        lifecycle_state: str = "active",
+        review_category: Optional[str] = None,
+        trust_origin: str = "user",
     ) -> dict[str, Any]:
         task = Task(
             title=title,
@@ -602,11 +617,149 @@ class Repository:
             phase_indicator=phase_indicator,
             position=position,
             workspace_id=workspace_id,
+            project_id=project_id,
+            due=due,
+            priority=priority,
+            tags=json.dumps(tags or []),
+            origin=origin,
+            assistant_created=assistant_created,
+            lifecycle_state=lifecycle_state,
+            review_category=review_category,
+            trust_origin=trust_origin,
         )
         self.session.add(task)
         await self.session.commit()
         await self.session.refresh(task)
         return self._to_dict(task)
+
+    async def create_task_link(
+        self,
+        task_id: str,
+        target_type: str,
+        target_id_or_path: str,
+        link_role: str = "about",
+    ) -> dict[str, Any]:
+        link_state = "live"
+        if await self._task_link_target_trashed(target_type, target_id_or_path):
+            link_state = "source_trashed"
+        link = TaskLink(
+            task_id=task_id,
+            target_type=target_type,
+            target_id_or_path=self._resolve_task_link_target(target_type, target_id_or_path) or target_id_or_path,
+            link_role=link_role,
+            link_state=link_state,
+        )
+        self.session.add(link)
+        await self.session.commit()
+        await self.session.refresh(link)
+        return self._to_dict(link)
+
+    def _resolve_task_link_target(self, target_type: str, target_id_or_path: str) -> Optional[str]:
+        # A path-backed target resolves to a stable id when one exists is handled
+        # by the caller (app) which passes stable ids; here we pass-through.
+        return target_id_or_path
+
+    async def _task_link_target_trashed(self, target_type: str, target_id: str) -> bool:
+        model = {
+            "source": Source,
+            "note": Note,
+            "claim": Claim,
+            "task": Task,
+        }.get(target_type)
+        if model is None:
+            return False
+        obj = await self.session.get(model, target_id)
+        if obj is None:
+            return False
+        return bool(getattr(obj, "trashed", False) or getattr(obj, "soft_deleted", False))
+
+    async def list_task_links(self, task_id: str) -> list[dict[str, Any]]:
+        res = await self.session.exec(select(TaskLink).where(TaskLink.task_id == task_id))
+        return self._to_dict_list(res.all())
+
+    async def flag_task_links_for_trashed_target(self, target_type: str, target_id: str) -> int:
+        res = await self.session.exec(
+            select(TaskLink).where(and_(TaskLink.target_type == target_type, TaskLink.target_id_or_path == target_id))
+        )
+        rows = res.all()
+        for link in rows:
+            link.link_state = "source_trashed"
+            self.session.add(link)
+            self.session.add(
+                ReviewItem(
+                    item_type="broken-link",
+                    title="Task link target trashed",
+                    summary="A task link points to a trashed research object.",
+                    origin_type="task_link",
+                    origin_id=link.id,
+                    target_type=target_type,
+                    target_id=target_id,
+                )
+            )
+        await self.session.commit()
+        return len(rows)
+
+    async def reattach_task_links_for_target(self, target_type: str, target_id: str) -> int:
+        res = await self.session.exec(
+            select(TaskLink).where(
+                and_(
+                    TaskLink.target_type == target_type,
+                    TaskLink.target_id_or_path == target_id,
+                    TaskLink.link_state == "source_trashed",
+                )
+            )
+        )
+        rows = res.all()
+        for link in rows:
+            link.link_state = "live"
+            self.session.add(link)
+        await self.session.commit()
+        return len(rows)
+
+    async def accept_task(self, task_id: str) -> Optional[dict[str, Any]]:
+        task = await self.session.get(Task, task_id)
+        if task is None:
+            return None
+        task.lifecycle_state = "active"
+        task.updated_at = datetime.now(timezone.utc)
+        self.session.add(task)
+        await self._resolve_task_review_items(task_id, "accepted")
+        await self.session.commit()
+        await self.session.refresh(task)
+        return self._to_dict(task)
+
+    async def dismiss_task(self, task_id: str) -> Optional[dict[str, Any]]:
+        task = await self.session.get(Task, task_id)
+        if task is None:
+            return None
+        task.lifecycle_state = "dismissed"
+        task.updated_at = datetime.now(timezone.utc)
+        self.session.add(task)
+        await self._resolve_task_review_items(task_id, "dismissed")
+        await self.session.commit()
+        await self.session.refresh(task)
+        return self._to_dict(task)
+
+    async def bulk_dismiss_draft_tasks(self, project_id: Optional[str] = None) -> int:
+        q = select(Task).where(and_(Task.lifecycle_state == "draft", Task.assistant_created == True))  # noqa: E712
+        if project_id:
+            q = q.where(Task.project_id == project_id)
+        rows = (await self.session.exec(q)).all()
+        for task in rows:
+            task.lifecycle_state = "dismissed"
+            self.session.add(task)
+            await self._resolve_task_review_items(task.id, "dismissed")
+        await self.session.commit()
+        return len(rows)
+
+    async def _resolve_task_review_items(self, task_id: str, status: str) -> None:
+        res = await self.session.exec(
+            select(ReviewItem).where(and_(ReviewItem.item_type == "draft_task", ReviewItem.target_id == task_id))
+        )
+        for item in res.all():
+            item.status = status
+            item.updated_at = datetime.now(timezone.utc)
+            self.session.add(item)
 
     async def update_task(self, task_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
         task = await self.session.get(Task, task_id)
@@ -634,10 +787,19 @@ class Repository:
         await self.session.commit()
         return True
 
-    async def list_tasks(self, workspace_id: Optional[str] = None) -> list[dict[str, Any]]:
+    async def list_tasks(
+        self,
+        workspace_id: Optional[str] = None,
+        state: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         q = select(Task)
         if workspace_id:
             q = q.where(Task.workspace_id == workspace_id)
+        if project_id:
+            q = q.where(Task.project_id == project_id)
+        if state and state != "all":
+            q = q.where(Task.lifecycle_state == state)
         q = q.order_by(Task.position.asc(), Task.created_at.asc())
         res = await self.session.exec(q)
         return self._to_dict_list(res.all())
@@ -1008,7 +1170,32 @@ class Repository:
             )
 
         await self.session.commit()
+        await self.flag_task_links_for_trashed_target("source", source_id)
         return {"trashed": True, "dependent_counts": counts}
+
+    async def trash_note(self, note_id: str) -> dict[str, Any]:
+        note = await self.session.get(Note, note_id)
+        if note is None:
+            raise ValueError("note not found")
+        note.soft_deleted = True
+        note.link_state = "target_trashed"
+        note.updated_at = datetime.now(timezone.utc)
+        self.session.add(note)
+        await self.session.commit()
+        flagged = await self.flag_task_links_for_trashed_target("note", note_id)
+        return {"trashed": True, "flagged_task_links": flagged}
+
+    async def restore_note(self, note_id: str) -> dict[str, Any]:
+        note = await self.session.get(Note, note_id)
+        if note is None:
+            raise ValueError("note not found")
+        note.soft_deleted = False
+        note.link_state = "live"
+        note.updated_at = datetime.now(timezone.utc)
+        self.session.add(note)
+        await self.session.commit()
+        reattached = await self.reattach_task_links_for_target("note", note_id)
+        return {"restored": True, "reattached_task_links": reattached}
 
     async def restore_source(self, source_id: str) -> dict[str, Any]:
         source = await self.session.get(Source, source_id)
@@ -1029,6 +1216,7 @@ class Repository:
                 self.session.add(row)
 
         await self.session.commit()
+        await self.reattach_task_links_for_target("source", source_id)
         return {"restored": True}
 
     async def list_review_items(self, item_type: Optional[str] = None) -> list[dict[str, Any]]:
