@@ -18,6 +18,13 @@ export const CANONICAL_STAGE_IDS = [
 
 export type StageId = (typeof CANONICAL_STAGE_IDS)[number];
 export type StageToggles = Record<StageId, boolean>;
+export type LiteratureDepth = "quick" | "standard" | "deep";
+export type LiteratureReviewFormInput = {
+  question: string;
+  sourceScope: Record<string, unknown>;
+  depth: LiteratureDepth;
+  semanticSearch?: boolean;
+};
 
 export function defaultStageToggles(): StageToggles {
   return Object.fromEntries(CANONICAL_STAGE_IDS.map((id) => [id, true])) as StageToggles;
@@ -42,6 +49,16 @@ export function buildStartRunPayload(projectId: string, toggles: Partial<Record<
   };
 }
 
+export function buildLiteratureReviewPayload(projectId: string, input: LiteratureReviewFormInput) {
+  return {
+    project_id: projectId,
+    question: input.question.trim(),
+    source_scope: input.sourceScope,
+    depth: input.depth,
+    semantic_search: Boolean(input.semanticSearch),
+  };
+}
+
 export function fetchOrchestratorStages(client: ApiClient = api): Promise<OrchestratorStage[]> {
   return client.get<{ stages: OrchestratorStage[] }>("/api/orchestrator/stages").then((payload) => payload.stages);
 }
@@ -54,8 +71,46 @@ export function startOrchestratorRun(
   return client.post<OrchestratorRunResponse>("/api/orchestrator/runs", buildStartRunPayload(projectId, toggles));
 }
 
+export function startLiteratureReviewRun(
+  projectId: string,
+  input: LiteratureReviewFormInput,
+  client: ApiClient = api,
+): Promise<OrchestratorRunResponse> {
+  return client.post<OrchestratorRunResponse>(
+    "/api/recipes/literature-review/runs",
+    buildLiteratureReviewPayload(projectId, input),
+  );
+}
+
 export function fetchOrchestratorRun(runId: string, client: ApiClient = api): Promise<OrchestratorRunResponse> {
   return client.get<OrchestratorRunResponse>(`/api/agent/runs/${encodeURIComponent(runId)}`);
+}
+
+export function cancelAgentRun(runId: string, client: ApiClient = api): Promise<{ id: string; status: string }> {
+  return client.post<{ id: string; status: string }>(`/api/agent/runs/${encodeURIComponent(runId)}/cancel`, {});
+}
+
+export function requestLiteratureReviewSave(
+  runId: string,
+  destination: "work/reviews" | "knowledge/literature",
+  filename: string,
+  client: ApiClient = api,
+): Promise<{ approval_id: string; artifact_preview: string; target_relative_path: string }> {
+  return client.post("/api/recipes/literature-review/artifacts/save", {
+    run_id: runId,
+    destination,
+    filename,
+  });
+}
+
+export function resolveLiteratureReviewSave(
+  approvalId: string,
+  decision: "approve" | "reject",
+  client: ApiClient = api,
+): Promise<{ applied: boolean; status: string; path?: string | null; reason?: string }> {
+  return client.post(`/api/recipes/literature-review/saves/${encodeURIComponent(approvalId)}/resolve`, {
+    decision,
+  });
 }
 
 export function summarizeRunState(status: string, state?: string): string {

@@ -88,6 +88,8 @@ from hydra.schemas import (
     SkillEditRequest,
     ApprovalResolveRequest,
     OrchestratorRunStartRequest,
+    LiteratureReviewRunStartRequest,
+    LiteratureReviewSaveRequestModel,
     ContextFileSaveRequest,
     MemoryCandidateRequest,
 )
@@ -171,6 +173,15 @@ from hydra.agents.approvals import ApprovalService, to_contract
 from hydra.database.models import AgentApproval, AgentModePolicy, AgentRun
 from hydra.orchestrator.run import OrchestratorConfigError, RunConfig, RunStateMachine
 from hydra.orchestrator.stages import StageEnum
+from hydra.recipes.literature_review import (
+    LiteratureReviewInput,
+    LiteratureReviewSaveRequest,
+    execute_literature_review,
+    literature_review_descriptor,
+    resolve_literature_review_save_approval,
+    save_literature_review_artifact,
+    validate_literature_review_input,
+)
 from hydra.services.project_context import (
     ContextFileMemory,
     ensure_hydra_md,
@@ -762,6 +773,11 @@ def create_app() -> FastAPI:
             ]
         }
 
+    @app.get("/api/orchestrator/recipes")
+    async def list_orchestrator_recipes() -> dict[str, object]:
+        descriptor = literature_review_descriptor(engine_enabled=True)
+        return {"recipes": [] if descriptor is None else [descriptor.public_dict()]}
+
     @app.get("/api/orchestrator/runs")
     async def list_orchestrator_runs(project_id: str = "default", session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         rows = (
@@ -823,6 +839,99 @@ def create_app() -> FastAPI:
             "artifacts": json.loads((run.artifacts if run else "[]") or "[]"),
         }
 
+    @app.post("/api/recipes/literature-review/runs")
+    async def start_literature_review_run(
+        request: LiteratureReviewRunStartRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        validation = validate_literature_review_input(
+            {
+                "question": request.question,
+                "source_scope": request.source_scope,
+                "depth": request.depth,
+            }
+        )
+        if not validation.allowed or validation.inputs is None:
+            raise HTTPException(status_code=400, detail=validation.message)
+        policy = await _mode_policy(session, request.project_id)
+        privacy = _assistant_privacy()
+        result = await execute_literature_review(
+            session=session,
+            project_root=hydra_project_root(),
+            inputs=LiteratureReviewInput(
+                question=validation.inputs.question,
+                source_scope=validation.inputs.source_scope,
+                depth=validation.inputs.depth,
+            ),
+            mode=policy.default_mode or privacy["default_mode"],
+            semantic_enabled=request.semantic_search,
+            g3_enabled=bool(privacy["g3_enabled"]),
+            offline_only=bool(privacy["offline_only"]),
+            budget=AgentRunBudget(
+                run_budget_tokens=int(privacy["run_budget"]),
+                wall_clock_seconds=int(privacy["wall_clock_seconds"]),
+            ),
+        )
+        run = await session.get(AgentRun, result.run_id)
+        trace = await RunRepository(session).get_trace(result.run_id)
+        return {
+            "run": {
+                "id": result.run_id,
+                "project_id": request.project_id,
+                "mode": run.mode if run else policy.default_mode,
+                "status": run.status if run else result.state,
+                "state": result.state,
+                "paused": bool(run.paused) if run else False,
+            },
+            "trace": trace.public_dict(),
+            "artifacts": json.loads((run.artifacts if run else "[]") or "[]"),
+            "review_item_ids": result.review_item_ids,
+        }
+
+    @app.post("/api/recipes/literature-review/artifacts/save")
+    async def request_literature_review_save(
+        request: LiteratureReviewSaveRequestModel,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        run = await session.get(AgentRun, request.run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        artifacts = json.loads(run.artifacts or "[]")
+        payload = next((item for item in artifacts if item.get("kind") == "literature-review"), None)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="literature review artifact not found")
+        from hydra.recipes.literature_review import _artifact_from_payload
+
+        pending = await save_literature_review_artifact(
+            session=session,
+            project_root=hydra_project_root(),
+            artifact=_artifact_from_payload(payload),
+            request=LiteratureReviewSaveRequest(
+                run_id=request.run_id,
+                destination=request.destination,
+                filename=request.filename,
+            ),
+            mode=run.mode,
+        )
+        return {
+            "approval_id": pending.approval_id,
+            "artifact_preview": pending.artifact_preview,
+            "target_relative_path": pending.target_relative_path,
+        }
+
+    @app.post("/api/recipes/literature-review/saves/{approval_id}/resolve")
+    async def resolve_literature_review_save(
+        approval_id: str,
+        request: ApprovalResolveRequest,
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return await resolve_literature_review_save_approval(
+            session=session,
+            project_root=hydra_project_root(),
+            approval_id=approval_id,
+            decision=request.decision,
+        )
+
     @app.get("/api/agent/runs/{run_id}")
     async def get_agent_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         runs = RunRepository(session)
@@ -839,6 +948,13 @@ def create_app() -> FastAPI:
     @app.post("/api/agent/runs/{run_id}/pause")
     async def pause_agent_run(run_id: str, paused: bool = True, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
         run = await RunRepository(session).pause_run(run_id, paused)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return {"id": run.id, "status": run.status, "paused": run.paused}
+
+    @app.post("/api/agent/runs/{run_id}/cancel")
+    async def cancel_agent_run(run_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        run = await RunRepository(session).cancel_run(run_id)
         if run is None:
             raise HTTPException(status_code=404, detail="run not found")
         return {"id": run.id, "status": run.status, "paused": run.paused}

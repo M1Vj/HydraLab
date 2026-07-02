@@ -478,6 +478,20 @@ class OrchestratorRunStartRequest(BaseModel):
     scoring_method: Literal["pairwise", "tournament", "elo", "rubric"] = "rubric"
 
 
+class LiteratureReviewRunStartRequest(BaseModel):
+    project_id: str = Field(default="default", max_length=200)
+    question: str = Field(default="", max_length=2000)
+    source_scope: dict[str, object] = Field(default_factory=lambda: {"kind": "all-project"})
+    depth: Literal["quick", "standard", "deep"] = "standard"
+    semantic_search: bool = False
+
+
+class LiteratureReviewSaveRequestModel(BaseModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    destination: Literal["work/reviews", "knowledge/literature"]
+    filename: str = Field(default="", max_length=240)
+
+
 class ChatMessageResponse(BaseModel):
     id: str
     conversation_id: str
