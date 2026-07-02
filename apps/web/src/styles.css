@@ -745,6 +745,66 @@ select:focus-visible,
   font-size: 0.78rem;
 }
 
+.literature-review-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.literature-review-form label,
+.literature-review-grid label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.literature-review-form textarea,
+.literature-review-form input,
+.literature-review-form select,
+.literature-save-row input,
+.literature-save-row select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-panel-raised);
+  color: var(--text-active);
+  padding: 7px 8px;
+  font: inherit;
+}
+
+.literature-review-form textarea {
+  resize: vertical;
+}
+
+.literature-review-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: 8px;
+}
+
+.agent-inline-toggle {
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: center;
+  color: var(--text-active) !important;
+}
+
+.icon-text-action,
+.secondary-action.compact {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-panel-raised);
+  color: var(--text-active);
+  padding: 0 10px;
+}
+
 .agent-stage-toggle-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
@@ -823,6 +883,39 @@ select:focus-visible,
 
 .agent-run-artifacts li {
   grid-template-columns: auto minmax(0, 1fr);
+}
+
+.literature-review-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.literature-review-preview h4 {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+}
+
+.literature-review-preview pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-panel-raised);
+  padding: 8px;
+  white-space: pre-wrap;
+  font-size: 0.76rem;
+}
+
+.literature-save-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .agent-trace-row span,

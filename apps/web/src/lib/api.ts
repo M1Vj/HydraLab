@@ -423,6 +423,14 @@ export type AgentRunArtifact = {
   stage?: string;
   method?: string;
   ranking?: Array<{ id: string; title?: string; score: number }>;
+  markdown?: string;
+  question?: string;
+  sections?: Record<string, Array<{
+    text: string;
+    source_ids?: string[];
+    citation_ids?: string[];
+    marker?: string;
+  }>>;
 };
 
 export type OrchestratorStage = {
