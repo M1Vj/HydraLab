@@ -8,9 +8,9 @@
   ],
   "scripts": {
     "dev": "bun run --filter @hydra/web dev",
-    "build": "bun run --filter @hydra/web build",
+    "build": "bun run --filter @hydra/web build && bun run --filter @hydra/chrome-extension build",
     "test": "bun test",
-    "typecheck": "bun run --filter @hydra/web typecheck",
+    "typecheck": "bun run --filter @hydra/web typecheck && bun run --filter @hydra/chrome-extension typecheck",
     "lint": "bun run typecheck"
   },
   "devDependencies": {

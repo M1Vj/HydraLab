@@ -2,16 +2,28 @@ from __future__ import annotations
 
 import io
 import json
+import secrets
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, AsyncGenerator
+from typing import AsyncIterator, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from hydra.browser_bridge import (
+    TRUST_LEVEL_UNTRUSTED,
+    build_browser_working_set,
+    detect_source_metadata,
+    should_capture,
+    source_id_from_metadata,
+    source_should_promote,
+)
 from hydra.research import citation_for, compose_research_answer, search_academic_sources
 from hydra.schemas import (
+    BrowserCaptureRequest,
+    BrowserHandshakeRequest,
+    BrowserHistoryRequest,
     EvidenceCreateRequest,
     CitationCreateRequest,
     ClaimCreateRequest,
@@ -35,9 +47,24 @@ from hydra.storage.runtime import choose_bind_host
 from hydra.writing import review_text
 
 HYDRALAB_BIND_HOST = choose_bind_host()
+HYDRALAB_EXTENSION_ORIGIN = "chrome-extension://hydralab-dev-extension"
+HYDRALAB_FRONTEND_ORIGINS = {
+    origin
+    for port in range(5173, 5180)
+    for origin in (f"http://localhost:{port}", f"http://127.0.0.1:{port}")
+}
+HYDRALAB_BRIDGE_ORIGINS = {HYDRALAB_EXTENSION_ORIGIN, *HYDRALAB_FRONTEND_ORIGINS}
+EXTENSION_BRIDGE_PATHS = {
+    "/api/browser/handshake",
+    "/api/browser/capture",
+    "/api/browser/selection",
+    "/api/browser/propose-source",
+}
 
 
 def create_app() -> FastAPI:
+    bridge_tokens: set[str] = set()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await init_db()
@@ -51,10 +78,35 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:5173",
             "http://localhost:8000",
             "http://127.0.0.1:8000",
+            HYDRALAB_EXTENSION_ORIGIN,
         ],
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def browser_bridge_boundary(request: Request, call_next):
+        origin = request.headers.get("origin")
+        path = request.url.path
+        if origin and origin.startswith("chrome-extension://") and path not in EXTENSION_BRIDGE_PATHS:
+            return JSONResponse({"detail": "Extension capability not allowed for this endpoint"}, status_code=403)
+        if path.startswith("/api/browser") and request.method != "OPTIONS":
+            if origin not in HYDRALAB_BRIDGE_ORIGINS:
+                return JSONResponse({"detail": "Forbidden browser bridge origin"}, status_code=403)
+        return await call_next(request)
+
+    def require_bridge_auth(request: Request) -> dict[str, str]:
+        origin = request.headers.get("origin")
+        if origin not in HYDRALAB_BRIDGE_ORIGINS:
+            raise HTTPException(status_code=403, detail="Forbidden browser bridge origin")
+        authorization = request.headers.get("authorization", "")
+        prefix = "Bearer "
+        if not authorization.startswith(prefix):
+            raise HTTPException(status_code=401, detail="Missing browser bridge token")
+        token = authorization[len(prefix):]
+        if token not in bridge_tokens:
+            raise HTTPException(status_code=401, detail="Invalid browser bridge token")
+        return {"origin": origin, "token": token}
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
@@ -73,6 +125,100 @@ def create_app() -> FastAPI:
                 "migrations": "ready",
                 "bind_host": HYDRALAB_BIND_HOST,
             },
+        }
+
+    @app.post("/api/browser/handshake")
+    def browser_handshake(request: BrowserHandshakeRequest, raw_request: Request) -> dict[str, object]:
+        origin = raw_request.headers.get("origin")
+        if origin not in HYDRALAB_BRIDGE_ORIGINS:
+            raise HTTPException(status_code=403, detail="Forbidden browser bridge origin")
+        token = secrets.token_urlsafe(32)
+        bridge_tokens.add(token)
+        return {
+            "status": "connected",
+            "token": token,
+            "origin": origin,
+            "expires_in_seconds": 3600,
+            "transport": "loopback-http",
+        }
+
+    @app.post("/api/browser/capture")
+    async def browser_capture(
+        request: BrowserCaptureRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        return await persist_browser_capture(request, session, create_source=True)
+
+    @app.post("/api/browser/selection")
+    async def browser_selection(
+        request: BrowserCaptureRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        request.event_type = "selection"
+        return await persist_browser_capture(request, session, create_source=False)
+
+    @app.get("/api/browser/ledger")
+    async def browser_ledger(
+        project_id: str,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        return {"events": await repo.list_browser_events(project_id)}
+
+    @app.get("/api/browser/working-set")
+    async def browser_working_set(
+        project_id: str,
+        budget_tokens: int = 8000,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        events = await repo.list_browser_events(project_id)
+        return build_browser_working_set(events, project_id=project_id, budget_tokens=budget_tokens)
+
+    @app.post("/api/browser/propose-source")
+    async def browser_propose_source(
+        request: BrowserCaptureRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+        session: AsyncSession = Depends(get_session),
+    ) -> dict[str, object]:
+        repo = Repository(session)
+        metadata = detect_source_metadata(request.url, request.title, request.page_text)
+        metadata.update(request.metadata)
+        metadata["trust_level"] = TRUST_LEVEL_UNTRUSTED
+        review_item = await repo.create_review_item(
+            {
+                "project_id": request.project_id,
+                "item_type": "browser-source-proposal",
+                "title": f"Review browser source: {request.title or request.url}",
+                "summary": "Browser page content proposed a source save. User review is required.",
+                "origin_type": "browser",
+                "origin_id": request.url,
+                "target_type": "source",
+                "payload": {
+                    "url": request.url,
+                    "title": request.title,
+                    "trust_level": TRUST_LEVEL_UNTRUSTED,
+                    "detected_metadata": metadata,
+                    "motivating_excerpt": motivating_excerpt(request.page_text),
+                },
+            }
+        )
+        return {"created_source": None, "review_item": review_item}
+
+    @app.post("/api/browser/history/request")
+    def browser_history_request(
+        request: BrowserHistoryRequest,
+        _auth: dict[str, str] = Depends(require_bridge_auth),
+    ) -> dict[str, object]:
+        return {
+            "project_id": request.project_id,
+            "scope": "single-request",
+            "reason": request.reason,
+            "choices": ["Allow for this request", "Decline"],
         }
 
     @app.get("/api/chat/conversations")
@@ -531,6 +677,78 @@ def create_app() -> FastAPI:
         return review_text(request.text)
 
     return app
+
+async def persist_browser_capture(request: BrowserCaptureRequest, session: AsyncSession, create_source: bool) -> dict[str, object]:
+    repo = Repository(session)
+    decision = should_capture(request)
+    if not decision.captured:
+        return {
+            "captured": False,
+            "state": decision.state,
+            "reason": decision.reason,
+            "provider_eligible": False,
+            "event": None,
+            "source": None,
+        }
+
+    metadata = detect_source_metadata(request.url, request.title, request.page_text)
+    metadata.update(request.metadata)
+    metadata["trust_level"] = TRUST_LEVEL_UNTRUSTED
+    metadata["browser_page_text_to_provider"] = bool(request.browser_page_text_to_provider)
+    event = await repo.upsert_browser_event(
+        {
+            "project_id": request.project_id,
+            "url": request.url,
+            "title": request.title,
+            "page_text": request.page_text,
+            "selection": request.selection,
+            "event_type": request.event_type,
+            "detected_metadata": metadata,
+        }
+    )
+
+    source: dict[str, Any] | None = None
+    if create_source and source_should_promote(metadata, request.source_policy):
+        source_metadata = {
+            **metadata,
+            "origin_browser_event_id": event["id"],
+            "origin_url": request.url,
+            "trust_level": TRUST_LEVEL_UNTRUSTED,
+        }
+        source = await repo.upsert_source(
+            {
+                "id": source_id_from_metadata(metadata, request.url),
+                "project_id": request.project_id,
+                "title": request.title or request.url,
+                "url": request.url,
+                "abstract": request.page_text[:800],
+                "kind": "browser-source",
+                "source_type": "web",
+                "doi": metadata.get("doi"),
+                "arxiv_id": metadata.get("arxiv_id"),
+                "metadata_json": json.dumps(source_metadata, sort_keys=True),
+                "trust_origin": TRUST_LEVEL_UNTRUSTED,
+            }
+        )
+
+    return {
+        "captured": True,
+        "state": "captured",
+        "provider_eligible": decision.provider_eligible,
+        "event": event,
+        "source": source,
+    }
+
+def motivating_excerpt(text: str) -> str:
+    normalized = " ".join(text.split())
+    match = re_search_case_insensitive(r"[^.?!]*save this as a source[^.?!]*[.?!]?", normalized)
+    return (match or normalized)[:500]
+
+def re_search_case_insensitive(pattern: str, text: str) -> str | None:
+    import re
+
+    found = re.search(pattern, text, re.I)
+    return found.group(0).strip() if found else None
 
 
 def extract_upload_text(raw: bytes, content_type: str, filename: str) -> str:

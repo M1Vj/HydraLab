@@ -11,6 +11,7 @@ import {
   FileText,
   FolderOpen,
   GitBranch,
+  Globe2,
   Inbox,
   LayoutPanelLeft,
   Library,
@@ -44,8 +45,10 @@ import {
   type ResearchObject,
   type ReviewInboxItem,
   type WorkbenchProject,
+  resolveInAppBrowserSurface,
 } from "./lib/hydra";
 import { Dialog, DropdownMenu, Switch, Tooltip } from "./components/ui/primitives";
+import { SettingsModule } from "./components/modules/SettingsModule";
 
 type Surface = "welcome" | "workbench";
 type PanelStateKind = "empty" | "loading" | "failure" | "permission-denied";
@@ -293,6 +296,7 @@ function WorkbenchApp() {
   }
 
   const activePanel = DEFAULT_PANEL_DEFINITIONS.find((panel) => panel.id === activeActivity) ?? DEFAULT_PANEL_DEFINITIONS[0];
+  const isSettingsActivity = activeActivity === "settings";
   const reviewCount = project.reviewItems.filter((item) => item.type !== "accepted").length;
 
   return (
@@ -302,22 +306,26 @@ function WorkbenchApp() {
       </div>
       <ActivityBar active={activeActivity} reviewCount={reviewCount} onSelect={setActiveActivity} />
       <aside className="sidebar-panel">
-        <PanelHeader title={activePanel.title} state={panelState[activePanel.id] ?? "empty"} onState={setPanelStateFor(activePanel.id)} />
-        <PanelContent
-          panel={activePanel}
-          state={panelState[activePanel.id] ?? "empty"}
-          project={project}
-          explorerState={explorerState}
-          onExplorerState={setExplorerState}
-          onCreateNote={createOnDemandNote}
-          onDeleteSource={deleteSource}
-          onRestoreSource={restoreSource}
-          onOpenReview={() => setActiveActivity("review-inbox")}
-        />
+        <PanelHeader title={isSettingsActivity ? "Settings" : activePanel.title} state={panelState[activePanel.id] ?? "empty"} onState={setPanelStateFor(activePanel.id)} />
+        {isSettingsActivity ? (
+          <SettingsModule />
+        ) : (
+          <PanelContent
+            panel={activePanel}
+            state={panelState[activePanel.id] ?? "empty"}
+            project={project}
+            explorerState={explorerState}
+            onExplorerState={setExplorerState}
+            onCreateNote={createOnDemandNote}
+            onDeleteSource={deleteSource}
+            onRestoreSource={restoreSource}
+            onOpenReview={() => setActiveActivity("review-inbox")}
+          />
+        )}
       </aside>
       <main className="workspace-main">
         <div className="editor-tabs" role="tablist" aria-label="Open panels">
-          {["saved-chat", "markdown-editor", "citation-evidence", "tasks"].map((tab) => (
+          {["saved-chat", "browser", "markdown-editor", "citation-evidence", "tasks"].map((tab) => (
             <button
               key={tab}
               className={`editor-tab ${activeTab === tab ? "active" : ""}`}
@@ -505,6 +513,7 @@ function ProjectWizard({
 function ActivityBar({ active, reviewCount, onSelect }: { active: string; reviewCount: number; onSelect: (id: string) => void }) {
   const items = [
     ["explorer", LayoutPanelLeft, "Explorer"],
+    ["browser", Globe2, "Browser"],
     ["saved-chat", MessageSquareText, "Assistant"],
     ["source-discovery", FileSearch, "Source discovery"],
     ["citation-evidence", BookOpenCheck, "Citation and evidence"],
@@ -576,6 +585,7 @@ function PanelContent({
       />
     );
   }
+  if (panel.id === "browser") return <BrowserPanel />;
   if (panel.id === "review-inbox") return <ReviewInboxPanel project={project} onOpenReview={onOpenReview} />;
   return <PanelEmpty panel={panel} />;
 }
@@ -691,6 +701,26 @@ function ReviewInboxPanel({ project }: { project: WorkbenchProject; onOpenReview
   );
 }
 
+function BrowserPanel() {
+  const choices = ["Allow for this project", "Always allow this host", "Decline/Block"];
+  return (
+    <div className="panel-body">
+      <div className="browser-permission" role="group" aria-label="First-use host permission">
+        <strong>openreview.net</strong>
+        <small>No page text is captured until a host choice is made.</small>
+        {choices.map((choice) => (
+          <button key={choice}>{choice}</button>
+        ))}
+      </div>
+      <div className="browser-route-list" aria-label="Browser surfaces">
+        <span>Public/local page to iframe or PDF.js</span>
+        <span>Frame-blocked page to snapshot preview</span>
+        <span>Signed-in page to Chrome extension</span>
+      </div>
+    </div>
+  );
+}
+
 function ObjectPanel({
   panelId,
   project,
@@ -702,6 +732,32 @@ function ObjectPanel({
   onCreateNote: () => void;
   onUndo: () => void;
 }) {
+  if (panelId === "browser") {
+    const preview = resolveInAppBrowserSurface({
+      url: "https://www.nature.com/articles/d41586-024-00001-2",
+      frameBlocked: true,
+    });
+    return (
+      <article className="object-panel browser-object">
+        <header>
+          <Globe2 size={16} />
+          <strong>Browser preview</strong>
+          <span className="status-pill warning">{preview.state}</span>
+        </header>
+        <div className="snapshot-preview" role="img" aria-label="Snapshot fallback preview for a framing-blocked page">
+          <div>
+            <strong>Nature article snapshot</strong>
+            <p>Framing blocked by the site. HydraLab shows a saved screenshot/snapshot preview instead of a blank pane.</p>
+          </div>
+        </div>
+        <div className="browser-actions">
+          <button>Open URL</button>
+          <button>Use Chrome extension</button>
+          <button>Save to HydraLab</button>
+        </div>
+      </article>
+    );
+  }
   if (panelId === "markdown-editor") {
     return (
       <article className="object-panel">
@@ -908,6 +964,7 @@ function ShortcutReference({ open, onClose }: { open: boolean; onClose: () => vo
 function tabTitle(id: string) {
   const titles: Record<string, string> = {
     "saved-chat": "Research Chat",
+    browser: "Browser",
     "markdown-editor": "Draft Notes.md",
     "citation-evidence": "Evidence",
     tasks: "Kanban",
