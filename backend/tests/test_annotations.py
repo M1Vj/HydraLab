@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.database.models import Annotation, Claim, Note, ReviewItem, Source
+from hydra.app import create_app
 from hydra.services.annotations.index import AnnotationIndexer
 from hydra.services.annotations.sidecar import (
     annotation_sidecar_path,
@@ -136,6 +138,27 @@ async def test_hl_pdf_08_external_sidecar_edit_reindexes_sqlite(session: AsyncSe
     await indexer.reindex_if_external_edit("src-1", stored_sidecar_hash, app_wrote_last=False)
     refreshed = await session.get(Annotation, record["sidecar_record_id"])
     assert refreshed.text == "after external edit"
+
+
+def test_annotation_list_rebuilds_when_existing_index_is_stale(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/api/annotations/src-stale",
+        json={"page": 1, "text": "before", "quad_points": [0.1] * 8},
+    )
+    assert created.status_code == 200
+    sidecar_id = created.json()["sidecar_record_id"]
+    records = read_sidecar_records(tmp_path, "src-stale")
+    edited = {**records[0], "sidecar_record_id": sidecar_id, "text": "sidecar truth", "rev": 2}
+    edited["content_hash"] = compute_record_hash(edited)
+    write_sidecar_records(tmp_path, "src-stale", [edited])
+
+    listed = client.get("/api/annotations/src-stale")
+
+    assert listed.status_code == 200
+    assert listed.json()["annotations"][0]["text"] == "sidecar truth"
 
 
 @pytest.mark.asyncio

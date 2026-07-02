@@ -1,6 +1,9 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from hydra.app import create_app
+from hydra.storage.app_data import app_data_root
 
 
 EXT_ORIGIN = "chrome-extension://hydralab-dev-extension"
@@ -8,11 +11,15 @@ FRONTEND_ORIGIN = "http://127.0.0.1:5173"
 PROJECT_ID = "project_attention"
 
 
-def handshake(client: TestClient, origin: str = EXT_ORIGIN, nonce: str = "dev-handshake") -> str:
+def current_nonce() -> str:
+    return json.loads((app_data_root() / "runtime" / "backend.json").read_text())["handshake_nonce"]
+
+
+def handshake(client: TestClient, origin: str = EXT_ORIGIN, nonce: str | None = None) -> str:
     response = client.post(
         "/api/browser/handshake",
         headers={"Origin": origin},
-        json={"handshake_nonce": nonce},
+        json={"handshake_nonce": nonce or current_nonce()},
     )
     assert response.status_code == 200
     return response.json()["token"]
@@ -70,6 +77,63 @@ def test_hl_browse_02_rejects_missing_token_and_foreign_origin_without_writing_l
         params={"project_id": PROJECT_ID},
     ).json()
     assert ledger["events"] == []
+
+
+def test_bridge_handshake_rejects_wrong_reused_and_expired_nonce(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    wrong = client.post(
+        "/api/browser/handshake",
+        headers={"Origin": EXT_ORIGIN},
+        json={"handshake_nonce": "wrong-nonce-value"},
+    )
+    assert wrong.status_code == 401
+
+    nonce = current_nonce()
+    token = handshake(client, nonce=nonce)
+    assert token
+    reused = client.post(
+        "/api/browser/handshake",
+        headers={"Origin": EXT_ORIGIN},
+        json={"handshake_nonce": nonce},
+    )
+    assert reused.status_code == 401
+
+    descriptor_path = app_data_root() / "runtime" / "backend.json"
+    descriptor = json.loads(descriptor_path.read_text())
+    descriptor["handshake_nonce"] = "expired-nonce-value"
+    descriptor["handshake_nonce_issued_at"] = 0
+    descriptor_path.write_text(json.dumps(descriptor))
+    expired = client.post(
+        "/api/browser/handshake",
+        headers={"Origin": EXT_ORIGIN},
+        json={"handshake_nonce": "expired-nonce-value"},
+    )
+    assert expired.status_code == 401
+
+
+def test_bridge_tokens_expire_and_new_handshake_invalidates_old_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    old_token = handshake(client)
+    new_token = handshake(client)
+
+    old = client.post(
+        "/api/browser/capture",
+        headers=auth_headers(old_token),
+        json=capture_payload(),
+    )
+    assert old.status_code == 401
+
+    monkeypatch.setattr("hydra.app.BRIDGE_TOKEN_TTL_SECONDS", -1)
+    expired = client.post(
+        "/api/browser/capture",
+        headers=auth_headers(new_token),
+        json=capture_payload(),
+    )
+    assert expired.status_code == 401
 
 
 def test_hl_trust_01_payload_validation_and_untrusted_tagging(tmp_path, monkeypatch):

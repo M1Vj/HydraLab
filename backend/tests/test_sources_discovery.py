@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import time
+import asyncio
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hydra.app import create_app
+from hydra.settings.toml_config import default_settings, save_settings
+from hydra.storage.app_data import app_data_root
 from hydra.services.discovery import (
     DiscoveryCache,
     DiscoveryCoordinator,
@@ -96,6 +101,27 @@ def test_hl_disc_03_repeated_query_served_from_cache_with_zero_provider_calls():
     assert second["results"][0]["provider"] == "openalex"
 
 
+def test_hl_disc_03_persisted_cache_survives_service_restart_and_serves_offline(tmp_path):
+    db_path = tmp_path / "hydra.db"
+    provider = CountingProvider("openalex", [result("openalex")])
+    first_cache = DiscoveryCache(ttl_seconds=3600, db_path=db_path)
+    first = DiscoveryCoordinator(providers=[provider], cache=first_cache).search_sync("offline cache")
+    assert first["state"] == "ready"
+
+    fresh_provider = CountingProvider("openalex", [result("openalex", title="Should not be called")])
+    fresh_cache = DiscoveryCache(ttl_seconds=3600, db_path=db_path)
+    offline = DiscoveryCoordinator(providers=[fresh_provider], cache=fresh_cache).search_sync(
+        "offline cache",
+        offline_only=True,
+        scholarly_apis_enabled=False,
+    )
+
+    assert offline["cache_hit"] is True
+    assert offline["state"] == "offline-permission"
+    assert offline["results"][0]["title"] == "Attention Is All You Need"
+    assert fresh_provider.calls == 0
+
+
 def test_hl_disc_02_repeated_429_stops_provider_and_keeps_partial_results(monkeypatch):
     monkeypatch.setattr("hydra.services.discovery.limiter.time.sleep", lambda _seconds: None)
     limiter = ProviderRateLimiter(max_retries=2, base_delay_seconds=0.01)
@@ -114,6 +140,43 @@ def test_hl_disc_02_repeated_429_stops_provider_and_keeps_partial_results(monkey
     assert openalex["state"] == "provider rate-limited"
     assert limited.calls == 2
     assert payload["results"][0]["provider"] == "crossref"
+
+
+@pytest.mark.asyncio
+async def test_hl_disc_02_concurrent_providers_do_not_share_provider_bucket():
+    limiter = ProviderRateLimiter(aggregate_requests_per_second=10, provider_requests_per_second={"a": 1, "b": 1})
+    started: list[str] = []
+
+    async def operation(name: str) -> str:
+        started.append(name)
+        await asyncio.sleep(0.05)
+        return name
+
+    start = time.monotonic()
+    result = await asyncio.gather(
+        limiter.call("a", lambda: operation("a")),
+        limiter.call("b", lambda: operation("b")),
+    )
+
+    assert sorted(result) == ["a", "b"]
+    assert set(started) == {"a", "b"}
+    assert time.monotonic() - start < 0.5
+
+
+@pytest.mark.asyncio
+async def test_hl_disc_02_aggregate_ceiling_is_honored():
+    limiter = ProviderRateLimiter(aggregate_requests_per_second=1, base_delay_seconds=0)
+
+    async def operation() -> str:
+        return "ok"
+
+    start = time.monotonic()
+    await asyncio.gather(
+        limiter.call("a", operation),
+        limiter.call("b", operation),
+    )
+
+    assert time.monotonic() - start >= 0.9
 
 
 def test_hl_disc_06_exact_id_merge_fuzzy_review_and_uncertain_flag():
@@ -265,6 +328,37 @@ def test_hl_browse_04_offline_only_searches_cache_and_sends_zero_provider_calls(
     assert payload["state"] == "offline-permission"
     assert payload["cache_hit"] is True
     assert payload["results"]
+    assert provider.calls == 0
+
+
+def test_discovery_route_uses_stored_offline_and_scholarly_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    provider = CountingProvider("openalex", [result("openalex")])
+    monkeypatch.setattr("hydra.app.default_providers", lambda: [provider])
+    settings = default_settings()
+    settings["privacy"]["offline_only"] = True
+    save_settings(app_data_root() / "settings.toml", settings)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/sources/discovery/search",
+        json={"query": "attention", "offline_only": False, "scholarly_apis_enabled": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "offline-permission"
+    assert provider.calls == 0
+
+    settings["privacy"]["offline_only"] = False
+    settings["privacy"]["scholarly_apis_enabled"] = False
+    save_settings(app_data_root() / "settings.toml", settings)
+    second = client.post(
+        "/api/sources/discovery/search",
+        json={"query": "attention", "offline_only": False, "scholarly_apis_enabled": True},
+    )
+
+    assert second.status_code == 200
+    assert second.json()["state"] == "offline-permission"
     assert provider.calls == 0
 
 

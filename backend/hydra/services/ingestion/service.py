@@ -74,16 +74,17 @@ class IngestionService:
         await session.commit()
         await session.refresh(job)
 
+        written_paths: list[Path] = []
         try:
             validate_source_file(source_path, declared_mime=declared_mime, limits=self.limits)
             artifact_set = self._convert(source)
+            if _sha256_file(source_path) != original_hash:
+                raise IngestionError("original source changed during ingestion")
             notes = list(artifact_set.notes)
             reference_result = self.reference_adapter.resolve(source)
             notes.extend(reference_result.notes)
             artifact_set = _append_reference_artifact(artifact_set, source, reference_result.engine, reference_result.metadata, reference_result.notes)
-            artifact_rows = await self._persist_artifacts(session, source, job, artifact_set)
-            if _sha256_file(source_path) != original_hash:
-                raise IngestionError("original source changed during ingestion")
+            artifact_rows = await self._persist_artifacts(session, source, job, artifact_set, written_paths)
             job.status = "done"
             job.progress = 100
             job.failure_reason = ""
@@ -92,6 +93,8 @@ class IngestionService:
             job.updated_at = _now()
             session.add(job)
             await session.commit()
+            for row in artifact_rows:
+                await session.refresh(row)
             await session.refresh(job)
             return {
                 "state": job.status,
@@ -101,12 +104,15 @@ class IngestionService:
                 "notes": notes,
             }
         except MissingModelError as exc:
+            await self._rollback_artifacts(session, written_paths)
             await self._fail_job(session, job, "failed", str(exc))
             return {"state": CONNECT_ONCE_STATE, "job_id": job.id, "artifacts": [], "notes": [str(exc)]}
         except QuarantineError as exc:
+            await self._rollback_artifacts(session, written_paths)
             await self._fail_job(session, job, "quarantined", str(exc))
             return {"state": "quarantined", "job_id": job.id, "artifacts": [], "reason": str(exc)}
         except IngestionError as exc:
+            await self._rollback_artifacts(session, written_paths)
             await self._fail_job(session, job, "failed", str(exc))
             return {"state": "failed", "job_id": job.id, "artifacts": [], "reason": str(exc)}
 
@@ -125,11 +131,13 @@ class IngestionService:
         source: IngestionSource,
         job: IngestionJob,
         artifact_set: ArtifactSet,
+        written_paths: list[Path],
     ) -> list[IngestionArtifact]:
         rows: list[IngestionArtifact] = []
         image_parent: IngestionArtifact | None = None
         for artifact in artifact_set.artifacts:
             path = _write_artifact(source.project_root, artifact)
+            written_paths.append(path)
             row = IngestionArtifact(
                 source_id=source.source_id,
                 job_id=job.id,
@@ -171,6 +179,7 @@ class IngestionService:
             path = safe_artifact_path(source.project_root, image.relative_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(image.content)
+            written_paths.append(path)
             session.add(
                 ExtractedImage(
                     source_id=source.source_id,
@@ -183,10 +192,16 @@ class IngestionService:
                 )
             )
 
-        await session.commit()
-        for row in rows:
-            await session.refresh(row)
         return rows
+
+    async def _rollback_artifacts(self, session: AsyncSession, written_paths: list[Path]) -> None:
+        await session.rollback()
+        for path in reversed(written_paths):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError:
+                pass
 
     async def _fail_job(self, session: AsyncSession, job: IngestionJob, status: str, reason: str) -> None:
         job.status = status

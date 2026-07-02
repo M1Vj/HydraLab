@@ -48,8 +48,8 @@ class ProviderSecretService:
     def __init__(self, store: SecretStore) -> None:
         self.store = store
 
-    def _ref(self, provider_id: str, secret_name: str) -> str:
-        return f"keyring:providers/{provider_id}:{secret_name}"
+    def _ref(self, provider_id: str, secret_name: str = "api_key") -> str:
+        return f"keychain:hydralab/{provider_id}" if secret_name == "api_key" else f"keychain:hydralab/{provider_id}/{secret_name}"
 
     def save_provider_secret(self, settings_path: Path, provider_id: str, secret_name: str, secret_value: str) -> dict:
         settings_path = Path(settings_path)
@@ -58,7 +58,7 @@ class ProviderSecretService:
         else:
             settings = default_settings()
 
-        service = f"providers/{provider_id}"
+        service = f"hydralab/{provider_id}"
         self.store.set_password(service, secret_name, secret_value)
         secret_ref = self._ref(provider_id, secret_name)
 
@@ -76,4 +76,7 @@ class ProviderSecretService:
         account = settings.get("providers", {}).get("accounts", {}).get(provider_id, {})
         if account.get("secret_ref") != self._ref(provider_id, secret_name):
             return None
-        return self.store.get_password(f"providers/{provider_id}", secret_name)
+        return self.store.get_password(f"hydralab/{provider_id}", secret_name)
+
+    def has_provider_secret(self, provider_id: str, secret_name: str = "api_key") -> bool:
+        return self.store.get_password(f"hydralab/{provider_id}", secret_name) is not None

@@ -80,6 +80,31 @@ async def test_hl_write_14_assigns_note_and_draft_ids_once_and_keeps_them_across
 
 
 @pytest.mark.asyncio
+async def test_note_file_service_rejects_protected_and_non_note_paths_without_mutating(session: AsyncSession, tmp_path: Path):
+    hydra = tmp_path / "HYDRA.md"
+    hydra.write_text("# Protected context\n")
+    project_yaml = tmp_path / "project.yaml"
+    project_yaml.write_text("schema_version: 2\n")
+    git_config = tmp_path / ".git" / "config"
+    git_config.parent.mkdir()
+    git_config.write_text("[core]\n")
+    source_pdf = tmp_path / "sources" / "x.pdf"
+    source_pdf.parent.mkdir()
+    source_pdf.write_bytes(b"%PDF-1.4\n%%EOF")
+
+    service = NoteFileService(session, tmp_path)
+
+    for blocked in ("HYDRA.md", "project.yaml", ".git/config", "sources/x.pdf"):
+        with pytest.raises(PermissionError):
+            await service.open_note(blocked, project_id="p1")
+
+    assert hydra.read_text() == "# Protected context\n"
+    assert project_yaml.read_text() == "schema_version: 2\n"
+    assert git_config.read_text() == "[core]\n"
+    assert source_pdf.read_bytes() == b"%PDF-1.4\n%%EOF"
+
+
+@pytest.mark.asyncio
 async def test_hl_write_04_07_reindexes_wikilinks_backlinks_and_dangling_review(session: AsyncSession, tmp_path: Path):
     target = Note(id="n-7af3", project_id="p1", title="Attention Is All You Need", relative_path="knowledge/Vaswani 2017.md")
     session.add(target)

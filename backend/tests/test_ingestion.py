@@ -22,7 +22,7 @@ from hydra.services.ingestion.adapters import DoclingAdapter
 from hydra.services.ingestion.queue import IngestionQueue
 from hydra.services.ingestion.service import IngestionService
 from hydra.services.ingestion.safety import IngestionLimits, validate_zip_archive
-from hydra.services.ingestion.types import ArtifactSet, IncompleteExtractionError, IngestionSource
+from hydra.services.ingestion.types import ArtifactPayload, ArtifactSet, IncompleteExtractionError, IngestionSource
 
 FIXTURES = Path(__file__).parent / "fixtures" / "ingestion"
 
@@ -222,3 +222,46 @@ async def test_hl_ingest_08_offline_without_models_returns_connect_once_state(se
 
     assert result["state"] == "connect once to fetch models"
     assert (await session.exec(select(IngestionArtifact))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_failed_ingestion_original_mutation_rolls_back_artifact_rows_and_files(session: AsyncSession, tmp_path: Path):
+    class MutatingAdapter:
+        engine = "mutating"
+
+        def convert(self, source: IngestionSource, output_dir: Path) -> ArtifactSet:
+            source.path.write_text("changed during conversion")
+            return ArtifactSet(
+                engine=self.engine,
+                artifacts=[
+                    ArtifactPayload(
+                        kind="markdown",
+                        engine=self.engine,
+                        relative_path=f"sources/derived/{source.source_id}/document.md",
+                        content=b"should not persist",
+                        extraction_confidence=0.5,
+                    )
+                ],
+            )
+
+    original = tmp_path / "sources" / "originals" / "paper.md"
+    original.parent.mkdir(parents=True)
+    original.write_text("stable before conversion")
+    session.add(Source(id="src-mutated", title="Mutated"))
+    await session.commit()
+
+    result = await IngestionService(primary_adapter=MutatingAdapter()).ingest(
+        session,
+        source_id="src-mutated",
+        title="Mutated",
+        source_path=original,
+        project_root=tmp_path,
+        declared_mime="text/markdown",
+    )
+
+    assert result["state"] == "failed"
+    assert "original source changed" in result["reason"]
+    assert (await session.exec(select(IngestionArtifact))).all() == []
+    assert list((tmp_path / "sources" / "derived").glob("**/*")) == []
+    job = (await session.exec(select(IngestionJob))).one()
+    assert job.status == "failed"
