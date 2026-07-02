@@ -592,6 +592,11 @@ select:focus-visible,
 .command-dialog,
 .shortcut-dialog,
 .project-wizard {
+  position: fixed;
+  top: 10vh;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 21;
   width: min(720px, calc(100vw - 32px));
   max-height: 80vh;
   overflow: auto;

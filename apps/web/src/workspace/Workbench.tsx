@@ -77,12 +77,16 @@ function WorkbenchShell({ project }: { project: ActiveProject }) {
   }
 
   function openPanel(id: PanelId, config = {}) {
-    setLayoutJson((current) => openPanelInLayout(current, id, config));
+    const next = openPanelInLayout(layoutJson, id, config);
+    setLayoutJson(next);
+    store.saveActiveLayout(next);
     announce(`Opened ${panelChrome[id].title}`);
   }
 
   function closeActivePanel() {
-    setLayoutJson((current) => removeActiveTabFromLayout(current));
+    const next = removeActiveTabFromLayout(layoutJson);
+    setLayoutJson(next);
+    store.saveActiveLayout(next);
   }
 
   useEffect(() => {

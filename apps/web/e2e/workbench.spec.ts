@@ -21,19 +21,34 @@ test.beforeEach(async ({ page }) => {
   await page.goto(baseURL);
 });
 
-test("close panel, reopen through ActivityBar and palette, reset layout", async ({ page }) => {
+test("close panel persists layout and reset restores it", async ({ page }) => {
   await page.getByRole("button", { name: "Open existing folder" }).click();
   await expect(page.getByRole("navigation", { name: "Activity Bar" })).toBeVisible();
 
-  const before = await page.evaluate(() => localStorage.getItem("hydralab-workspace"));
+  const opened = await page.evaluate(() => localStorage.getItem("hydralab-workspace"));
+  // Closing the active tab is a command/keyboard-driven change: it must persist,
+  // not only survive a FlexLayout drag (which fires onModelChange).
   await page.keyboard.press(process.platform === "darwin" ? "Meta+W" : "Control+W");
+  await page.waitForFunction(
+    (prev) => localStorage.getItem("hydralab-workspace") !== prev,
+    opened,
+    { timeout: 5000 },
+  );
+  const afterClose = await page.evaluate(() => localStorage.getItem("hydralab-workspace"));
+  expect(afterClose).not.toEqual(opened);
+
+  // Reset via the command palette must change the persisted layout back off the closed state.
   await page.getByRole("button", { name: "Explorer" }).click();
   await page.keyboard.press(process.platform === "darwin" ? "Meta+K" : "Control+K");
   await page.getByPlaceholder("Search commands, panels, notes, sources...").fill("reset layout");
   await page.getByText("View: Reset layout").click();
-  const after = await page.evaluate(() => localStorage.getItem("hydralab-workspace"));
-
-  expect(after).not.toEqual(before);
+  await page.waitForFunction(
+    (prev) => localStorage.getItem("hydralab-workspace") !== prev,
+    afterClose,
+    { timeout: 5000 },
+  );
+  const afterReset = await page.evaluate(() => localStorage.getItem("hydralab-workspace"));
+  expect(afterReset).not.toEqual(afterClose);
 });
 
 test("explorer to markdown editor open flow", async ({ page }) => {
