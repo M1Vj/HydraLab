@@ -83,11 +83,58 @@ class CitationCreateRequest(BaseModel):
     source_id: str = Field(min_length=1, max_length=200)
     text: str = Field(min_length=1, max_length=4000)
 
+
+class CitationRenderRequest(BaseModel):
+    source_ids: list[str] = Field(default_factory=list, max_length=5000)
+    style: str | None = Field(default=None, max_length=80)
+    manuscript: str | None = Field(default=None, max_length=200)
+    html: bool = False
+
+
+class SourceImportRequest(BaseModel):
+    format: Literal["bibtex", "ris", "csl-json", "csl_json", "json"] = "bibtex"
+    content: str = Field(min_length=1, max_length=8_000_000)
+    project_id: str | None = Field(default=None, max_length=200)
+
+
+class SourceMergeRequest(BaseModel):
+    source_ids: list[str] = Field(min_length=2, max_length=50)
+    reason: Literal["exact_identifier", "exact_hash", "user_confirmed_fuzzy"] = "user_confirmed_fuzzy"
+    merge_confidence: float = Field(default=1.0, ge=0, le=1)
+
+
+class SourceUnmergeRequest(BaseModel):
+    merge_record_id: str = Field(min_length=1, max_length=200)
+
+
+class SourceTrashRequest(BaseModel):
+    confirmed: bool = False
+
+
 class ClaimCreateRequest(BaseModel):
     text: str = Field(min_length=1, max_length=1200)
+    project_id: str | None = Field(default=None, max_length=200)
+    claim_type: str = Field(default="", max_length=80)
+    location_type: Literal["note", "draft", "chat", "source", "manuscript"] | None = None
+    location_id: str | None = Field(default=None, max_length=400)
+    status: Literal["draft", "needs_review", "rejected"] = "draft"
+    extraction_mode: Literal["manual", "suggested", "auto_draft"] = "manual"
+    origin_ref: str | None = Field(default=None, max_length=400)
+    origin_quote: str = Field(default="", max_length=12000)
+    extraction_confidence: float = Field(default=0.0, ge=0, le=1)
+
+
+class ClaimPromoteRequest(BaseModel):
+    status: Literal["draft", "supported", "weak", "contradicted", "needs_review", "rejected"]
+    reviewed: bool = False
+
 
 class ClaimDetectRequest(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
+    location_type: Literal["note", "draft", "chat", "source", "manuscript"] | None = None
+    location_id: str | None = Field(default=None, max_length=400)
+    origin_ref: str | None = Field(default=None, max_length=400)
+    auto_create: bool = False
 
 class EvidenceCreateRequest(BaseModel):
     claim_id: str = Field(min_length=1, max_length=200)
@@ -97,6 +144,16 @@ class EvidenceCreateRequest(BaseModel):
     support: str = Field(pattern="^(supported|weak|unsupported)$")
     confidence: float = Field(ge=0, le=1)
     review_status: str = Field(default="needs_review", pattern="^(needs_review|accepted|rejected)$")
+    evidence_type: Literal["quote", "summary", "figure", "table", "method", "result", "contradiction"] = "quote"
+    support_level: str = Field(default="", max_length=40)
+    locator: dict[str, object] = Field(default_factory=dict)
+    quote_text: str = Field(default="", max_length=8000)
+    summary: str = Field(default="", max_length=8000)
+    annotation_id: str | None = None
+    sidecar_record_id: str | None = None
+    sidecar_path: str | None = None
+    asset_id: str | None = None
+    created_by: str = Field(default="user", max_length=40)
 
 
 class AnnotationCreateRequest(BaseModel):

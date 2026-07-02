@@ -39,6 +39,30 @@ from hydra.database.models import (
     TaskLink,
 )
 from hydra.browser_bridge import TRUST_LEVEL_UNTRUSTED
+from hydra.services.citations import (
+    CitationParseError,
+    bibtex_to_csl_json,
+    citation_key as compute_citation_key,
+    csl_json_to_bibtex,
+    csl_json_to_ris,
+    find_duplicates,
+    ris_to_csl_json,
+)
+
+
+def _safe_json(value: Any, fallback: Any) -> Any:
+    if value is None:
+        return fallback
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+CLAIM_SUPPORTED_STATUSES = {"supported", "weak", "contradicted"}
+CLAIM_OPEN_STATUSES = {"draft", "needs_review", "rejected"}
 
 
 SOURCE_DIRECT_REFERENCE_COLUMNS: set[tuple[str, str]] = {
@@ -124,6 +148,16 @@ class Repository:
                 d["metadata_json"] = json.loads(d["metadata_json"] or "{}")
             if model.__tablename__ == "sources" and d.get("metadata_sources_json"):
                 d["metadata_sources"] = json.loads(d["metadata_sources_json"] or "[]")
+            if model.__tablename__ == "sources":
+                d["csl_json"] = _safe_json(d.get("csl_json"), {})
+                d["keywords"] = _safe_json(d.get("keywords"), [])
+                d["identifiers"] = _safe_json(d.get("identifiers"), {})
+            if model.__tablename__ == "claims":
+                d["claim_text"] = d.get("text")
+            if model.__tablename__ == "evidence_links":
+                d["locator"] = _safe_json(d.get("locator"), {})
+                if not d.get("support_level"):
+                    d["support_level"] = d.get("support")
             if model.__tablename__ == "review_items" and d.get("payload_json"):
                 d["payload"] = json.loads(d["payload_json"] or "{}")
         return d
@@ -201,6 +235,34 @@ class Repository:
         arxiv_id = source_data.get("arxiv_id")
         source_type = source_data.get("source_type")
 
+        extended_fields = {
+            "venue": source_data.get("venue"),
+            "publisher": source_data.get("publisher"),
+            "confidence": source_data.get("confidence"),
+            "duplicate_group_id": source_data.get("duplicate_group_id"),
+            "duplicate_status": source_data.get("duplicate_status"),
+            "merge_confidence": source_data.get("merge_confidence"),
+        }
+        json_fields = {
+            "keywords": source_data.get("keywords"),
+            "identifiers": source_data.get("identifiers"),
+            "csl_json": source_data.get("csl_json"),
+        }
+        bibtex = source_data.get("bibtex")
+        ris = source_data.get("ris")
+
+        def _apply_extended(target: Source) -> None:
+            for name, value in extended_fields.items():
+                if value is not None:
+                    setattr(target, name, value)
+            for name, value in json_fields.items():
+                if value is not None:
+                    setattr(target, name, value if isinstance(value, str) else json.dumps(value, sort_keys=True))
+            if bibtex is not None:
+                target.bibtex = bibtex
+            if ris is not None:
+                target.ris = ris
+
         if source:
             source.title = title
             source.authors = authors
@@ -224,6 +286,7 @@ class Repository:
                 source.arxiv_id = arxiv_id
             if source_type is not None:
                 source.source_type = source_type
+            _apply_extended(source)
             source.updated_at = datetime.now(timezone.utc)
         else:
             source = Source(
@@ -243,8 +306,9 @@ class Repository:
                 doi=doi,
                 arxiv_id=arxiv_id,
             )
+            _apply_extended(source)
             self.session.add(source)
-            
+
         await self.session.commit()
         await self.session.refresh(source)
         return self._to_dict(source)
@@ -254,8 +318,33 @@ class Repository:
         return self._to_dict_list(res.all())
 
     # Citation CRUD
-    async def add_citation(self, source_id: str, text: str) -> dict[str, Any]:
-        cit = Citation(source_id=source_id, text=text)
+    async def add_citation(
+        self,
+        source_id: str,
+        text: str,
+        citation_key: str = "",
+        csl_json: Optional[str] = None,
+        doi: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        source = await self.session.get(Source, source_id)
+        resolved_csl = csl_json
+        resolved_key = citation_key
+        if source is not None:
+            if resolved_csl is None:
+                resolved_csl = source.csl_json
+            if not resolved_key:
+                resolved_key = compute_citation_key(_safe_json(source.csl_json, {}))
+            if doi is None:
+                doi = source.doi
+        cit = Citation(
+            source_id=source_id,
+            text=text,
+            citation_key=resolved_key or "",
+            csl_json=resolved_csl or "{}",
+            doi=doi,
+            project_id=project_id,
+        )
         self.session.add(cit)
         await self.session.commit()
         await self.session.refresh(cit)
@@ -266,8 +355,47 @@ class Repository:
         return self._to_dict_list(res.all())
 
     # Claim CRUD
-    async def add_claim(self, text: str, workspace_id: Optional[str] = None) -> dict[str, Any]:
-        claim = Claim(text=text, workspace_id=workspace_id)
+    async def add_claim(
+        self,
+        text: str,
+        workspace_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        claim_type: str = "",
+        location_type: Optional[str] = None,
+        location_id: Optional[str] = None,
+        location_range: Optional[str] = None,
+        status: str = "draft",
+        created_from: str = "manual",
+        notes_path: Optional[str] = None,
+        origin_ref: Optional[str] = None,
+        origin_quote: str = "",
+        extraction_confidence: float = 0.0,
+        extraction_mode: str = "manual",
+        trust_origin: str = "user",
+    ) -> dict[str, Any]:
+        if location_type is not None and location_id is None:
+            raise ValueError("location_id is required when location_type is set")
+        if extraction_mode == "auto_draft" and status not in {"draft", "needs_review"}:
+            raise ValueError("auto_draft claims may only be created at draft/needs_review status")
+        if status in CLAIM_SUPPORTED_STATUSES:
+            raise ValueError("a new claim may not be created at a supported/weak/contradicted status")
+        claim = Claim(
+            text=text,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            claim_type=claim_type,
+            location_type=location_type,
+            location_id=location_id,
+            location_range=location_range,
+            status=status,
+            created_from=created_from,
+            notes_path=notes_path,
+            origin_ref=origin_ref,
+            origin_quote=origin_quote,
+            extraction_confidence=extraction_confidence,
+            extraction_mode=extraction_mode,
+            trust_origin=trust_origin,
+        )
         self.session.add(claim)
         await self.session.commit()
         await self.session.refresh(claim)
@@ -291,20 +419,84 @@ class Repository:
         confidence: float,
         review_status: str = "needs_review",
         citation_id: Optional[str] = None,
+        asset_id: Optional[str] = None,
+        annotation_id: Optional[str] = None,
+        sidecar_path: Optional[str] = None,
+        sidecar_record_id: Optional[str] = None,
+        evidence_type: str = "quote",
+        locator: Any = None,
+        quote_text: str = "",
+        summary: str = "",
+        support_level: str = "",
+        created_by: str = "user",
     ) -> dict[str, Any]:
         ev = EvidenceLink(
             claim_id=claim_id,
             source_id=source_id,
             passage=passage,
             support=support,
+            support_level=support_level or support,
             confidence=confidence,
             review_status=review_status,
             citation_id=citation_id,
+            asset_id=asset_id,
+            annotation_id=annotation_id,
+            sidecar_path=sidecar_path,
+            sidecar_record_id=sidecar_record_id,
+            evidence_type=evidence_type,
+            locator=locator if isinstance(locator, str) else json.dumps(locator or {}, sort_keys=True),
+            quote_text=quote_text or passage,
+            summary=summary,
+            created_by=created_by,
         )
         self.session.add(ev)
         await self.session.commit()
         await self.session.refresh(ev)
         return self._to_dict(ev)
+
+    async def promote_claim(self, claim_id: str, status: str, reviewed: bool = False) -> dict[str, Any]:
+        """Validate the evidence-required status-promotion rule (HL-CITE-09).
+
+        A claim may only reach ``supported``/``weak``/``contradicted`` with at
+        least one linked evidence record AND an explicit review; otherwise the
+        claim keeps its prior status and a ``ValueError`` is raised.
+        """
+        claim = await self.session.get(Claim, claim_id)
+        if claim is None:
+            raise ValueError("claim not found")
+        if status in CLAIM_SUPPORTED_STATUSES:
+            evidence = (await self.session.exec(select(EvidenceLink).where(EvidenceLink.claim_id == claim_id))).all()
+            if not evidence:
+                raise ValueError("evidence and review are required before a claim can be supported/weak/contradicted")
+            if not reviewed:
+                raise ValueError("a review step is required before a claim can be supported/weak/contradicted")
+            if claim.link_state == "target_trashed":
+                raise ValueError("a claim referencing a trashed target cannot be promoted")
+        claim.status = status
+        claim.updated_at = datetime.now(timezone.utc)
+        self.session.add(claim)
+        await self.session.commit()
+        await self.session.refresh(claim)
+        return self._to_dict(claim)
+
+    async def resolve_claim_location(self, location_type: Optional[str], location_id: Optional[str]) -> dict[str, Any]:
+        """Section 32.2 resolver: return the live target or a typed not-found."""
+        if not location_type or not location_id:
+            return {"resolved": False, "reason": "unset", "location_type": location_type, "location_id": location_id}
+        model_map = {
+            "source": Source,
+            "note": Note,
+            "draft": Note,
+            "chat": Chat,
+            "manuscript": Note,
+        }
+        model = model_map.get(location_type)
+        if model is None:
+            return {"resolved": False, "reason": "unknown-location-type", "location_type": location_type, "location_id": location_id}
+        target = await self.session.get(model, location_id)
+        if target is None:
+            return {"resolved": False, "reason": "not-found", "location_type": location_type, "location_id": location_id}
+        return {"resolved": True, "location_type": location_type, "location_id": location_id, "target": self._to_dict(target)}
 
     async def list_evidence(self) -> list[dict[str, Any]]:
         # Fetch evidence links joined with sources and claims
@@ -919,6 +1111,7 @@ class Repository:
         self.session.add(record)
         await self.session.flush()
 
+        self._merge_repoint_journal: list[dict[str, str]] = []
         for duplicate in merged:
             old_id = duplicate.id
             await self._repoint_source_references(old_id, survivor.id)
@@ -942,16 +1135,76 @@ class Repository:
                 await self.session.rollback()
                 raise RuntimeError(f"dangling references remain for {duplicate_id}")
 
+        record.repoint_log_json = json.dumps(getattr(self, "_merge_repoint_journal", []))
+        self.session.add(record)
         await self.session.commit()
         return {"survivor_id": survivor.id, "merged_ids": [s.id for s in merged], "merge_record_id": record.id}
 
+    async def unmerge_sources(self, merge_record_id: str) -> dict[str, Any]:
+        """Reverse a merge from its recoverable record (HL-REFINT-02).
+
+        Restores merged source ids, re-splits every unioned reference back to
+        its original owner using the repoint journal, and removes the
+        tombstones for the reversed record.
+        """
+        record = await self.session.get(SourceMergeRecord, merge_record_id)
+        if record is None:
+            raise ValueError("merge record not found")
+        if record.reversed:
+            raise ValueError("merge already reversed")
+        merged_ids = json.loads(record.merged_ids_json or "[]")
+        journal = json.loads(record.repoint_log_json or "[]")
+
+        # Restore references from the survivor back to each original merged id.
+        for entry in journal:
+            key_direct = (entry["table"], entry["column"])
+            key_poly = tuple(entry.get("poly_key")) if entry.get("poly_key") else None
+            if key_direct in _SOURCE_DIRECT_MODELS:
+                model, _column = _SOURCE_DIRECT_MODELS[key_direct]
+                row = await self.session.get(model, entry["pk"])
+                if row is not None and getattr(row, entry["column"]) == record.survivor_id:
+                    setattr(row, entry["column"], entry["old_id"])
+                    self.session.add(row)
+            elif key_poly in _SOURCE_POLYMORPHIC_MODELS:
+                model, _type_column, _id_column = _SOURCE_POLYMORPHIC_MODELS[key_poly]
+                row = await self.session.get(model, entry["pk"])
+                if row is not None and getattr(row, entry["column"]) == record.survivor_id:
+                    setattr(row, entry["column"], entry["old_id"])
+                    self.session.add(row)
+
+        for old_id in merged_ids:
+            source = await self.session.get(Source, old_id)
+            if source is not None:
+                source.trashed = False
+                source.merged_into_source_id = None
+                source.link_state = "live"
+                self.session.add(source)
+            tombstone = await self.session.get(SourceTombstone, old_id)
+            if tombstone is not None:
+                await self.session.delete(tombstone)
+
+        record.reversed = True
+        self.session.add(record)
+        await self.session.commit()
+        return {"reversed": True, "restored_ids": merged_ids, "survivor_id": record.survivor_id}
+
     async def _repoint_source_references(self, old_id: str, survivor_id: str) -> None:
+        journal = getattr(self, "_merge_repoint_journal", None)
         for table_name, column_name in SOURCE_DIRECT_REFERENCE_COLUMNS:
             model, column = _SOURCE_DIRECT_MODELS[(table_name, column_name)]
             rows = await self.session.exec(select(model).where(column == old_id))
             for row in rows.all():
                 setattr(row, column_name, survivor_id)
                 self.session.add(row)
+                if journal is not None:
+                    journal.append(
+                        {
+                            "table": table_name,
+                            "column": column_name,
+                            "pk": self._primary_key(row),
+                            "old_id": old_id,
+                        }
+                    )
 
         for table_name, type_column_name, type_value, id_column_name in SOURCE_POLYMORPHIC_REFERENCE_COLUMNS:
             model, type_column, id_column = _SOURCE_POLYMORPHIC_MODELS[
@@ -961,6 +1214,20 @@ class Repository:
             for row in rows.all():
                 setattr(row, id_column_name, survivor_id)
                 self.session.add(row)
+                if journal is not None:
+                    journal.append(
+                        {
+                            "table": table_name,
+                            "column": id_column_name,
+                            "pk": self._primary_key(row),
+                            "old_id": old_id,
+                            "poly_key": [table_name, type_column_name, type_value, id_column_name],
+                        }
+                    )
+
+    @staticmethod
+    def _primary_key(row: Any) -> str:
+        return str(getattr(row, "id", None) or getattr(row, "sidecar_record_id", None))
 
     async def count_references_to_source(self, source_id: str) -> int:
         count = 0
@@ -1037,6 +1304,244 @@ class Repository:
             query = query.where(ReviewItem.item_type == item_type)
         res = await self.session.exec(query)
         return self._to_dict_list(res.all())
+
+    # --- Citation import/export (HL-CITE-01, HL-CITE-02) ---------------------
+    def _source_from_csl(self, item: dict[str, Any], project_id: Optional[str]) -> dict[str, Any]:
+        issued = item.get("issued") or {}
+        parts = issued.get("date-parts") if isinstance(issued, dict) else None
+        year = str(parts[0][0]) if parts and parts[0] else ""
+        authors = []
+        for person in item.get("author") or []:
+            if isinstance(person, dict):
+                authors.append(", ".join(part for part in (person.get("family"), person.get("given")) if part))
+            else:
+                authors.append(str(person))
+        identifiers = {}
+        if item.get("DOI"):
+            identifiers["doi"] = item["DOI"]
+        arxiv_id = None
+        raw_ids = item.get("identifiers")
+        if isinstance(raw_ids, dict):
+            identifiers.update({str(k): str(v) for k, v in raw_ids.items()})
+            arxiv_id = raw_ids.get("arxiv")
+        stable_id = self._stable_source_id(item)
+        return {
+            "id": stable_id,
+            "project_id": project_id,
+            "title": item.get("title") or "Untitled source",
+            "authors": "; ".join(a for a in authors if a),
+            "year": year,
+            "venue": item.get("container-title") or "",
+            "publisher": item.get("publisher") or "",
+            "url": item.get("URL") or "",
+            "abstract": item.get("abstract") or "",
+            "doi": item.get("DOI"),
+            "arxiv_id": arxiv_id,
+            "kind": "paper",
+            "source_type": item.get("type") or "article-journal",
+            "keywords": [k.strip() for k in str(item.get("keyword") or "").split(",") if k.strip()],
+            "identifiers": identifiers,
+            "csl_json": json.dumps({**item, "id": stable_id}, sort_keys=True),
+            "bibtex": csl_json_to_bibtex([{**item, "id": stable_id}]),
+            "ris": csl_json_to_ris([{**item, "id": stable_id}]),
+            "trust_origin": "user",
+        }
+
+    @staticmethod
+    def _stable_source_id(item: dict[str, Any]) -> str:
+        for key in ("DOI", "URL"):
+            if item.get(key):
+                digest = uuid.uuid5(uuid.NAMESPACE_URL, str(item[key]).lower()).hex[:16]
+                return f"src_{digest}"
+        seed = (str(item.get("title") or "")).lower() + str(item.get("issued") or "")
+        return f"src_{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex[:16]}"
+
+    async def import_sources(self, text: str, fmt: str, project_id: Optional[str] = None) -> dict[str, Any]:
+        """Import BibTeX/RIS/CSL-JSON into sources. csl_json is canonical.
+
+        Parsing happens before any DB write, so a malformed payload raises
+        :class:`CitationParseError` and leaves existing records untouched
+        (HL-CITE-01, HL-CITE-13). No Zotero/RDF path is used (HL-CITE-02).
+        """
+        fmt = fmt.lower()
+        if fmt in {"bibtex", "bib"}:
+            items = bibtex_to_csl_json(text)
+        elif fmt == "ris":
+            items = ris_to_csl_json(text)
+        elif fmt in {"csl-json", "csl_json", "csljson", "json"}:
+            parsed = _safe_json(text, None)
+            if parsed is None:
+                raise CitationParseError("CSL JSON payload could not be parsed.")
+            items = parsed if isinstance(parsed, list) else [parsed]
+        else:
+            raise CitationParseError(f"Unsupported import format: {fmt}")
+
+        imported: list[dict[str, Any]] = []
+        for item in items:
+            imported.append(await self.upsert_source(self._source_from_csl(item, project_id)))
+        return {"imported": imported, "count": len(imported), "format": fmt}
+
+    async def export_sources(self, fmt: str, source_ids: Optional[list[str]] = None) -> str:
+        fmt = fmt.lower()
+        sources = await self.list_sources()
+        if source_ids is not None:
+            wanted = set(source_ids)
+            sources = [s for s in sources if s["id"] in wanted]
+        items = []
+        for source in sources:
+            csl = source.get("csl_json")
+            if isinstance(csl, dict) and csl:
+                items.append(csl)
+            else:
+                items.append(
+                    {
+                        "id": source["id"],
+                        "type": source.get("source_type") or "article-journal",
+                        "title": source.get("title"),
+                        "author": [{"family": a.strip()} for a in str(source.get("authors") or "").split(";") if a.strip()],
+                    }
+                )
+        if fmt in {"bibtex", "bib"}:
+            return csl_json_to_bibtex(items)
+        if fmt == "ris":
+            return csl_json_to_ris(items)
+        if fmt in {"csl-json", "csl_json", "csljson", "json"}:
+            return json.dumps(items, sort_keys=True, indent=2)
+        raise CitationParseError(f"Unsupported export format: {fmt}")
+
+    # --- Deterministic key dedupe (HL-CITE-03) ------------------------------
+    async def dedupe_by_citation_key(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
+        sources = await self.list_sources()
+        live = [s for s in sources if not s.get("trashed") and not s.get("merged_into_source_id")]
+        if project_id:
+            live = [s for s in live if s.get("project_id") in (None, project_id)]
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for source in live:
+            csl = source.get("csl_json") if isinstance(source.get("csl_json"), dict) else {}
+            if not csl:
+                csl = {
+                    "title": source.get("title"),
+                    "issued": {"date-parts": [[int(str(source.get("year")))]]} if str(source.get("year") or "").isdigit() else {},
+                    "author": [{"family": a.strip()} for a in str(source.get("authors") or "").split(";") if a.strip()],
+                }
+            key = compute_citation_key(csl)
+            groups.setdefault(key, []).append(source)
+
+        merges: list[dict[str, Any]] = []
+        for key, members in groups.items():
+            if len(members) < 2:
+                continue
+            union_sources: list[str] = []
+            for member in members:
+                union_sources.extend(member.get("metadata_sources") or [])
+            result = await self.merge_sources([m["id"] for m in members], reason="exact_identifier")
+            survivor = await self.session.get(Source, result["survivor_id"])
+            if survivor is not None and union_sources:
+                existing = json.loads(survivor.metadata_sources_json or "[]")
+                merged_provenance = list(dict.fromkeys([*existing, *union_sources]))
+                survivor.metadata_sources_json = json.dumps(merged_provenance, sort_keys=True)
+                self.session.add(survivor)
+                await self.session.commit()
+            merges.append({"citation_key": key, **result})
+        return merges
+
+    # --- Confidence-based duplicate detection (HL-CITE-04, HL-CITE-12) -------
+    async def detect_duplicates(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
+        sources = await self.list_sources()
+        if project_id:
+            sources = [s for s in sources if s.get("project_id") in (None, project_id)]
+        verdicts = find_duplicates(sources)
+        for verdict in verdicts:
+            group_id = f"dupgrp_{uuid.uuid5(uuid.NAMESPACE_URL, verdict['left_id'] + verdict['right_id']).hex[:12]}"
+            left = await self.session.get(Source, verdict["left_id"])
+            right = await self.session.get(Source, verdict["right_id"])
+            for source in (left, right):
+                if source is None:
+                    continue
+                source.duplicate_group_id = group_id
+                source.duplicate_status = verdict["status"]
+                source.merge_confidence = verdict["confidence"]
+                self.session.add(source)
+            if verdict["status"] == "needs_review":
+                existing = (
+                    await self.session.exec(
+                        select(ReviewItem).where(
+                            ReviewItem.item_type == "duplicate-merge-proposal",
+                            ReviewItem.origin_id == verdict["left_id"],
+                            ReviewItem.target_id == verdict["right_id"],
+                        )
+                    )
+                ).first()
+                if existing is None:
+                    self.session.add(
+                        ReviewItem(
+                            project_id=project_id,
+                            item_type="duplicate-merge-proposal",
+                            title="Confirm possible duplicate sources",
+                            summary=f"Two sources look like duplicates ({verdict['confidence']:.0%} similar). Confirm before merge.",
+                            origin_type="source",
+                            origin_id=verdict["left_id"],
+                            target_type="source",
+                            target_id=verdict["right_id"],
+                            payload_json=json.dumps(verdict, sort_keys=True),
+                        )
+                    )
+        await self.session.commit()
+        return verdicts
+
+    # --- Referential-integrity scan (HL-REFINT-04) --------------------------
+    async def scan_referential_integrity(self, project_id: Optional[str] = None) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+
+        claims = (await self.session.exec(select(Claim))).all()
+        for claim in claims:
+            if not claim.location_type or not claim.location_id:
+                continue
+            resolution = await self.resolve_claim_location(claim.location_type, claim.location_id)
+            if not resolution["resolved"]:
+                findings.append(await self._surface_broken_link("claim", claim.id, claim.location_type, claim.location_id, "unresolved claim.location_id"))
+
+        evidence_rows = (await self.session.exec(select(EvidenceLink))).all()
+        for evidence in evidence_rows:
+            source = await self.session.get(Source, evidence.source_id)
+            if source is None or source.trashed:
+                findings.append(await self._surface_broken_link("evidence", evidence.id, "source", evidence.source_id, "evidence points at a missing/trashed source"))
+            if evidence.citation_id and await self.session.get(Citation, evidence.citation_id) is None:
+                findings.append(await self._surface_broken_link("evidence", evidence.id, "citation", evidence.citation_id, "evidence points at a missing citation"))
+
+        citations = (await self.session.exec(select(Citation))).all()
+        for citation in citations:
+            if await self.session.get(Source, citation.source_id) is None:
+                findings.append(await self._surface_broken_link("citation", citation.id, "source", citation.source_id, "citation points at a missing source"))
+
+        return findings
+
+    async def _surface_broken_link(self, origin_type: str, origin_id: str, target_type: str, target_id: str, summary: str) -> dict[str, Any]:
+        existing = (
+            await self.session.exec(
+                select(ReviewItem).where(
+                    ReviewItem.item_type == "broken-link",
+                    ReviewItem.origin_type == origin_type,
+                    ReviewItem.origin_id == origin_id,
+                    ReviewItem.target_id == target_id,
+                )
+            )
+        ).first()
+        if existing is None:
+            self.session.add(
+                ReviewItem(
+                    item_type="broken-link",
+                    title=f"Broken {origin_type} link",
+                    summary=summary,
+                    origin_type=origin_type,
+                    origin_id=origin_id,
+                    target_type=target_type,
+                    target_id=target_id,
+                    payload_json=json.dumps({"origin_type": origin_type, "origin_id": origin_id, "target_type": target_type, "target_id": target_id}, sort_keys=True),
+                )
+            )
+            await self.session.commit()
+        return {"origin_type": origin_type, "origin_id": origin_id, "target_type": target_type, "target_id": target_id, "summary": summary}
 
     async def evaluate_index_versions(self, current_index_version: int, current_extraction_version: int) -> list[dict[str, str]]:
         entries = await self.session.exec(select(LexicalIndexEntry))
