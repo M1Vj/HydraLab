@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import platform
+import sys
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -69,11 +71,43 @@ def write_updater_settings(
     return settings
 
 
+def _updater_target() -> str:
+    if sys.platform == "darwin":
+        return "darwin"
+    if sys.platform.startswith("win"):
+        return "windows"
+    return "linux"
+
+
+def _updater_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "aarch64"
+    if machine in {"x86_64", "amd64"}:
+        return "x86_64"
+    return machine or "x86_64"
+
+
+def updater_current_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("hydra-research-assistant")
+    except Exception:
+        return "0.0.0"
+
+
 def channel_feed_url(channel: str) -> str:
     if channel not in VALID_UPDATE_CHANNELS:
         allowed = ", ".join(VALID_UPDATE_CHANNELS)
         raise SettingsValidationError(f"Update channel must be one of {allowed}; got {channel!r}")
-    return f"https://updates.hydralab.local/{channel}/{{target}}/{{arch}}/{{current_version}}"
+    # Substitute the Tauri-style placeholders: this URL is fetched server-side by
+    # httpx, which (unlike the Tauri updater plugin) does not expand {{target}} /
+    # {{arch}} / {{current_version}}, so a literal-brace URL would never resolve.
+    return (
+        f"https://updates.hydralab.local/{channel}/"
+        f"{_updater_target()}/{_updater_arch()}/{updater_current_version()}"
+    )
 
 
 async def check_for_updates(

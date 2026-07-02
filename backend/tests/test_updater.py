@@ -14,9 +14,11 @@ from hydra.settings.toml_config import SettingsValidationError, default_settings
 from hydra.updater.activity import GitOperationTracker, WriteOperationTracker
 from hydra.updater.flow import (
     apply_update_without_policy,
+    channel_feed_url,
     check_for_updates,
     install_update,
     read_updater_settings,
+    updater_current_version,
     write_updater_settings,
 )
 from hydra.updater.guard import ActiveWorkGuard
@@ -213,6 +215,15 @@ async def test_packaged_auto_check_attempts_network_when_enabled():
     assert result.channel == "preview"
     assert len(client.calls) == 1
     assert "/preview/" in client.calls[0]
+
+
+def test_channel_feed_url_substitutes_tauri_placeholders():
+    url = channel_feed_url("stable")
+    # No literal Tauri placeholders may survive: httpx would fetch them verbatim.
+    assert "{{" not in url and "}}" not in url
+    assert "{target}" not in url and "{arch}" not in url and "{current_version}" not in url
+    assert "/stable/" in url
+    assert url.endswith("/" + updater_current_version())
 
 
 @pytest.mark.asyncio
