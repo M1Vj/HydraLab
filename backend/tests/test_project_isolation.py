@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from hydra.database.models import Source
+from hydra.database.models import Source, Task
 from hydra.database.repository import Repository
 
 
@@ -122,6 +122,23 @@ async def test_list_sources_excludes_trashed_by_default(session):
 
     with_trashed = {row["id"] for row in await repo.list_sources(project_id="default", include_trashed=True)}
     assert with_trashed == {live["id"], trashed["id"]}
+
+
+@pytest.mark.asyncio
+async def test_legacy_task_column_label_is_normalized_on_read(session):
+    # A pre-fix DB may hold a display label ("To Do") in column_name; the board
+    # only renders the four canonical ids, so an un-normalized label would orphan
+    # the task. Read-time normalization repairs it without a migration.
+    repo = Repository(session)
+    session.add(Task(id="task-legacy", title="Legacy", column_name="To Do", project_id="default"))
+    session.add(Task(id="task-bogus", title="Bogus", column_name="whatever", project_id="default"))
+    await session.commit()
+
+    tasks = {t["id"]: t for t in await repo.list_tasks(project_id="default")}
+    assert tasks["task-legacy"]["column"] == "to_do"
+    assert tasks["task-legacy"]["status"] == "to_do"
+    # An unrecognizable value falls back to the first column rather than vanishing.
+    assert tasks["task-bogus"]["column"] == "to_do"
 
 
 @pytest.mark.asyncio

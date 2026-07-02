@@ -121,7 +121,7 @@ def test_settings_persist_without_storing_secret_values_and_export_workspace(tmp
     assert settings[0]["model"] == "gpt-5.1"
     assert "sk-secret-value" not in json.dumps(settings)
 
-    client.post("/api/tasks", json={"title": "Trace task", "column": "Review"})
+    client.post("/api/tasks", json={"title": "Trace task", "column": "review"})
     export = client.get("/api/export/workspace").json()
     assert export["provider_settings"][0]["api_key_ref"] == "env:OPENAI_API_KEY"
     assert export["tasks"][0]["title"] == "Trace task"

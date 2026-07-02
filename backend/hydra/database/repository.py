@@ -68,6 +68,21 @@ def _project_scope(column, project_id: str):
     return func.coalesce(column, DEFAULT_PROJECT_ID) == project_id
 
 
+# Canonical Kanban columns (mirror apps/web KANBAN_COLUMNS + schemas.TaskColumn).
+CANONICAL_TASK_COLUMNS = ("to_do", "in_progress", "review", "done")
+
+
+def _normalize_task_column(value: Any) -> str:
+    # A task whose column is not one of the four rendered ids is invisible on the
+    # board. New writes are guarded by the schema Literal, but legacy DBs may
+    # already hold display labels (e.g. "To Do" from a shipped bug); repair them
+    # on read so no task is orphaned.
+    if value in CANONICAL_TASK_COLUMNS:
+        return value
+    slug = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return slug if slug in CANONICAL_TASK_COLUMNS else "to_do"
+
+
 def _reject_raw_secret_values(node: Any) -> None:
     """Reject secret-named keys carrying raw values in an MCP connection dict.
 
@@ -179,7 +194,7 @@ class Repository:
         if hasattr(model, "__tablename__"):
             if model.__tablename__ == "tasks":
                 if "column_name" in d:
-                    d["column"] = d.pop("column_name")
+                    d["column"] = _normalize_task_column(d.pop("column_name"))
                 d["status"] = d.get("column")
                 if isinstance(d.get("tags"), str):
                     try:
@@ -1576,7 +1591,7 @@ class Repository:
             data.setdefault("locator", "{}")
             return data
         if entity == "task":
-            data.setdefault("column_name", data.pop("status", "To Do"))
+            data.setdefault("column_name", data.pop("status", "to_do"))
             data.setdefault("title", "Untitled task")
             return data
         if entity == "chat":

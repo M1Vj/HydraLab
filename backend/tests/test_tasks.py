@@ -189,6 +189,31 @@ def test_hl_ux_08_trash_note_flags_link_and_restore_reattaches(tmp_path, monkeyp
     assert links_after[0]["link_state"] == "live"
 
 
+# @HL-UX-01 (column validation) ---------------------------------------------
+def test_unknown_column_is_rejected_not_silently_orphaned(tmp_path, monkeypatch):
+    """An unknown column would leave a task in no rendered board column —
+    invisible to the user. The API must reject it at the schema boundary."""
+    client = _client(tmp_path, monkeypatch)
+
+    # Every canonical column is accepted.
+    for column in ("to_do", "in_progress", "review", "done"):
+        created = client.post("/api/tasks", json={"title": f"task {column}", "column": column})
+        assert created.status_code == 200, created.text
+        assert created.json()["column"] == column
+
+    # A bogus column is rejected on create.
+    bad_create = client.post("/api/tasks", json={"title": "orphan", "column": "backlog"})
+    assert bad_create.status_code == 422
+
+    # A bogus column is rejected on move (PATCH/PUT), so a live task can never be
+    # dragged into a non-existent column.
+    task_id = client.post("/api/tasks", json={"title": "movable"}).json()["id"]
+    assert client.patch(f"/api/tasks/{task_id}", json={"column": "archived"}).status_code == 422
+    assert client.put(f"/api/tasks/{task_id}", json={"column": "archived"}).status_code == 422
+    # The task stays where it was — never orphaned by the rejected move.
+    assert client.patch(f"/api/tasks/{task_id}", json={"column": "done"}).json()["column"] == "done"
+
+
 # classification unit --------------------------------------------------------
 def test_requires_review_classification():
     assert requires_review("deadline", "user") is True

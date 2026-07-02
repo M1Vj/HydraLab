@@ -167,9 +167,14 @@ TASK_TARGET_TYPES = (
 TASK_LINK_ROLES = ("about", "blocks", "derived_from", "follow_up", "evidence_for", "reviews")
 
 
+# Canonical kanban columns (mirror apps/web KANBAN_COLUMNS). An unknown column
+# would leave a task in no rendered column — invisible on the board.
+TaskColumn = Literal["to_do", "in_progress", "review", "done"]
+
+
 class TaskCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
-    column: str = "to_do"
+    column: TaskColumn = "to_do"
     detail: str = ""
     progress: int = Field(default=0, ge=0, le=100)
     phase_indicator: str = ""
@@ -182,7 +187,7 @@ class TaskCreateRequest(BaseModel):
 
 class TaskUpdateRequest(BaseModel):
     title: str | None = None
-    column: str | None = None
+    column: TaskColumn | None = None
     detail: str | None = None
     progress: int | None = Field(default=None, ge=0, le=100)
     phase_indicator: str | None = None

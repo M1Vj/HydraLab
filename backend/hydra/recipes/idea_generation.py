@@ -1208,7 +1208,7 @@ class IdeaPromotionService:
         if target_kind == "task":
             task = await self.repo.add_task(
                 title=title,
-                column="To Do",
+                column="to_do",
                 detail=detail,
                 project_id=item.project_id,
                 origin="assistant",

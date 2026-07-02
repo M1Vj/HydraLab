@@ -64,9 +64,9 @@ def test_sources_notes_tasks_paper_and_bibliography_flow(tmp_path, monkeypatch):
     notes = client.get("/api/notes", params={"query": "exploration"}).json()["notes"]
     assert notes[0]["id"] == note["id"]
 
-    task = client.post("/api/tasks", json={"title": "Review paper", "column": "To Do"}).json()
-    moved = client.patch(f"/api/tasks/{task['id']}", json={"column": "Done", "progress": 100}).json()
-    assert moved["column"] == "Done"
+    task = client.post("/api/tasks", json={"title": "Review paper", "column": "to_do"}).json()
+    moved = client.patch(f"/api/tasks/{task['id']}", json={"column": "done", "progress": 100}).json()
+    assert moved["column"] == "done"
     assert moved["progress"] == 100
 
     bib = client.get("/api/export/bibliography", params={"style": "bibtex"}).text
