@@ -8,13 +8,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.agents.approvals import ApprovalService
 from hydra.agents.contracts import ApprovalStatus
 from hydra.agents.policy import TRUST_UNTRUSTED
 from hydra.agents.runs import RunBudget, RunRepository
-from hydra.database.models import AgentApproval, AgentRun
+from hydra.database.models import AgentApproval, AgentRun, LexicalIndexEntry
 from hydra.database.repository import Repository
 from hydra.orchestrator.run import RunConfig, RunExecutionResult, RunStateMachine
 from hydra.orchestrator.stages import StageContext, StageEnum, StageResult
@@ -63,6 +64,7 @@ class ArtifactStatement:
     citation_ids: list[str] = field(default_factory=list)
     locators: list[dict[str, Any]] = field(default_factory=list)
     marker: str = ""
+    chunk_ids: list[str] = field(default_factory=list)
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +73,7 @@ class ArtifactStatement:
             "citation_ids": self.citation_ids,
             "locators": self.locators,
             "marker": self.marker,
+            "chunk_ids": self.chunk_ids,
         }
 
 
@@ -184,6 +187,7 @@ async def execute_literature_review(
     offline_only: bool = False,
     provider_metadata: list[dict[str, Any]] | None = None,
     unsupported_drafts: list[str] | None = None,
+    synthesized_drafts: list[dict[str, Any]] | None = None,
     cancel_after_stage: StageEnum | None = None,
     budget: RunBudget | None = None,
 ) -> LiteratureReviewResult:
@@ -200,9 +204,11 @@ async def execute_literature_review(
         depth=inputs.depth,
     )
     stages = {
-        StageEnum.GENERATE: LiteratureGenerateStage(session, inputs, retrieval_options, unsupported_drafts or []),
+        StageEnum.GENERATE: LiteratureGenerateStage(
+            session, inputs, retrieval_options, unsupported_drafts or [], synthesized_drafts or []
+        ),
         StageEnum.REVIEW: LiteratureReviewStage(),
-        StageEnum.VALIDATE: LiteratureValidateStage(),
+        StageEnum.VALIDATE: LiteratureValidateStage(session),
         StageEnum.CACHE: LiteratureCacheStage(),
     }
     machine = RunStateMachine(
@@ -295,11 +301,13 @@ class LiteratureGenerateStage:
         inputs: LiteratureReviewInput,
         retrieval_options: RetrievalOptions,
         unsupported_drafts: list[str],
+        synthesized_drafts: list[dict[str, Any]] | None = None,
     ) -> None:
         self.session = session
         self.inputs = inputs
         self.retrieval_options = retrieval_options
         self.unsupported_drafts = unsupported_drafts
+        self.synthesized_drafts = synthesized_drafts or []
 
     async def run(self, ctx: StageContext) -> StageResult:
         repo = Repository(self.session)
@@ -312,6 +320,9 @@ class LiteratureGenerateStage:
             options=self.retrieval_options,
         )
         statements = _draft_supported_statements(retrieval.hits)
+        # Synthesized (non-verbatim) claims enter as candidate-supported and must
+        # survive the Validate semantic-support gate against their cited chunk.
+        statements.extend(_synthesized_statements(self.synthesized_drafts))
         ctx.data["literature_inputs"] = {
             "question": self.inputs.question,
             "source_scope": self.inputs.source_scope,
@@ -352,9 +363,26 @@ class LiteratureReviewStage:
 class LiteratureValidateStage:
     id = StageEnum.VALIDATE
 
+    def __init__(self, session: AsyncSession | None = None) -> None:
+        self.session = session
+
     async def run(self, ctx: StageContext) -> StageResult:
-        supported = [item for item in ctx.data.get("supported_statements") or [] if item.source_ids]
-        rejected = [item for item in ctx.data.get("supported_statements") or [] if not item.source_ids]
+        candidates = list(ctx.data.get("supported_statements") or [])
+        chunk_text = await self._chunk_text_by_source(candidates)
+        supported: list[ArtifactStatement] = []
+        rejected: list[ArtifactStatement] = []
+        for item in candidates:
+            if not item.source_ids:
+                rejected.append(item)
+                continue
+            # Semantic support: statement text must be quote-contained-in /
+            # entailed-by the cited chunk text; structural resolution alone is
+            # not enough once real synthesis lands.
+            support = "\n".join(chunk_text.get(source_id, "") for source_id in item.source_ids)
+            if support and not _semantically_supported(item.text, support):
+                rejected.append(item)
+            else:
+                supported.append(item)
         gaps = list(ctx.data.get("review_gaps") or [])
         gaps.extend(ArtifactStatement(text=item.text, marker="[unsupported]") for item in rejected)
         ctx.data["validated_supported"] = supported
@@ -365,6 +393,24 @@ class LiteratureValidateStage:
             payload={"supported_count": len(supported), "gap_count": len(gaps)},
             tokens=8,
         )
+
+    async def _chunk_text_by_source(self, statements: list[ArtifactStatement]) -> dict[str, str]:
+        """Fetch cited chunk text by chunk_id (fallback source_id) for support checks."""
+
+        if self.session is None:
+            return {}
+        chunk_ids = {cid for item in statements for cid in item.chunk_ids if cid}
+        source_ids = {sid for item in statements for sid in item.source_ids if sid}
+        if not chunk_ids and not source_ids:
+            return {}
+        rows = (await self.session.exec(select(LexicalIndexEntry))).all()
+        by_source: dict[str, list[str]] = {}
+        for row in rows:
+            if not row.source_id:
+                continue
+            if row.chunk_id in chunk_ids or row.source_id in source_ids:
+                by_source.setdefault(row.source_id, []).append(row.text or "")
+        return {source_id: "\n".join(texts) for source_id, texts in by_source.items()}
 
 
 class LiteratureCacheStage:
@@ -422,9 +468,59 @@ def _draft_supported_statements(hits: list[LiteratureHit]) -> list[ArtifactState
                 source_ids=[hit.source_id],
                 citation_ids=[hit.citation_id] if hit.citation_id else [],
                 locators=[hit.locator],
+                chunk_ids=[hit.chunk_id] if hit.chunk_id else [],
             )
         )
     return statements
+
+
+def _synthesized_statements(drafts: list[dict[str, Any]]) -> list[ArtifactStatement]:
+    """Build candidate-supported statements from synthesized (non-verbatim) drafts.
+
+    Each draft names the cited source/chunk it claims to rest on; the Validate
+    stage then gates it against the real chunk text (demoting fabrications).
+    """
+
+    statements: list[ArtifactStatement] = []
+    for draft in drafts:
+        text = str(draft.get("text") or "").strip()
+        source_id = str(draft.get("source_id") or "").strip()
+        if not text or not source_id:
+            continue
+        chunk_id = str(draft.get("chunk_id") or "").strip()
+        citation_id = str(draft.get("citation_id") or "").strip()
+        statements.append(
+            ArtifactStatement(
+                text=text,
+                source_ids=[source_id],
+                citation_ids=[citation_id] if citation_id else [],
+                locators=[dict(draft.get("locator") or {})] if draft.get("locator") else [],
+                chunk_ids=[chunk_id] if chunk_id else [],
+            )
+        )
+    return statements
+
+
+def _semantically_supported(statement_text: str, chunk_text: str) -> bool:
+    """Cheap entailment proxy: statement must be quote-contained-in / token-
+    entailed-by the cited chunk text.
+
+    Verbatim drafts (a sentence of the chunk) always pass; a synthesized claim
+    passes only if most of its content tokens appear in the cited chunk.
+    """
+
+    statement = " ".join(str(statement_text or "").lower().split())
+    chunk = " ".join(str(chunk_text or "").lower().split())
+    if not statement or not chunk:
+        return False
+    if statement in chunk:
+        return True
+    statement_tokens = {token for token in re.findall(r"[a-z0-9]+", statement) if len(token) > 2}
+    if not statement_tokens:
+        return statement in chunk
+    chunk_tokens = set(re.findall(r"[a-z0-9]+", chunk))
+    overlap = len(statement_tokens & chunk_tokens) / len(statement_tokens)
+    return overlap >= 0.6
 
 
 def _assemble_artifact(
@@ -504,6 +600,7 @@ def _statement_from_payload(payload: dict[str, Any]) -> ArtifactStatement:
         citation_ids=[str(item) for item in payload.get("citation_ids") or []],
         locators=[dict(item) for item in payload.get("locators") or [] if isinstance(item, dict)],
         marker=str(payload.get("marker") or ""),
+        chunk_ids=[str(item) for item in payload.get("chunk_ids") or []],
     )
 
 

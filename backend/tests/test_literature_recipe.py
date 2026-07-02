@@ -381,3 +381,43 @@ async def test_hl_assist_34_recipe_reads_existing_store_without_source_citation_
         "evidence": len((await session.exec(select(EvidenceLink))).all()),
     }
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_validate_demotes_semantically_unsupported_synthesis(session, tmp_path: Path):
+    ids = await _source_with_citation(session, source_id="src_sem", title="Attention Paper")
+    await _index_entry(
+        session,
+        source_id=ids["source_id"],
+        text="Attention mechanisms reduce path length between distant tokens.",
+        chunk_id="chunk-1",
+    )
+
+    result = await execute_literature_review(
+        session=session,
+        project_root=tmp_path,
+        inputs=LiteratureReviewInput(
+            question="How do attention mechanisms reduce path length between tokens?",
+            source_scope={"kind": "all-project"},
+            depth="standard",
+        ),
+        mode=PASSIVE,
+        # A synthesized claim that cites the chunk but is NOT entailed by it.
+        synthesized_drafts=[
+            {
+                "text": "Completely fabricated unrelated synthesis about migratory zebras.",
+                "source_id": ids["source_id"],
+                "chunk_id": "chunk-1",
+            }
+        ],
+    )
+
+    artifact = result.artifact
+    gap_texts = [statement.text for statement in artifact.sections["Gaps"]]
+    theme_texts = [statement.text for statement in artifact.sections["Themes"]]
+    # The verbatim, chunk-supported statement survives; the fabricated synthesis
+    # is demoted to an [unsupported] gap and never appears as a supported theme.
+    assert artifact.sections["Themes"]
+    assert any("fabricated" in text for text in gap_texts)
+    assert all("fabricated" not in text for text in theme_texts)
+    assert all(statement.marker == "[unsupported]" for statement in artifact.sections["Gaps"])
