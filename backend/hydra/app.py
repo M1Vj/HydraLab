@@ -2437,18 +2437,19 @@ def create_app() -> FastAPI:
     async def project_tree() -> dict[str, object]:
         root = hydra_project_root().resolve()
         nodes = []
-        for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root)).lower()):
+        for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix().lower()):
             relative = path.relative_to(root)
             if is_project_tree_excluded(relative):
                 continue
             stat = path.stat()
+            parent_posix = relative.parent.as_posix()
             nodes.append(
                 {
-                    "id": str(relative),
-                    "path": str(relative),
+                    "id": relative.as_posix(),
+                    "path": relative.as_posix(),
                     "name": path.name,
                     "type": "directory" if path.is_dir() else "file",
-                    "parent": str(relative.parent) if str(relative.parent) != "." else "",
+                    "parent": parent_posix if parent_posix != "." else "",
                     "depth": len(relative.parts) - 1,
                     "size": stat.st_size if path.is_file() else 0,
                     "modified_at": stat.st_mtime,
