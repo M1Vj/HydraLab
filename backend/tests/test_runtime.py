@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from hydra.storage.runtime import BackendRuntime, choose_available_port, choose_bind_host
+from hydra.storage import runtime as runtime_module
 
 
 def _dead_process_fingerprint() -> tuple[int, str | None]:
@@ -160,3 +161,63 @@ def test_hl_core_08_lifespan_writes_and_removes_runtime_files(tmp_path, monkeypa
 
     assert not (tmp_path / "app-data" / "runtime" / "backend.json").exists()
     assert not (tmp_path / "project" / ".hydralab" / "runtime" / "backend.json").exists()
+
+def test_windows_lock_helper_uses_msvcrt_when_fcntl_unavailable(tmp_path, monkeypatch):
+    calls: list[tuple[int, int]] = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(_fileno: int, mode: int, size: int) -> None:
+            calls.append((mode, size))
+
+    monkeypatch.setattr(runtime_module, "fcntl", None)
+    monkeypatch.setattr(runtime_module, "msvcrt", FakeMsvcrt)
+
+    lock_path = tmp_path / "runtime.lock"
+    with lock_path.open("a+") as handle:
+        runtime_module._lock_file_exclusive(handle)
+        runtime_module._unlock_file(handle)
+
+    assert calls == [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)]
+
+def test_windows_process_fingerprint_uses_ctypes_without_crashing(monkeypatch):
+    class FakeFiletime:
+        def __init__(self) -> None:
+            self.dwLowDateTime = 0
+            self.dwHighDateTime = 0
+
+    class FakeKernel32:
+        def OpenProcess(self, _access: int, _inherit: bool, _pid: int) -> int:
+            return 100
+
+        def GetProcessTimes(self, _handle, creation, _exit, _kernel, _user) -> int:
+            creation.dwLowDateTime = 7
+            creation.dwHighDateTime = 3
+            return 1
+
+        def CloseHandle(self, _handle) -> None:
+            pass
+
+    class FakeCtypes:
+        class wintypes:
+            FILETIME = FakeFiletime
+
+        @staticmethod
+        def WinDLL(_name: str, use_last_error: bool = False):
+            return FakeKernel32()
+
+        @staticmethod
+        def byref(value):
+            return value
+
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "ctypes", FakeCtypes)
+
+    assert runtime_module.process_fingerprint(os.getpid()) == f"win32-ctime:{(3 << 32) + 7}"
+
+def test_posix_process_fingerprint_still_returns_value_or_none():
+    fingerprint = runtime_module.process_fingerprint(os.getpid())
+    assert fingerprint is None or isinstance(fingerprint, str)

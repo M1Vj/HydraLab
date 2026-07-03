@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,7 @@ from hydra.autonomy.audit import AuditLedger
 from hydra.autonomy.checkpoints import CheckpointService
 from hydra.autonomy.gate import ActionGate
 from hydra.compute.registry import BackendNotSelectableError, ComputeRegistry, ResolvedBackend
-from hydra.compute.sandbox import LocalSandboxRunner, SandboxProcess, build_default_policy
+from hydra.compute.sandbox import LocalSandboxRunner, SandboxError, SandboxProcess, build_default_policy
 from hydra.database.models import AgentApproval, AgentCheckpoint, ExperimentRun
 from hydra.experiments import models as run_status
 from hydra.experiments.approval import ExperimentExecutionGate
@@ -219,8 +220,13 @@ class ExperimentRunner:
             scratch_dir=scratch,
             limits=resolved.limits,
         )
-        runner = LocalSandboxRunner(policy)  # raises before spawn if policy is None
         run.enforcement = policy.filesystem_network_enforcement
+        try:
+            runner = LocalSandboxRunner(policy, accept_unconfined=self._accept_unconfined(run))
+        except SandboxError as exc:
+            run.reason = str(exc)
+            await self._save(run)
+            raise RunLifecycleError(run.reason) from exc
         run.status = run_status.STATUS_RUNNING
         run.started_at = _utcnow()
         await self._save(run)
@@ -275,6 +281,10 @@ class ExperimentRunner:
         run = await self._get(run_id)
         process = _ACTIVE.get(run_id)
         if process is not None and process.is_alive():
+            if sys.platform == "win32":
+                run.reason = "pause is unsupported on Windows"
+                await self._save(run)
+                raise RunLifecycleError(run.reason)
             import os
             import signal
 
@@ -320,6 +330,10 @@ class ExperimentRunner:
         if isinstance(argv, list) and argv and all(isinstance(part, str) for part in argv):
             return list(argv)
         raise RunLifecycleError("run config has no valid argv vector to execute")
+
+    def _accept_unconfined(self, run: ExperimentRun) -> bool:
+        config = json.loads(run.config_json or "{}")
+        return bool(config.get("accept_unconfined"))
 
     async def _persist_run(self, **kwargs) -> ExperimentRun:
         config = kwargs.pop("config", {})

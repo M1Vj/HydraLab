@@ -90,13 +90,25 @@ class ContextFileMemory:
         if (self.project_root / ".git").exists():
             subprocess.run(["git", "add", PROJECT_CONTEXT_FILE], cwd=self.project_root, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             subprocess.run(
-                ["git", "commit", "-m", f"checkpoint(HYDRA.md): {summary or checkpoint_id}", "--", PROJECT_CONTEXT_FILE],
+                ["git", *self._git_identity_flags(), "commit", "-m", f"checkpoint(HYDRA.md): {summary or checkpoint_id}", "--", PROJECT_CONTEXT_FILE],
                 cwd=self.project_root,
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         return checkpoint_id
+
+    def _git_identity_flags(self) -> list[str]:
+        """Fallback commit identity so HYDRA.md checkpoints record even when the
+        machine has no git identity configured (fresh machine / bare CI)."""
+        def _cfg(key: str) -> str:
+            return subprocess.run(
+                ["git", "config", key], cwd=self.project_root,
+                capture_output=True, text=True, check=False,
+            ).stdout.strip()
+        if _cfg("user.email") and _cfg("user.name"):
+            return []
+        return ["-c", "user.name=HydraLab", "-c", "user.email=hydralab@localhost"]
 
     def list_checkpoints(self, file: str = PROJECT_CONTEXT_FILE) -> list[dict[str, Any]]:
         if file != PROJECT_CONTEXT_FILE:

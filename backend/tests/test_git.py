@@ -5,6 +5,7 @@ guide's ``-k "git and (init or detect)"`` gate selects the init/detect proofs, a
 the destructive proof carries ``console`` so ``-k "console or verify or safe"``
 confirms reset is unreachable from the console.
 """
+import os
 import subprocess
 
 from fastapi.testclient import TestClient
@@ -165,3 +166,30 @@ def test_git_service_rejects_off_list_subcommand(tmp_path):
         raise AssertionError("expected GitError for off-list subcommand")
     except Exception as exc:  # noqa: BLE001
         assert "not allowed" in str(exc)
+
+
+def test_commit_succeeds_without_ambient_git_identity(tmp_path, monkeypatch):
+    # Fresh machine / bare CI runner: no global or system git identity at all.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    service = GitService(tmp_path)
+    service._run(["init"])
+    assert service._identity_flags() == ["-c", "user.name=HydraLab", "-c", "user.email=hydralab@localhost"]
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    result = service.commit("first checkpoint")
+    assert result["committed"] is True
+    author = service._run(["log", "-1", "--pretty=format:%an <%ae>"]).stdout.strip()
+    assert author == "HydraLab <hydralab@localhost>"
+
+
+def test_commit_preserves_configured_identity(tmp_path):
+    service = GitService(tmp_path)
+    service._run(["init"])
+    service._run(["config", "user.email", "me@example.com"])
+    service._run(["config", "user.name", "Me"])
+    assert service._identity_flags() == []
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    service.commit("first")
+    author = service._run(["log", "-1", "--pretty=format:%an <%ae>"]).stdout.strip()
+    assert author == "Me <me@example.com>"

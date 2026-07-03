@@ -5,12 +5,13 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-macOS-lightgrey" alt="macOS">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="macOS | Linux | Windows">
   <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white" alt="TypeScript">
   <img src="https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white" alt="FastAPI">
-  <img src="https://img.shields.io/badge/status-pre--release-orange" alt="Pre-release">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
+  <img src="https://img.shields.io/badge/release-v1.0-brightgreen" alt="Release v1.0">
 </p>
 
 <p align="center">
@@ -75,18 +76,31 @@ Most research tools make you choose: a reference manager *or* an editor *or* a c
 
 ## Getting started
 
-### Homebrew (recommended)
+HydraLab runs on **macOS, Linux, and Windows**. Any install below gives you the `hydralab` command — it starts the local backend, serves the bundled web UI, and prints a `http://127.0.0.1:<port>` URL to open in your browser.
+
+### pipx — every platform (recommended)
+
+[pipx](https://pipx.pypa.io) installs HydraLab into its own isolated environment and puts `hydralab` on your PATH. Requires Python 3.11+.
+
+```bash
+pipx install hydralab
+hydralab --project-root /path/to/your/research-project
+```
+
+Plain `pip install hydralab` works too if you'd rather manage the environment yourself. On Windows, `py -m pipx install hydralab` then `hydralab --project-root C:\path\to\your\research-project`.
+
+### Homebrew — macOS and Linux
 
 ```bash
 brew install M1Vj/hydralab/hydralab
 hydralab --project-root /path/to/your/research-project
 ```
 
-The `hydralab` command starts the local backend and serves the bundled web UI; it prints a `http://127.0.0.1:<port>` URL — open it in your browser. (The first install compiles a few native dependencies, so it can take a few minutes.)
+The first Homebrew install compiles a few native dependencies, so it can take a few minutes.
 
 ### From source (for development)
 
-**Prerequisites:** macOS (Apple Silicon or Intel), Python 3.11+ with [`uv`](https://docs.astral.sh/uv/), and [Bun](https://bun.sh) 1.x. *(Optional: a Rust toolchain for the Tauri desktop shell.)*
+**Prerequisites:** macOS, Linux, or Windows — Python 3.11+ with [`uv`](https://docs.astral.sh/uv/), and [Bun](https://bun.sh) 1.x. *(Optional: a Rust toolchain for the Tauri desktop shell.)*
 
 ```bash
 git clone https://github.com/M1Vj/HydraLab.git
@@ -127,7 +141,7 @@ bun run typecheck                                  # TypeScript type check
 bun run build                                      # production frontend build
 ```
 
-The repository runs a clean CI pipeline on macOS and carries a large test suite spanning the backend and the web app; the four commands above are the local gate for every change.
+The repository runs a clean CI pipeline on macOS, Linux, and Windows, and carries a large test suite spanning the backend and the web app; the four commands above are the local gate for every change.
 
 ## Privacy & trust
 
@@ -148,9 +162,7 @@ HydraLab was built in three phase groups, all implemented on the default branch:
 2. **Assistant / Co-Scientist** — orchestrated assistant workflows, MCP tools, research recipes, approvals, and traceable agent runs.
 3. **Full Autonomy** — closed-loop autonomy safety, sandboxed experiments, the reproducibility ledger, real-time collaboration, mobile/tablet layouts, and the packaged macOS app scaffold.
 
-**Current status — pre-release, macOS-first.** The packaged macOS app is scaffolded but not yet signed, notarized, or distributed, and MCP currently runs over the HTTP transport only.
-
-Homebrew distribution is live (see [Homebrew](#homebrew-recommended) above).
+**Current status — 1.0, cross-platform.** HydraLab runs on macOS, Linux, and Windows, and installs from PyPI (`pipx install hydralab`) on all three or from Homebrew on macOS and Linux. The Tauri desktop bundles (dmg, NSIS, deb/AppImage) are built but not yet code-signed or notarized, and MCP currently runs over the HTTP transport only. Sandboxed experiment execution uses macOS Seatbelt or Linux `bwrap` where available and degrades to a recorded best-effort tier otherwise.
 
 **Phase 4 (planned, not yet implemented):** open-platform interoperability and a HydraLab MCP server.
 

@@ -26,9 +26,11 @@ from hydra.compute.sandbox import (
     LocalSandboxRunner,
     SandboxError,
     SandboxPolicy,
+    SandboxProcess,
     build_default_policy,
     is_secret_name,
 )
+from hydra.compute import sandbox as sandbox_module
 from hydra.database.repository import Repository
 from hydra.experiments import models as run_status
 from hydra.experiments.logs import RunLogStore, apply_cap
@@ -130,6 +132,120 @@ def test_cancel_leaves_no_orphan_and_removes_scratch(tmp_path):
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     assert not policy.scratch_dir.exists()
+
+def test_windows_unconfined_requires_opt_in_and_spawn_uses_windows_process_group(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    class FakePopen:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakePopen()
+
+    monkeypatch.setattr(sandbox_module.sys, "platform", "win32")
+    monkeypatch.setattr(sandbox_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(sandbox_module.subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
+    monkeypatch.setattr(sandbox_module.subprocess, "Popen", fake_popen)
+
+    policy = build_default_policy(workspace_root=tmp_path, scratch_dir=tmp_path / "scratch")
+    assert policy.filesystem_network_enforcement == "unconfined"
+
+    with pytest.raises(SandboxError, match="explicit opt-in"):
+        LocalSandboxRunner(policy)
+
+    process = LocalSandboxRunner(policy, accept_unconfined=True).spawn(["python", "-c", "pass"])
+
+    assert process.pid == 4242
+    assert captured["args"][0] == ["python", "-c", "pass"]
+    assert captured["kwargs"]["creationflags"] == 512
+    assert "preexec_fn" not in captured["kwargs"]
+    assert "start_new_session" not in captured["kwargs"]
+
+def test_windows_terminate_uses_taskkill_and_popen_kill(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+
+    class FakePopen:
+        pid = 4343
+        killed = False
+
+        def poll(self):
+            return None if not self.killed else -9
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return -9
+
+    def fake_run(cmd, check=False, stdout=None, stderr=None):
+        calls.append(cmd)
+
+    monkeypatch.setattr(sandbox_module.sys, "platform", "win32")
+    monkeypatch.setattr(sandbox_module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(sandbox_module.subprocess, "run", fake_run)
+
+    policy = build_default_policy(workspace_root=tmp_path, scratch_dir=tmp_path / "scratch")
+    policy.scratch_dir.mkdir(parents=True)
+    popen = FakePopen()
+    process = SandboxProcess(popen, policy=policy, started=0)
+
+    process.terminate()
+
+    assert calls == [["taskkill", "/T", "/F", "/PID", "4343"]]
+    assert popen.killed is True
+    assert not policy.scratch_dir.exists()
+
+def test_linux_bwrap_policy_wraps_argv_with_network_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox_module.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox_module, "_bwrap_usable", lambda: True)
+
+    policy = build_default_policy(workspace_root=tmp_path, scratch_dir=tmp_path / "scratch", network="none")
+    assert policy.filesystem_network_enforcement == "bwrap"
+
+    wrapped = LocalSandboxRunner(policy)._wrap(["python", "train.py"])
+
+    assert wrapped[:10] == [
+        "bwrap",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--bind",
+        str(policy.scratch_dir),
+        str(policy.scratch_dir),
+        "--chdir",
+    ]
+    assert wrapped[10] == str(policy.scratch_dir)
+    assert "--unshare-net" in wrapped
+    assert wrapped[-2:] == ["python", "train.py"]
+
+def test_linux_without_bwrap_is_best_effort(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox_module.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox_module, "_bwrap_usable", lambda: False)
+
+    policy = build_default_policy(workspace_root=tmp_path, scratch_dir=tmp_path / "scratch")
+
+    assert policy.filesystem_network_enforcement == "best_effort"
+
+def test_linux_bwrap_present_but_unusable_degrades_to_best_effort(tmp_path, monkeypatch):
+    # bwrap is on PATH but cannot create namespaces (containers / hardened kernels)
+    monkeypatch.setattr(sandbox_module.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox_module, "_BWRAP_USABLE", None, raising=False)
+    monkeypatch.setattr(sandbox_module.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
+
+    class _Failed:
+        returncode = 1
+
+    monkeypatch.setattr(sandbox_module.subprocess, "run", lambda *a, **k: _Failed())
+
+    policy = build_default_policy(workspace_root=tmp_path, scratch_dir=tmp_path / "scratch")
+    assert policy.filesystem_network_enforcement == "best_effort"
 
 
 # --- HL-SAFE-19: provider secrets never enter the sandbox env or logs ---------

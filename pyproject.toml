@@ -1,17 +1,19 @@
 [project]
 name = "hydralab"
-version = "0.1.0"
+version = "1.0.0"
 description = "HydraLab — an offline-first local research workbench"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "the HydraLab authors" }]
 keywords = ["research", "papers", "citations", "annotations", "offline-first", "workbench"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Web Environment",
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering",
@@ -35,6 +37,8 @@ dependencies = [
   "ruamel-yaml>=0.19.1",
   "sqlmodel>=0.0.38",
   "tomli-w>=1.2.0",
+  # uvicorn[standard] pulls uvloop, which has no Windows wheel (its environment
+  # marker excludes win32); uvicorn falls back to the stdlib asyncio loop there.
   "uvicorn[standard]>=0.30.0,<1",
 ]
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,16 @@ def app_data_root() -> Path:
     hydra_home = os.environ.get("HYDRA_HOME")
     if hydra_home:
         return Path(hydra_home).expanduser() / "app-data"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata).expanduser() / "HydraLab"
+        return Path.home() / "AppData" / "Roaming" / "HydraLab"
+    if sys.platform.startswith("linux"):
+        xdg_data_home = os.environ.get("XDG_DATA_HOME")
+        if xdg_data_home:
+            return Path(xdg_data_home).expanduser() / "HydraLab"
+        return Path.home() / ".local" / "share" / "HydraLab"
     return Path.home() / "Library" / "Application Support" / "HydraLab"
 
 
