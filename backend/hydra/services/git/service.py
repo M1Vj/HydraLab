@@ -105,6 +105,20 @@ class GitService:
         """Return the current HEAD commit sha (empty string outside a repo)."""
         return self._run_read_only("rev-parse", ["HEAD"]).stdout.strip()
 
+    def _identity_flags(self) -> list[str]:
+        """Fallback commit identity when git has none configured.
+
+        HydraLab's checkpoint/restore commits must not fail on a fresh machine
+        (or a bare CI runner) where the user never ran ``git config --global
+        user.email``. When the user DOES have an identity it is used unchanged;
+        only its absence triggers the neutral HydraLab fallback.
+        """
+        email = self._run(["config", "user.email"]).stdout.strip()
+        name = self._run(["config", "user.name"]).stdout.strip()
+        if email and name:
+            return []
+        return ["-c", "user.name=HydraLab", "-c", "user.email=hydralab@localhost"]
+
     # -- explicit safe writes ------------------------------------------------
     def commit(self, message: str, paths: Optional[list[str]] = None) -> dict[str, object]:
         """Record a commit. Only ever called from an explicit user click (HL-GIT-03)."""
@@ -112,7 +126,7 @@ class GitService:
             raise GitError("commit message required")
         add_target = paths if paths else ["-A"]
         self._run(["add", *add_target])
-        result = self._run(["commit", "-m", message])
+        result = self._run([*self._identity_flags(), "commit", "-m", message])
         if not result.ok:
             raise GitError(result.stderr.strip() or "commit failed")
         head = self._run_read_only("rev-parse", ["HEAD"]).stdout.strip()
