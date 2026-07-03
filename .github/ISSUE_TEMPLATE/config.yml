@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/M1Vj/HydraLab/blob/main/SECURITY.md
+    about: Please do not open a public issue for security problems. See our security policy for how to report privately.

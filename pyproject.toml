@@ -1,7 +1,21 @@
 [project]
-name = "hydra-research-assistant"
+name = "hydralab"
 version = "0.1.0"
-description = "Hydra Phase 1 local research companion"
+description = "HydraLab — an offline-first local research workbench"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "the HydraLab authors" }]
+keywords = ["research", "papers", "citations", "annotations", "offline-first", "workbench"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Web Environment",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
 requires-python = ">=3.11"
 dependencies = [
   "aiosqlite>=0.22.1",
@@ -29,6 +43,21 @@ dependencies = [
 dev = [
   "pytest>=9.0.3,<10",
 ]
+
+[project.scripts]
+hydralab = "hydra.serve:main"
+
+[project.urls]
+Homepage = "https://github.com/M1Vj/HydraLab"
+Repository = "https://github.com/M1Vj/HydraLab"
+Issues = "https://github.com/M1Vj/HydraLab/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/hydra"]
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
