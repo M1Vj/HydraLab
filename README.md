@@ -12,28 +12,9 @@ HydraLab is built in three phase groups. All three are now implemented on the `d
 2. Assistant / Co-Scientist: orchestrated assistant workflows, MCP tool support, stage/agent toggles, recipes, approvals and traceable agent runs.
 3. Full Autonomy: closed-loop autonomy safety, advanced customization, sandboxed experiment execution, reproducibility ledger, real-time collaboration, mobile/tablet layouts, and a packaged macOS app with an updater.
 
-HydraLab remains desktop-first (macOS) and source/dev-run first. It is pre-release: the macOS packaging and updater are scaffolded but the app is not yet signed, notarized or distributed, and MCP runs over the HTTP transport only. Phase 4 (open-platform interoperability, a HydraLab MCP server, and Homebrew distribution) is future work tracked in `.agents/checklist.md`.
+HydraLab remains desktop-first (macOS) and source/dev-run first. It is pre-release: the macOS packaging and updater are scaffolded but the app is not yet signed, notarized or distributed, and MCP runs over the HTTP transport only. Phase 4 (open-platform interoperability, a HydraLab MCP server, and Homebrew distribution) is planned but not yet implemented.
 
-## Current Planning Sources
-
-Primary living requirements:
-
-- `HydraLab - User Requirements.md`
-
-Implementation planning:
-
-- `.agents/PROJECT-OVERVIEW.md`
-- `.agents/00-ATOMIC-STRUCTURE.md`
-- `.agents/ALL-BRANCHES-QUICK-REFERENCE.md`
-- `.agents/checklist.md`
-- `.agents/PROCESS-FLOW.md`
-- `.agents/DATABASE-ERD-RLS.md`
-- `.agents/features/`
-- `.agents/learned-rules.md`
-
-Project context and operating rules:
-
-- `HYDRA.md`
+The detailed product requirements, implementation guides and per-branch execution notes are kept as internal planning documents and are not part of this repository.
 
 ## Architecture Direction
 
