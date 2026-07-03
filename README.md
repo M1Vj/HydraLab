@@ -143,4 +143,4 @@ HydraLab depends on and studies third-party open-source software. Every dependen
 
 ## License
 
-HydraLab is private while the product direction stabilizes. Its public-release timing and license are **intentionally undecided**, so no open-source license is granted yet and all rights are reserved — see [`NOTICE`](NOTICE). This deliberate posture will be replaced by a definitive license if and when one is chosen.
+HydraLab is released under the [MIT License](LICENSE). Third-party dependencies keep their own licenses — see [`ATTRIBUTION.md`](ATTRIBUTION.md) and the bundle policy above.
