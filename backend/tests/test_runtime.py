@@ -183,6 +183,18 @@ def test_windows_lock_helper_uses_msvcrt_when_fcntl_unavailable(tmp_path, monkey
 
     assert calls == [(FakeMsvcrt.LK_NBLCK, 1), (FakeMsvcrt.LK_UNLCK, 1)]
 
+class _FakeCFunc:
+    """Stand-in for a WinDLL function: callable, and accepts restype/argtypes."""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.restype = None
+        self.argtypes = None
+
+    def __call__(self, *args):
+        return self._fn(*args)
+
+
 def test_windows_process_fingerprint_uses_ctypes_without_crashing(monkeypatch):
     class FakeFiletime:
         def __init__(self) -> None:
@@ -190,18 +202,22 @@ def test_windows_process_fingerprint_uses_ctypes_without_crashing(monkeypatch):
             self.dwHighDateTime = 0
 
     class FakeKernel32:
-        def OpenProcess(self, _access: int, _inherit: bool, _pid: int) -> int:
-            return 100
+        def __init__(self) -> None:
+            self.OpenProcess = _FakeCFunc(lambda _access, _inherit, _pid: 100)
+            self.CloseHandle = _FakeCFunc(lambda _handle: None)
 
-        def GetProcessTimes(self, _handle, creation, _exit, _kernel, _user) -> int:
-            creation.dwLowDateTime = 7
-            creation.dwHighDateTime = 3
-            return 1
+            def _times(_handle, creation, _exit, _kernel, _user):
+                creation.dwLowDateTime = 7
+                creation.dwHighDateTime = 3
+                return 1
 
-        def CloseHandle(self, _handle) -> None:
-            pass
+            self.GetProcessTimes = _FakeCFunc(_times)
 
     class FakeCtypes:
+        c_void_p = int
+        c_int = int
+        c_uint32 = int
+
         class wintypes:
             FILETIME = FakeFiletime
 
@@ -214,9 +230,54 @@ def test_windows_process_fingerprint_uses_ctypes_without_crashing(monkeypatch):
             return value
 
     monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "_pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(runtime_module, "ctypes", FakeCtypes)
 
     assert runtime_module.process_fingerprint(os.getpid()) == f"win32-ctime:{(3 << 32) + 7}"
+
+
+def test_windows_pid_is_alive_uses_waitforsingleobject(monkeypatch):
+    WAIT_TIMEOUT = 0x00000102
+
+    def make_ctypes(open_handle: int, wait_result: int, last_error: int = 0):
+        class FakeKernel32:
+            def __init__(self) -> None:
+                self.OpenProcess = _FakeCFunc(lambda _a, _i, _p: open_handle)
+                self.WaitForSingleObject = _FakeCFunc(lambda _h, _ms: wait_result)
+                self.CloseHandle = _FakeCFunc(lambda _h: None)
+
+        class FakeCtypes:
+            c_void_p = int
+            c_int = int
+            c_uint32 = int
+
+            @staticmethod
+            def WinDLL(_name: str, use_last_error: bool = False):
+                return FakeKernel32()
+
+            @staticmethod
+            def get_last_error():
+                return last_error
+
+        return FakeCtypes
+
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+
+    # Running process: handle opens, wait times out (not signalled) -> alive.
+    monkeypatch.setattr(runtime_module, "ctypes", make_ctypes(77, WAIT_TIMEOUT))
+    assert runtime_module._pid_is_alive(123) is True
+
+    # Exited process: handle opens, wait returns signalled (0) -> not alive.
+    monkeypatch.setattr(runtime_module, "ctypes", make_ctypes(77, 0))
+    assert runtime_module._pid_is_alive(123) is False
+
+    # No handle + ACCESS_DENIED (5) means the process exists but is inaccessible.
+    monkeypatch.setattr(runtime_module, "ctypes", make_ctypes(0, 0, last_error=5))
+    assert runtime_module._pid_is_alive(123) is True
+
+    # No handle + invalid-parameter (87) means no such process.
+    monkeypatch.setattr(runtime_module, "ctypes", make_ctypes(0, 0, last_error=87))
+    assert runtime_module._pid_is_alive(123) is False
 
 def test_posix_process_fingerprint_still_returns_value_or_none():
     fingerprint = runtime_module.process_fingerprint(os.getpid())

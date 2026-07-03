@@ -36,10 +36,18 @@ from hydra.experiments import models as run_status
 from hydra.experiments.logs import RunLogStore, apply_cap
 from hydra.experiments.runner import ExperimentRunner, RunLifecycleError
 from hydra.experiments.search_adapter import SearchAdapter, SearchBudget
+from hydra.storage.runtime import _pid_is_alive
 
 SEATBELT = shutil.which("sandbox-exec") is not None
 needs_seatbelt = pytest.mark.skipif(not SEATBELT, reason="sandbox-exec unavailable; filesystem/network enforcement is best-effort")
 PY = sys.executable
+
+
+def _unconfined_runner(policy: SandboxPolicy) -> LocalSandboxRunner:
+    # Windows has no sandbox tier, so run-mechanics tests must opt into the
+    # unconfined runner. Harmless on macOS/Linux (the gate only checks the
+    # unconfined tier), so it keeps the spawn/kill tests running on every OS.
+    return LocalSandboxRunner(policy, accept_unconfined=True)
 
 
 @pytest_asyncio.fixture
@@ -82,27 +90,38 @@ def test_no_policy_rejected_before_any_spawn(monkeypatch):
 
 
 def test_argv_must_be_vector_not_shell_string(tmp_path):
-    runner = LocalSandboxRunner(_policy(tmp_path, wall_clock_seconds=2))
+    runner = _unconfined_runner(_policy(tmp_path, wall_clock_seconds=2))
     with pytest.raises(SandboxError):
         runner.run("echo hi; rm -rf /")  # a shell string is never accepted
 
 
 # --- HL-SAFE-12: wall-clock timeout kills the whole group, no orphans --------
 def test_wallclock_timeout_kills_process_group(tmp_path):
-    runner = LocalSandboxRunner(_policy(tmp_path, wall_clock_seconds=1))
+    runner = _unconfined_runner(_policy(tmp_path, wall_clock_seconds=1))
     process = runner.spawn([PY, "-c", "import time; time.sleep(30)"])
     pid = process.pid
     result = process.wait()
     shutil.rmtree(tmp_path / "scratch", ignore_errors=True)
     assert result.status == run_status.KILLED_TIMEOUT
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)  # no orphaned child survives
+    assert not _pid_is_alive(pid)  # no orphaned child survives (portable check)
 
 
 @needs_seatbelt
 def test_network_denied_by_default(tmp_path):
-    runner = LocalSandboxRunner(_policy(tmp_path, wall_clock_seconds=5))
-    result = runner.run([PY, "-c", "import socket; socket.socket().connect(('127.0.0.1', 9)); print('CONNECTED')"])
+    runner = _unconfined_runner(_policy(tmp_path, wall_clock_seconds=5))
+    # Write an explicit stderr marker so classification never depends on whether
+    # the interpreter renders the -c source line in the traceback (it does not on
+    # some runners, which previously misclassified the EPERM as a path escape).
+    probe = (
+        "import socket, sys\n"
+        "try:\n"
+        "    socket.socket().connect(('127.0.0.1', 9))\n"
+        "    print('CONNECTED')\n"
+        "except OSError as exc:\n"
+        "    sys.stderr.write('network socket connect refused: %s\\n' % exc)\n"
+        "    raise\n"
+    )
+    result = runner.run([PY, "-c", probe])
     assert result.status == run_status.KILLED_NETWORK
     assert "CONNECTED" not in result.stdout
     # EPERM (not ECONNREFUSED) proves Seatbelt refused the syscall, not the kernel.
@@ -113,7 +132,7 @@ def test_network_denied_by_default(tmp_path):
 def test_path_escape_denied(tmp_path):
     outside = tmp_path / "secret.txt"
     outside.write_text("classified")
-    runner = LocalSandboxRunner(_policy(tmp_path, wall_clock_seconds=5))
+    runner = _unconfined_runner(_policy(tmp_path, wall_clock_seconds=5))
     result = runner.run([PY, "-c", f"open({str(outside)!r}).read(); print('READ')"])
     assert result.status == run_status.KILLED_PATH_ESCAPE
     assert "READ" not in result.stdout
@@ -122,15 +141,14 @@ def test_path_escape_denied(tmp_path):
 # --- HL-SAFE-15: cancel terminates the group and removes the scratch dir ------
 def test_cancel_leaves_no_orphan_and_removes_scratch(tmp_path):
     policy = _policy(tmp_path, wall_clock_seconds=30)
-    runner = LocalSandboxRunner(policy)
+    runner = _unconfined_runner(policy)
     process = runner.spawn([PY, "-c", "import time; time.sleep(30)"])
     pid = process.pid
     assert process.is_alive()
     assert policy.scratch_dir.exists()
     process.terminate()
     assert not process.is_alive()
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not _pid_is_alive(pid)  # portable: no orphaned child survives
     assert not policy.scratch_dir.exists()
 
 def test_windows_unconfined_requires_opt_in_and_spawn_uses_windows_process_group(tmp_path, monkeypatch):
@@ -257,7 +275,7 @@ def test_secret_env_excluded_from_child(tmp_path, monkeypatch):
     env = policy.child_env()
     assert "OPENAI_API_KEY" not in env
     assert "MY_SESSION_TOKEN" not in env
-    result = LocalSandboxRunner(policy).run([PY, "-c", "import os,json; print(json.dumps(dict(os.environ)))"])
+    result = _unconfined_runner(policy).run([PY, "-c", "import os,json; print(json.dumps(dict(os.environ)))"])
     assert "sk-live-should-never-appear" not in result.stdout
     assert "tok-should-never-appear" not in result.stdout
 
@@ -403,7 +421,7 @@ async def test_approved_run_succeeds_and_records_outcome(session, tmp_path):
     proposal = await runner.create_run(
         project_id="p1",
         backend_id=local.id,
-        config={"argv": [PY, "-c", "print('##HYDRA_METRIC {\"accuracy\": 0.91}')"]},
+        config={"argv": [PY, "-c", "print('##HYDRA_METRIC {\"accuracy\": 0.91}')"], "accept_unconfined": True},
         label="baseline-train",
     )
     await runner.approve_run(proposal.run.id)
@@ -425,7 +443,7 @@ async def test_rollback_restores_pre_run_checkpoint(session, tmp_path):
     local = await registry.ensure_seeded()
     runner = ExperimentRunner(session, workspace_root=tmp_path)
     await runner.gate.enable_execution("p1")
-    proposal = await runner.create_run(project_id="p1", backend_id=local.id, config={"argv": [PY, "-c", "pass"]})
+    proposal = await runner.create_run(project_id="p1", backend_id=local.id, config={"argv": [PY, "-c", "pass"], "accept_unconfined": True})
     await runner.approve_run(proposal.run.id)
     run = await runner.start_run(proposal.run.id)
     assert run.checkpoint_ref
@@ -451,7 +469,7 @@ async def test_search_adapter_ranks_within_budget(session, tmp_path):
 
     budget = SearchBudget(max_candidates=3, metric_key="score", direction="max")
     result = await adapter.run_search(
-        project_id="p1", backend_id=local.id, base_config={"seed": 0.2}, budget=budget, argv_builder=argv_builder
+        project_id="p1", backend_id=local.id, base_config={"seed": 0.2, "accept_unconfined": True}, budget=budget, argv_builder=argv_builder
     )
     assert result.submitted == 3
     assert result.best is not None
@@ -467,7 +485,7 @@ async def test_audit_ledger_records_run_lifecycle(session, tmp_path):
     local = await registry.ensure_seeded()
     runner = ExperimentRunner(session, workspace_root=tmp_path)
     await runner.gate.enable_execution("p1")
-    proposal = await runner.create_run(project_id="p1", backend_id=local.id, config={"argv": [PY, "-c", "pass"]})
+    proposal = await runner.create_run(project_id="p1", backend_id=local.id, config={"argv": [PY, "-c", "pass"], "accept_unconfined": True})
     await runner.approve_run(proposal.run.id)
     await runner.start_run(proposal.run.id)
     entries = await runner.audit.list(project_id="p1", run_id=proposal.run.id)
