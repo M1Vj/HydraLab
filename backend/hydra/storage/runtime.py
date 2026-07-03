@@ -164,6 +164,28 @@ class BackendRuntime:
 def _pid_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        # os.kill(pid, 0) on Windows opens with PROCESS_TERMINATE and would KILL
+        # the target, so probe liveness with OpenProcess + WaitForSingleObject.
+        try:
+            SYNCHRONIZE = 0x00100000
+            WAIT_TIMEOUT = 0x00000102
+            ERROR_ACCESS_DENIED = 5
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+            kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            handle = kernel32.OpenProcess(SYNCHRONIZE, 0, pid)
+            if not handle:
+                return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+            try:
+                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -196,9 +218,13 @@ def process_fingerprint(pid: int) -> str | None:
     if sys.platform == "win32":
         try:
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            handle = kernel32.OpenProcess(0x1000, False, pid)
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            handle = kernel32.OpenProcess(0x1000, 0, pid)
             if not handle:
                 return None
+            kernel32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
             creation = ctypes.wintypes.FILETIME()
             exit_time = ctypes.wintypes.FILETIME()
             kernel_time = ctypes.wintypes.FILETIME()
@@ -250,20 +276,27 @@ def _payload_pid(payload: dict | None) -> int | None:
     return pid if pid > 0 else None
 
 
+# On Windows msvcrt.locking takes a MANDATORY byte-range lock, so a second
+# handle that reads the locked bytes fails with a sharing violation. The payload
+# JSON lives at the start of the file, so lock a single byte far beyond it: the
+# lock is still process-exclusive but never overlaps the bytes readers touch.
+_WIN_LOCK_OFFSET = 0x40000000
+
+
 def _lock_file_exclusive(lock_file: Any) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         return
     if msvcrt is None:
         raise OSError("no file locking primitive available")
-    position = lock_file.tell()
-    lock_file.seek(0, os.SEEK_END)
-    if lock_file.tell() == 0:
-        lock_file.write("\0")
-        lock_file.flush()
-    lock_file.seek(0)
-    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-    lock_file.seek(position)
+    lock_file.flush()
+    fd = lock_file.fileno()
+    saved = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    finally:
+        os.lseek(fd, saved, os.SEEK_SET)
 
 
 def _unlock_file(lock_file: Any) -> None:
@@ -272,10 +305,19 @@ def _unlock_file(lock_file: Any) -> None:
         return
     if msvcrt is None:
         return
-    position = lock_file.tell()
-    lock_file.seek(0)
-    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-    lock_file.seek(position)
+    try:
+        lock_file.flush()
+    except (OSError, ValueError):
+        pass
+    fd = lock_file.fileno()
+    saved = os.lseek(fd, 0, os.SEEK_CUR)
+    os.lseek(fd, _WIN_LOCK_OFFSET, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    except OSError:
+        pass
+    finally:
+        os.lseek(fd, saved, os.SEEK_SET)
 
 
 def _chmod_owner_only(path: Path, mode: int) -> None:
