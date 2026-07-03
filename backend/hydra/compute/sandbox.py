@@ -7,13 +7,11 @@ first time (HL-SAFE-11/12/19). Enforcement is real, not cosmetic:
   via RLIMIT_AS on Linux (a low address-space cap aborts the interpreter on
   macOS, so memory is best-effort there while wall-clock/CPU/Seatbelt stay hard).
 - Wall-clock via a hard timeout that SIGKILLs the child's whole process group
-  (``start_new_session=True`` -> ``os.killpg``) so no grandchild survives.
-- Filesystem + network confinement via macOS's built-in ``sandbox-exec``
-  (Seatbelt) with a deny-default profile that confines writes/reads to the run
-  scratch dir and emits no ``(allow network*)`` clause, so outbound network is
-  denied by omission. On a host with no ``sandbox-exec`` the runner falls back
-  to resource-limit-only enforcement and flags the run ``best_effort`` so the
-  gap is honest, never silent.
+  (``start_new_session=True`` -> ``os.killpg``) so no grandchild survives on POSIX.
+- Filesystem + network confinement via macOS's built-in ``sandbox-exec`` or
+  Linux ``bwrap`` when available. Hosts without those primitives record
+  ``best_effort`` on POSIX, while Windows records ``unconfined`` and requires
+  an explicit opt-in before spawning.
 
 Every subprocess is launched with an ARGUMENT VECTOR; ``shell=True`` and shell
 string interpolation are never used anywhere in this module.
@@ -27,6 +25,7 @@ import signal
 import subprocess
 import sys
 import time
+import ctypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
@@ -44,6 +43,10 @@ class SandboxError(RuntimeError):
 # Environment variables copied into a sandbox child, and only these. os.environ
 # is NEVER passed through wholesale (HL-SAFE-19).
 DEFAULT_ENV_ALLOWLIST: tuple[str, ...] = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
+ENFORCEMENT_SEATBELT = "seatbelt"
+ENFORCEMENT_BWRAP = "bwrap"
+ENFORCEMENT_BEST_EFFORT = "best_effort"
+ENFORCEMENT_UNCONFINED = "unconfined"
 
 # Name tokens/prefixes that mark an env var as a secret. Such a var is dropped
 # from the sandbox env even if an allowlist entry would otherwise admit it.
@@ -85,6 +88,45 @@ def is_secret_name(name: str) -> bool:
     if any(token in upper for token in _SECRET_NAME_TOKENS):
         return True
     return any(upper.startswith(prefix) for prefix in _SECRET_NAME_PREFIXES)
+
+_BWRAP_USABLE: Optional[bool] = None
+
+
+def _bwrap_usable() -> bool:
+    """True only if ``bwrap`` exists AND can actually create namespaces here.
+
+    A present binary is not enough: containers, hardened kernels, and hosts
+    without unprivileged user namespaces have ``bwrap`` on PATH yet fail every
+    spawn with "Creating new namespace failed". Probe once (cached) so such
+    hosts degrade honestly to ``best_effort`` instead of failing every run.
+    """
+    global _BWRAP_USABLE
+    if _BWRAP_USABLE is not None:
+        return _BWRAP_USABLE
+    path = shutil.which("bwrap")
+    if not path:
+        _BWRAP_USABLE = False
+        return False
+    try:
+        probe = subprocess.run(
+            [path, "--ro-bind", "/", "/", "--unshare-net", "true"],
+            capture_output=True,
+            timeout=5,
+        )
+        _BWRAP_USABLE = probe.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        _BWRAP_USABLE = False
+    return _BWRAP_USABLE
+
+
+def _resolve_enforcement() -> str:
+    if sys.platform == "darwin":
+        return ENFORCEMENT_SEATBELT if shutil.which("sandbox-exec") else ENFORCEMENT_BEST_EFFORT
+    if sys.platform == "win32":
+        return ENFORCEMENT_UNCONFINED
+    if sys.platform.startswith("linux"):
+        return ENFORCEMENT_BWRAP if _bwrap_usable() else ENFORCEMENT_BEST_EFFORT
+    return ENFORCEMENT_BEST_EFFORT
 
 
 @dataclass
@@ -143,7 +185,7 @@ def build_default_policy(
     scratch_dir = Path(scratch_dir).resolve()
     if workspace_root not in scratch_dir.parents and scratch_dir != workspace_root:
         raise SandboxError("scratch dir must live inside the project workspace")
-    enforcement = "seatbelt" if shutil.which("sandbox-exec") else "best_effort"
+    enforcement = _resolve_enforcement()
     return SandboxPolicy(
         workspace_root=workspace_root,
         scratch_dir=scratch_dir,
@@ -197,6 +239,11 @@ def build_seatbelt_profile(policy: SandboxPolicy) -> str:
 def _preexec(policy: SandboxPolicy):  # pragma: no cover - runs in forked child
     """Set resource ceilings. Session detach is handled by start_new_session."""
 
+    if sys.platform.startswith("linux"):
+        try:
+            ctypes.CDLL(None).prctl(38, 1, 0, 0, 0)
+        except Exception:
+            pass
     if resource is not None:
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (policy.cpu_seconds, policy.cpu_seconds))
@@ -235,12 +282,29 @@ class SandboxProcess:
         return self._popen.poll() is None
 
     def _pgid(self) -> Optional[int]:
+        if sys.platform == "win32":
+            return None
         try:
             return os.getpgid(self._popen.pid)
         except ProcessLookupError:
             return None
 
     def _kill_group(self) -> None:
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(self._popen.pid)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
+            try:
+                self._popen.kill()
+            except OSError:
+                pass
+            return
         pgid = self._pgid()
         if pgid is None:
             return
@@ -321,11 +385,13 @@ class LocalSandboxRunner:
     policy-less run.
     """
 
-    def __init__(self, policy: Optional[SandboxPolicy]) -> None:
+    def __init__(self, policy: Optional[SandboxPolicy], *, accept_unconfined: bool = False) -> None:
         if policy is None:
             raise SandboxError("refusing to run: no SandboxPolicy resolved for this job")
         if not isinstance(policy, SandboxPolicy):  # defensive: never trust a duck
             raise SandboxError("invalid SandboxPolicy")
+        if policy.filesystem_network_enforcement == ENFORCEMENT_UNCONFINED and not accept_unconfined:
+            raise SandboxError("no sandboxing available on this platform; execution requires explicit opt-in")
         self.policy = policy
 
     def _wrap(self, argv: Sequence[str]) -> list[str]:
@@ -334,26 +400,47 @@ class LocalSandboxRunner:
         argv = list(argv)
         if not argv or not all(isinstance(part, str) for part in argv):
             raise SandboxError("argv must be a non-empty list of strings (never a shell string)")
-        if self.policy.filesystem_network_enforcement == "seatbelt" and shutil.which("sandbox-exec"):
+        if self.policy.filesystem_network_enforcement == ENFORCEMENT_SEATBELT and shutil.which("sandbox-exec"):
             profile = build_seatbelt_profile(self.policy)
             return ["sandbox-exec", "-p", profile, *argv]
+        if self.policy.filesystem_network_enforcement == ENFORCEMENT_BWRAP and _bwrap_usable():
+            scratch = str(self.policy.scratch_dir)
+            wrapped = [
+                "bwrap",
+                "--ro-bind",
+                "/",
+                "/",
+                "--dev",
+                "/dev",
+                "--bind",
+                scratch,
+                scratch,
+                "--chdir",
+                scratch,
+            ]
+            if self.policy.network == "none":
+                wrapped.append("--unshare-net")
+            return [*wrapped, *argv]
         return argv
 
     def spawn(self, argv: Sequence[str]) -> SandboxProcess:
         wrapped = self._wrap(argv)
         self.policy.scratch_dir.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        popen = subprocess.Popen(  # noqa: S603 - argv vector, shell never used
-            wrapped,
-            cwd=str(self.policy.scratch_dir),
-            env=self.policy.child_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            shell=False,
-            start_new_session=True,
-            preexec_fn=lambda: _preexec(self.policy),
-        )
+        popen_kwargs = {
+            "cwd": str(self.policy.scratch_dir),
+            "env": self.policy.child_env(),
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "shell": False,
+        }
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        else:
+            popen_kwargs["start_new_session"] = True
+            popen_kwargs["preexec_fn"] = lambda: _preexec(self.policy)
+        popen = subprocess.Popen(wrapped, **popen_kwargs)  # noqa: S603 - argv vector, shell never used
         return SandboxProcess(popen, policy=self.policy, started=started)
 
     def run(self, argv: Sequence[str]) -> SandboxResult:
