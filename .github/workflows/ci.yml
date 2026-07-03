@@ -11,8 +11,12 @@ permissions:
 
 jobs:
   backend:
-    name: Backend (pytest)
-    runs-on: macos-latest
+    name: Backend (pytest) · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,8 +32,12 @@ jobs:
         run: uv run --project backend pytest backend/tests -q
 
   frontend:
-    name: Frontend (typecheck, test, build)
-    runs-on: macos-latest
+    name: Frontend (typecheck, test, build) · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
