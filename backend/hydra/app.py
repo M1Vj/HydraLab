@@ -3994,6 +3994,17 @@ def create_app() -> FastAPI:
         await repo.add_event("restore.project", f"Restored project reindexed={request.reindex}")
         return result
 
+    # Serve the bundled web UI for packaged/installed builds. When the frontend
+    # assets are shipped inside the package (`hydra/web`), mount them at the root
+    # so the installed `hydralab` command opens a working app. In development
+    # this directory is absent and the Vite dev server serves the UI instead, so
+    # the mount is skipped and API routes are unaffected.
+    _web_dir = Path(__file__).resolve().parent / "web"
+    if _web_dir.is_dir():
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/", StaticFiles(directory=_web_dir, html=True), name="web")
+
     return app
 
 async def persist_browser_capture(request: BrowserCaptureRequest, session: AsyncSession, create_source: bool) -> dict[str, object]:

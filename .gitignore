@@ -71,3 +71,7 @@ apps/web/test-results/
 Hydra - User Requirements.md
 HydraLab - User Requirements.md
 OLD - Hydra - User Requirements.md
+
+# Bundled web UI (produced by scripts/build_release.py for packaging)
+backend/hydra/web/
+dist/
