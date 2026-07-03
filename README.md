@@ -75,14 +75,18 @@ Most research tools make you choose: a reference manager *or* an editor *or* a c
 
 ## Getting started
 
-### Prerequisites
+### Homebrew (recommended)
 
-- **macOS** (Apple Silicon or Intel)
-- **Python 3.11+** and [`uv`](https://docs.astral.sh/uv/)
-- **[Bun](https://bun.sh) 1.x**
-- *(optional)* A Rust toolchain, if you want to build the Tauri desktop shell
+```bash
+brew install M1Vj/hydralab/hydralab
+hydralab --project-root /path/to/your/research-project
+```
 
-### Install
+The `hydralab` command starts the local backend and serves the bundled web UI; it prints a `http://127.0.0.1:<port>` URL — open it in your browser. (The first install compiles a few native dependencies, so it can take a few minutes.)
+
+### From source (for development)
+
+**Prerequisites:** macOS (Apple Silicon or Intel), Python 3.11+ with [`uv`](https://docs.astral.sh/uv/), and [Bun](https://bun.sh) 1.x. *(Optional: a Rust toolchain for the Tauri desktop shell.)*
 
 ```bash
 git clone https://github.com/M1Vj/HydraLab.git
@@ -92,9 +96,7 @@ uv sync        # backend (Python) environment
 bun install    # frontend workspace
 ```
 
-### Run
-
-HydraLab runs as a local backend plus a web frontend — start each in its own terminal.
+Then run the backend and frontend, each in its own terminal:
 
 ```bash
 # 1) Backend — binds 127.0.0.1, auto-selects a port in 8765–8799
@@ -148,7 +150,9 @@ HydraLab was built in three phase groups, all implemented on the default branch:
 
 **Current status — pre-release, macOS-first.** The packaged macOS app is scaffolded but not yet signed, notarized, or distributed, and MCP currently runs over the HTTP transport only.
 
-**Phase 4 (planned, not yet implemented):** open-platform interoperability, a HydraLab MCP server, and Homebrew distribution.
+Homebrew distribution is live (see [Homebrew](#homebrew-recommended) above).
+
+**Phase 4 (planned, not yet implemented):** open-platform interoperability and a HydraLab MCP server.
 
 ## Contributing
 
