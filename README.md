@@ -1,126 +1,75 @@
-# Hydra – Web-First Research and Writing Companion
+# HydraLab
 
-Hydra is a premium, web-first research and writing companion designed to turn literature discovery, citation management, claims verification, and academic drafting into a single, cohesive local experience. Inspired by the dynamic modular layouts of **VS Code**, the LaTeX-driven academic writing workflows of **OpenPrism**, and the interconnected knowledge mapping of **Obsidian**, Hydra establishes a robust, offline-first research workbench.
+HydraLab is an offline-first research workbench for computer science and general academic papers. It is a project-centered local app where a researcher opens a folder and works with papers, notes, citations, browser context, saved chats, claims, evidence links, tasks, drafts, exports and later orchestrated research agents.
 
-Phase 1 provides local orchestration and persistence via SQLite, featuring zero-cloud runtimes, rich local databases, SSE status event logging, paper parsing, citation graphs, and task coordination.
+HydraLab is not a VS Code, Theia, Obsidian, Zotero or co-scientist fork. It uses proven open-source dependencies and reference implementations, then adapts the useful ideas through HydraLab-owned architecture and contracts.
 
----
+## Roadmap
 
-## 🌟 Core Features (Phase 1)
+HydraLab is built in three phase groups. All three are now implemented on the `develop` branch:
 
-### 1. Modular Web Workbench (VS Code Model)
-* **Activity Bar**: Quick sidebar toggles for Chat, Sources, Notes, Tasks, and Evidence.
-* **Collapsible Sidebars**: Interactive list navigation, note searches, and task queues.
-* **Movable Tabs & Split Panes**: Open multiple workspace modules side by side (e.g., chat beside a LaTeX draft or an Obsidian graph beside a Kanban board).
-* **Integrated Bottom Panel**: Terminal displays, event stream lists, and status updates.
-* **Live Status Bar**: Real-time validation metrics and current run status.
+1. Research Workbench: production-quality local workspace for reading, saving, annotating, citing, writing, searching, chatting and organizing research projects.
+2. Assistant / Co-Scientist: orchestrated assistant workflows, MCP tool support, stage/agent toggles, recipes, approvals and traceable agent runs.
+3. Full Autonomy: closed-loop autonomy safety, advanced customization, sandboxed experiment execution, reproducibility ledger, real-time collaboration, mobile/tablet layouts, and a packaged macOS app with an updater.
 
-### 2. Conversational Research & Status SSE Stream (T3 Code Model)
-* **Transparent Execution**: Watch Hydra work via Server-Sent Events (SSE) detailing its reasoning paths (e.g., `"searching memory..."`, `"reading pdf..."`).
-* **Persistent Threads**: Full local chat history stored in SQLite.
+HydraLab remains desktop-first (macOS) and source/dev-run first. It is pre-release: the macOS packaging and updater are scaffolded but the app is not yet signed, notarized or distributed, and MCP runs over the HTTP transport only. Phase 4 (open-platform interoperability, a HydraLab MCP server, and Homebrew distribution) is future work tracked in `.agents/checklist.md`.
 
-### 3. Scholarly Ingestion & Local RAG
-* **Universal Parsing**: Ingest papers from PDF files, DOIs, or URLs.
-* **Local Extraction**: Under-the-hood PDF text parsing powered by `pypdf` with automated structured notes summaries generation.
-* **Offline Retrieval**: Synthesizes cited workspace passages using local mock RAG vector searches.
+## Current Planning Sources
 
-### 4. Citation & Evidence Verification
-* **Anti-Hallucination Controls**: Links claims directly to supporting source passages and confidence values.
-* **Visual Verifiers**: High-fidelity sidebar **Evidence badges** indicating support levels (Green for fully supported, Yellow for weakly supported, and Red for unsupported claims).
+Primary living requirements:
 
-### 5. Writing Review, LaTeX Editing & PDF Previews (OpenPrism Model)
-* **LaTeX Editor**: Full LaTeX/Markdown document editor split side-by-side with dynamic PDF previews.
-* **Coherence & Tone Reviews**: Interactive issue tracking checks drafts for coherence, clarity, tone, and missing citations.
-* **Accept/Reject revisions**: Dynamically preview changes and cherry-pick revision edits directly inside the pane.
+- `HydraLab - User Requirements.md`
 
-### 6. Obsidian-Style Knowledge Layer
-* **Wiki Links**: Dynamic `[[Note Title]]` link matching automatically hooks notes, claims, tasks, and sources together.
-* **Backlink Indexing**: Detailed sidebar detailing all incoming and outgoing connections for any selected note.
-* **Circular SVG Local Graph**: Interactive SVG graphing displaying colored vertices representing research nodes (Indigo: notes, Emerald: sources, Amber: tasks, Rose: claims) with direct click-to-navigate graph node traversal.
-* **Search Indexing**: Fast local offline searches using FTS5 fallback.
+Implementation planning:
 
-### 7. Kanban Task Management
-* **Coordinate Workflows**: Visual board columns (**To Do**, **In Progress**, **Review**, **Done**) tracking active tasks, progress meters, and phase indicators.
-* **Wikilink Drag Drawers**: Cards detect wiki-link text references, resolving their targets and providing quick side-drawer navigational shortcuts.
-* **Native Drag & Drop**: Fluid column reordering with optimistic updates persisting to SQLite.
+- `.agents/PROJECT-OVERVIEW.md`
+- `.agents/00-ATOMIC-STRUCTURE.md`
+- `.agents/ALL-BRANCHES-QUICK-REFERENCE.md`
+- `.agents/checklist.md`
+- `.agents/PROCESS-FLOW.md`
+- `.agents/DATABASE-ERD-RLS.md`
+- `.agents/features/`
+- `.agents/learned-rules.md`
 
-### 8. Provider Settings & Workspace ZIP Exports
-* **Model Configurations**: Settings manager to customize OpenAI, Anthropic, and Gemini LLM provider parameters and system instructions.
-* **ZIP Workspace Exporter**: Generates single-click workspace ZIP backups compressing notes, citations (.md), Kanban tasks, and raw scrubbed schemas (.json).
+Project context and operating rules:
 
----
+- `HYDRA.md`
 
-## 🛠️ Technology Stack
+## Architecture Direction
 
-### Backend
-* **Language/Framework**: Python 3.11+ / FastAPI
-* **Database**: Local SQLite
-* **ORM / Database Migrations**: SQLModel / Alembic
-* **Libraries**: `aiosqlite` (async driver), `greenlet` (async thread sync), `pypdf` (PDF parsing), `httpx`
+- Frontend: React, TypeScript and Vite.
+- Backend: Python and FastAPI.
+- Persistence: local project SQLite plus readable project files.
+- Project config: `project.yaml`.
+- Project-local assistant context: Git-tracked `HYDRA.md`.
+- Global settings: app-data `settings.toml`.
+- Secrets: OS credential storage.
+- Workbench: custom FlexLayout-style docked panels.
+- Markdown: CodeMirror 6.
+- PDF: PDF.js with a custom research annotation layer.
+- Ingestion: Docling (bundled default) + permissive light extractor (pypdf/pdfminer.six/pdfplumber); GROBID optional/deferred external service; PyMuPDF (AGPL) optional and never bundled.
 
-### Frontend
-* **Runtime/Bundler**: Bun 1.3+ / Vite 7+
-* **Framework**: React 19 / TypeScript 5
-* **Icons**: `lucide-react`
-* **Styling**: Vanilla CSS (highly custom, dark-theme layout)
+## Development
 
----
+Install dependencies and run the existing backend/frontend commands used by the repo. The current planning docs are the source of truth for implementation order and branch scope.
 
-## 🚀 Getting Started
-
-### 1. Prerequisites
-Ensure you have **Python 3.11+** (`uv` package manager recommended) and **Bun** (or Node/NPM) installed.
-
-### 2. Installation
-
-Clone the repository and install the dependencies:
+Backend source/dev entrypoint:
 
 ```bash
-# Clone the repository
-git clone https://github.com/M1Vj/Hydra.git
-cd Hydra
-
-# Install Python backend dependencies using uv
-uv sync
-
-# Install Frontend dependencies using Bun
-bun install
+python -m hydra.serve --project-root /path/to/project
 ```
 
-### 3. Running the Workspace
+The backend binds `127.0.0.1`, tries port `8765` first, falls back through `8799`, and writes runtime discovery files under both app data and the project's `.hydralab/runtime/` directory.
 
-Start both the backend server and the frontend dev server in parallel:
+Common checks:
 
 ```bash
-# Start the FastAPI Backend (on http://127.0.0.1:8000)
-cd backend
-uv run uvicorn hydra.app:app --host 127.0.0.1 --port 8000
-
-# In a new terminal window, start the React/Vite Frontend (on http://127.0.0.1:5173)
-bun run dev
+git diff --check
+git status --short
 ```
 
----
+Run backend/frontend tests and builds according to the feature guide being implemented.
 
-## 🧪 Testing and Verification
+## License
 
-### Backend Tests
-Execute the complete `pytest` test suite covering schemas, CRUD, ingestion, claims, and settings:
-```bash
-uv run pytest
-```
-
-### Frontend Typechecking & Compilation
-Run type checks and compile production assets:
-```bash
-# Typecheck TypeScript files
-bun run typecheck
-
-# Compile production build
-bun run build
-```
-
----
-
-## 📄 License
-This project is private and proprietary. Refer to [ATTRIBUTION.md](file:///Users/vjmabansag/Projects/Hydra/ATTRIBUTION.md) for details on reference works, layout patterns, and scholarly guidelines.
+HydraLab is private while the product direction stabilizes. Public release timing and license are intentionally undecided, so no open-source license is granted and all rights are reserved (see `NOTICE`). Third-party dependency licenses are tracked in `ATTRIBUTION.md` and enforced by a bundle license gate (`scripts/license_gate.py`, exercised in `backend/tests/test_release_pipeline.py`): no strong-copyleft (AGPL/GPL) dependency may ship in a distributable build.

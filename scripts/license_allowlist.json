@@ -1,0 +1,19 @@
+{
+  "allowed_spdx": [
+    "Apache-2.0",
+    "BSD-2-Clause-Views",
+    "BSD-3-Clause",
+    "CC-BY-SA-3.0",
+    "ISC",
+    "LGPLv3 or BSD (dual)",
+    "LGPLv3 or BSD",
+    "MIT",
+    "MPL-2.0"
+  ],
+  "denied_spdx_patterns": [
+    "AGPL-3.0-*",
+    "GPL-2.0-*",
+    "GPL-3.0-*",
+    "CPAL-1.0"
+  ]
+}

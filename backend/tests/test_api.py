@@ -1,6 +1,12 @@
+import asyncio
+
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from hydra.app import create_app
+from hydra.database.models import Citation
+from hydra.database.session import get_session_maker
 
 
 def test_research_chat_returns_cited_answer_and_trace_event(tmp_path, monkeypatch):
@@ -58,13 +64,92 @@ def test_sources_notes_tasks_paper_and_bibliography_flow(tmp_path, monkeypatch):
     notes = client.get("/api/notes", params={"query": "exploration"}).json()["notes"]
     assert notes[0]["id"] == note["id"]
 
-    task = client.post("/api/tasks", json={"title": "Review paper", "column": "To Do"}).json()
-    moved = client.patch(f"/api/tasks/{task['id']}", json={"column": "Done", "progress": 100}).json()
-    assert moved["column"] == "Done"
+    task = client.post("/api/tasks", json={"title": "Review paper", "column": "to_do"}).json()
+    moved = client.patch(f"/api/tasks/{task['id']}", json={"column": "done", "progress": 100}).json()
+    assert moved["column"] == "done"
     assert moved["progress"] == 100
 
     bib = client.get("/api/export/bibliography", params={"style": "bibtex"}).text
     assert "@article" in bib or "@misc" in bib
+
+
+def test_ingest_route_quarantines_fake_pdf_without_source_or_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    fake = client.post(
+        "/api/sources/ingest",
+        files={"file": ("fake.pdf", b"not a pdf", "application/pdf")},
+    )
+    assert fake.status_code == 422
+    assert fake.json()["source"] is None
+
+    export = client.get("/api/export/workspace").json()
+    assert export["sources"] == []
+
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "hydra.db")
+    try:
+        assert conn.execute("select count(*) from sources").fetchone() == (0,)
+        assert conn.execute("select count(*) from ingestion_artifacts").fetchone() == (0,)
+        assert conn.execute("select source_id, status from ingestion_jobs").fetchone() == (
+            None,
+            "quarantined",
+        )
+    finally:
+        conn.close()
+
+
+def test_real_app_database_enforces_foreign_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    assert client.get("/api/events").status_code == 200
+
+    async def insert_orphan_citation():
+        async_session_maker = get_session_maker()
+        async with async_session_maker() as session:
+            session.add(Citation(source_id="missing-source", text="orphan"))
+            await session.commit()
+
+    with pytest.raises(IntegrityError):
+        asyncio.run(insert_orphan_citation())
+
+
+def test_ingest_route_valid_upload_creates_source_job_and_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    valid = client.post(
+        "/api/sources/ingest",
+        files={"file": ("paper.md", b"Valid paper body.", "text/markdown")},
+    )
+    assert valid.status_code == 200
+    payload = valid.json()
+    assert payload["source"]["id"]
+    assert payload["ingestion"]["state"] == "done"
+    assert payload["ingestion"]["artifacts"]
+
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "hydra.db")
+    try:
+        assert conn.execute("select count(*) from sources").fetchone() == (1,)
+        assert conn.execute("select count(*) from ingestion_jobs where status = 'done'").fetchone() == (1,)
+        assert conn.execute("select count(*) from ingestion_artifacts").fetchone()[0] > 0
+    finally:
+        conn.close()
+
+
+def test_ingest_route_url_and_doi_are_honest_501_without_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+
+    response = client.post("/api/sources/ingest", data={"url": "https://example.com/paper"})
+
+    assert response.status_code == 501
+    assert "discovery auto-download" in response.json()["detail"]
+    assert client.get("/api/export/workspace").json()["sources"] == []
 
 def test_reviews_analyze(tmp_path, monkeypatch):
     monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
@@ -130,6 +215,7 @@ def test_notes_crud_and_links(tmp_path, monkeypatch):
 
 def test_settings_get_post_and_export_flow(tmp_path, monkeypatch):
     monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    monkeypatch.setenv("HYDRALAB_SECRET_STORE", "memory")
     client = TestClient(create_app())
 
     # Get settings (should be empty initially or contain defaults)
@@ -137,11 +223,33 @@ def test_settings_get_post_and_export_flow(tmp_path, monkeypatch):
     assert "provider_settings" in settings
     assert "workspace_preferences" in settings
 
-    # Post settings updates
+    # Raw provider secrets must not be accepted through settings.
+    rejected = client.post(
+        "/api/settings",
+        json={
+            "provider_settings": [
+                {"provider": "openai", "model": "gpt-4o", "api_key_ref": "sk-12345"},
+            ],
+        },
+    )
+    assert rejected.status_code == 400
+    assert "POST /api/settings/provider/secret" in rejected.json()["detail"]
+    rejected_put = client.put(
+        "/api/settings/provider",
+        json={"provider": "openai", "model": "gpt-4o", "api_key_ref": "ghp_rawtoken"},
+    )
+    assert rejected_put.status_code == 400
+
+    planted_secret = "sk-planted-negative-export-secret"
+    secret_res = client.post("/api/settings/provider/secret", json={"provider": "openai", "secret": planted_secret})
+    assert secret_res.status_code == 200
+    assert secret_res.json() == {"secret_ref": "keychain:hydralab/openai"}
+
+    # Post settings updates with references only.
     post_payload = {
         "provider_settings": [
-            {"provider": "openai", "model": "gpt-4o", "api_key_ref": "sk-12345"},
-            {"provider": "gemini", "model": "gemini-1.5-pro", "api_key_ref": "ai-67890"}
+            {"provider": "openai", "model": "gpt-4o", "api_key_ref": "keychain:hydralab/openai"},
+            {"provider": "gemini", "model": "gemini-1.5-pro", "api_key_ref": "env:GEMINI_API_KEY"}
         ],
         "workspace_preferences": {
             "theme": "dark",
@@ -162,6 +270,9 @@ def test_settings_get_post_and_export_flow(tmp_path, monkeypatch):
     # Verify that the GET endpoint returns the updated settings
     got_settings = client.get("/api/settings").json()
     assert len(got_settings["provider_settings"]) == 2
+    openai_settings = {p["provider"]: p for p in got_settings["provider_settings"]}["openai"]
+    assert openai_settings["api_key_ref"] == "keychain:hydralab/openai"
+    assert openai_settings["resolved"] is True
     assert got_settings["workspace_preferences"]["theme"] == "dark"
 
     # Add a mock note and task to check export
@@ -210,15 +321,12 @@ def test_settings_get_post_and_export_flow(tmp_path, monkeypatch):
         assert "# Exportable Note" in note_content
         assert "This body should be inside notes/Exportable Note.md" in note_content
         
-        # Verify metadata scrubbed provider_settings
+        # Verify metadata contains refs only and never the planted raw secret.
         meta = json.loads(z.read("metadata.json").decode("utf-8"))
+        assert planted_secret not in json.dumps(meta)
         assert len(meta["notes"]) == 1
         assert len(meta["tasks"]) == 1
         assert len(meta["provider_settings"]) == 2
-        # Verify API keys refs are preserved!
         p_map = {p["provider"]: p for p in meta["provider_settings"]}
-        assert p_map["openai"]["api_key_ref"] == "sk-12345"
-        assert p_map["gemini"]["api_key_ref"] == "ai-67890"
-
-
-
+        assert p_map["openai"]["api_key_ref"] == "keychain:hydralab/openai"
+        assert p_map["gemini"]["api_key_ref"] == "env:GEMINI_API_KEY"

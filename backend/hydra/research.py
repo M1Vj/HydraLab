@@ -8,7 +8,31 @@ from urllib.parse import quote_plus
 import httpx
 
 
-async def search_academic_sources(query: str) -> list[dict[str, Any]]:
+_MAX_XML_BYTES = 5_000_000
+_DOCTYPE_RE = re.compile(r"<!DOCTYPE", re.IGNORECASE)
+
+
+def _safe_parse_xml(text: str) -> ET.Element:
+    """Parse untrusted feed XML without the stdlib entity-expansion DoS.
+
+    Entity bombs (billion laughs) require a DOCTYPE with <!ENTITY> declarations;
+    legit Atom feeds have none, so any DOCTYPE is treated as hostile and the
+    payload is size-bounded before expat sees it. Callers already swallow the
+    raise and fall back to no results.
+    """
+    if len(text) > _MAX_XML_BYTES:
+        raise ValueError("XML response exceeds safe size limit")
+    if _DOCTYPE_RE.search(text):
+        raise ValueError("XML DOCTYPE declarations are not permitted")
+    return ET.fromstring(text)
+
+
+async def search_academic_sources(query: str, *, allow_network: bool = True) -> list[dict[str, Any]]:
+    # Offline-first hard invariant: when scholarly network access is not permitted
+    # (offline_only engaged, or scholarly APIs disabled), no request may leave the
+    # machine. Return the local fallback WITHOUT touching OpenAlex/arXiv/Unpaywall.
+    if not allow_network:
+        return [_fallback_source(query)]
     results = []
     results.extend(await _openalex(query))
     results.extend(await _arxiv(query))
@@ -59,7 +83,7 @@ async def _arxiv(query: str) -> list[dict[str, Any]]:
         async with httpx.AsyncClient(timeout=5) as client:
             response = await client.get(url)
             response.raise_for_status()
-            root = ET.fromstring(response.text)
+            root = _safe_parse_xml(response.text)
     except Exception:
         return []
 

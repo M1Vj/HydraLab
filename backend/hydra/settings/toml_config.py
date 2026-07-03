@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import copy
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import tomli_w
+
+
+CURRENT_SETTINGS_VERSION = 1
+HYDRALAB_VERSION = "0.1.0"
+# Exactly three canonical Agent Access Mode ids (DEC-5). No fourth peer mode.
+VALID_AGENT_ACCESS_MODES = ("passive", "copilot", "full_access")
+VALID_UPDATE_CHANNELS = ("stable", "preview", "dev")
+REQUIRED_SETTINGS_SECTIONS = [
+    "schema",
+    "general",
+    "appearance",
+    "workspace",
+    "browser",
+    "indexing",
+    "review_inbox",
+    "memory",
+    "assistant",
+    "providers",
+    "skills",
+    "citations",
+    "writing",
+    "git",
+    "updater",
+    "exports",
+    "privacy",
+    "diagnostics",
+]
+
+
+class SettingsValidationError(ValueError):
+    pass
+
+
+@dataclass
+class LoadedSettings:
+    path: Path
+    data: dict[str, Any]
+
+
+def default_settings() -> dict[str, Any]:
+    data = {section: {} for section in REQUIRED_SETTINGS_SECTIONS}
+    data["schema"] = {"version": CURRENT_SETTINGS_VERSION, "hydralab_version": HYDRALAB_VERSION}
+    data["general"] = {"offline_only": False}
+    data["browser"] = {
+        "local_capture_enabled": False,
+        "allowlist": [],
+        "blocklist": [],
+        "browser_page_text_to_provider": False,
+    }
+    data["indexing"] = {
+        "auto_index_categories": ["sources", "knowledge", "work", "writing", "outputs"],
+        "consent_required_categories": [
+            "code-folder",
+            "browser-history",
+            "chat-logs",
+            "agent-memory",
+            "large-generated",
+        ],
+        "ignored_paths": [".git", ".env", ".hydralab/cache", ".hydralab/temp"],
+        "queue": {"max_parallel_jobs": 1, "retry_limit": 3},
+    }
+    data["citations"] = {"default_citation_style": "apa"}
+    data["writing"] = {
+        "default_citation_style": "apa",
+        "manuscript_template": "generic-academic",
+        "docx_template": "generic-academic",
+        "docx_style": "generic-academic",
+    }
+    data["review_inbox"] = {"enabled_item_types": ["broken-link", "conflict", "reindex", "memory-candidate"]}
+    data["assistant"] = {
+        "mode": "passive",
+        "default_mode": "passive",
+        "provider_routing_profile": "manual",
+        "run_budget": 60000,
+        "wall_clock_seconds": 120,
+        "max_parallel_calls": 2,
+        "browser_working_set_tokens": 8000,
+    }
+    data["memory"] = {
+        "condense_threshold_kb": 32,
+        "auto_promote_low_risk": False,
+    }
+    data["providers"] = {"routing_policy": "manual", "accounts": {}}
+    data["updater"] = {"channel": "stable", "auto_check_enabled": True}
+    data["privacy"] = {
+        "offline_only": False,
+        "scholarly_apis_enabled": True,
+        "g3_provider_send": False,
+        "provider_send_allowlist": ["active_file", "selection", "explicit_attachment"],
+        "provider_send_opt_ins": {
+            "full_notes_corpus": False,
+            "all_pdfs_extracted_text": False,
+            "saved_chats": False,
+            "agent_run_logs": False,
+            "project_metadata": False,
+            "browser_page_text": False,
+        },
+    }
+    return data
+
+
+def load_settings(path: Path) -> LoadedSettings:
+    path = Path(path)
+    if not path.exists():
+        data = default_settings()
+        save_settings(path, data)
+        return LoadedSettings(path=path, data=data)
+
+    with path.open("rb") as fh:
+        data = tomllib.load(fh)
+    validate_settings(data)
+    migrated = migrate_settings(copy.deepcopy(data))
+    validate_settings(migrated)
+    return LoadedSettings(path=path, data=migrated)
+
+
+def save_settings(path: Path, data: dict[str, Any], validate: bool = True) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = copy.deepcopy(data)
+    if validate:
+        payload = migrate_settings(payload)
+        validate_settings(payload)
+    path.write_text(tomli_w.dumps(payload))
+
+
+def migrate_settings(data: dict[str, Any]) -> dict[str, Any]:
+    for section, defaults in default_settings().items():
+        data.setdefault(section, copy.deepcopy(defaults))
+    schema = data.setdefault("schema", {})
+    schema.setdefault("version", CURRENT_SETTINGS_VERSION)
+    schema.setdefault("hydralab_version", HYDRALAB_VERSION)
+    return data
+
+
+_SECRET_KEY_NAMES = ("api_key", "token", "secret", "password", "apikey")
+_SECRET_REF_PREFIXES = ("keychain:", "env:")
+
+
+def _reject_raw_secrets(node: Any, *, path: str) -> None:
+    """Recursively reject any secret-named key whose value is a raw string.
+
+    A secret-shaped value is allowed ONLY when it is a reference (``keychain:`` or
+    ``env:``) — a per-account check, so a config that pairs one account's
+    ``secret_ref`` with another account's raw ``api_key`` is still rejected. Keys
+    literally named ``*_ref`` are treated as reference holders and skipped.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            key_l = str(key).lower()
+            is_ref_holder = key_l.endswith("_ref")
+            if (not is_ref_holder) and any(word in key_l for word in _SECRET_KEY_NAMES):
+                if isinstance(value, str) and not value.startswith(_SECRET_REF_PREFIXES):
+                    raise SettingsValidationError(
+                        f"{path}.{key} may store a secret reference only "
+                        f"(keychain:/env:), not a raw value"
+                    )
+            _reject_raw_secrets(value, path=f"{path}.{key}")
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            _reject_raw_secrets(item, path=f"{path}[{index}]")
+
+
+def validate_settings(data: dict[str, Any]) -> None:
+    missing = [section for section in REQUIRED_SETTINGS_SECTIONS if section not in data]
+    if missing:
+        names = ", ".join(f"[{section}]" for section in missing)
+        raise SettingsValidationError(f"Missing required settings section(s): {names}")
+    for section in REQUIRED_SETTINGS_SECTIONS:
+        if not isinstance(data[section], dict):
+            raise SettingsValidationError(f"[{section}] must be a TOML table")
+    providers = data.get("providers", {})
+    _reject_raw_secrets(providers, path="[providers]")
+    # HL-MODE-01 — reject any Agent Access Mode value outside the canonical set.
+    assistant = data.get("assistant", {})
+    for key in ("mode", "default_mode"):
+        value = assistant.get(key)
+        if value is not None and str(value) not in VALID_AGENT_ACCESS_MODES:
+            allowed = ", ".join(VALID_AGENT_ACCESS_MODES)
+            raise SettingsValidationError(
+                f"[assistant].{key} must be one of {allowed}; got {value!r}"
+            )
+    updater = data.get("updater", {})
+    channel = updater.get("channel")
+    if channel is not None and str(channel) not in VALID_UPDATE_CHANNELS:
+        allowed = ", ".join(VALID_UPDATE_CHANNELS)
+        raise SettingsValidationError(f"[updater].channel must be one of {allowed}; got {channel!r}")
+    auto_check = updater.get("auto_check_enabled")
+    if auto_check is not None and not isinstance(auto_check, bool):
+        raise SettingsValidationError("[updater].auto_check_enabled must be a boolean")

@@ -5,17 +5,41 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
+    "test": "bun test src",
+    "test:e2e": "node ../../node_modules/.bun/@playwright+test@1.61.1/node_modules/@playwright/test/cli.js test",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@codemirror/commands": "6.10.4",
+    "@codemirror/lang-markdown": "6.5.0",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/state": "6.7.0",
+    "@codemirror/view": "6.43.4",
+    "@lezer/highlight": "1.2.3",
+    "@tailwindcss/vite": "^4.3.2",
+    "@tanstack/react-virtual": "^3.14",
     "@vitejs/plugin-react": "^5.1.1",
-    "vite": "^7.2.7",
+    "@xterm/xterm": "5.5.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
+    "dompurify": "^3.4.11",
+    "flexlayout-react": "0.9.2",
+    "lucide-react": "^0.561.0",
+    "pdfjs-dist": "6.1.200",
+    "radix-ui": "^1.6.1",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
-    "lucide-react": "^0.561.0"
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4",
+    "vite": "^7.2.7",
+    "y-codemirror.next": "^0.3.5",
+    "yjs": "^13.6.31",
+    "zustand": "^5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.7.3"

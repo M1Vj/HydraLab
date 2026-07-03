@@ -1,3 +1,6 @@
+# OS artifacts
+.DS_Store
+
 # Dependencies
 node_modules/
 .pnpm-store/
@@ -10,11 +13,15 @@ __pycache__/
 venv/
 env/
 .python-version
+.pytest_cache/
 
 # Environment
 .env
 .env.*
 !.env.example
+
+# Local workspace data
+.hydra/
 
 # Local databases
 *.sqlite
@@ -36,6 +43,7 @@ coverage/
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
+.playwright-cli/
 
 # Temporary upstream references
 tmp/
@@ -47,3 +55,13 @@ references/tmp/
 t3code/
 hermes/
 Hermes/
+
+# Orchestration state (oh-my-claudecode)
+.omc/
+
+# Transient audit / e2e artifacts
+.playwright-mcp/
+apps/web/test-results/
+
+# Transient live-walkthrough screenshots (curated evidence committed separately)
+.agents/evidence/live-audit/
