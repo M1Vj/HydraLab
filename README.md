@@ -6,13 +6,13 @@ HydraLab is not a VS Code, Theia, Obsidian, Zotero or co-scientist fork. It uses
 
 ## Roadmap
 
-HydraLab is planned in three phase groups:
+HydraLab is built in three phase groups. All three are now implemented on the `develop` branch:
 
 1. Research Workbench: production-quality local workspace for reading, saving, annotating, citing, writing, searching, chatting and organizing research projects.
-2. Assistant / Co-Scientist: orchestrated assistant workflows, full MCP support, stage/agent toggles, recipes, approvals and traceable agent runs.
-3. Full Autonomy: closed-loop research workflows, advanced customization, experiment execution, collaboration, mobile/tablet support, packaged macOS app and updater.
+2. Assistant / Co-Scientist: orchestrated assistant workflows, MCP tool support, stage/agent toggles, recipes, approvals and traceable agent runs.
+3. Full Autonomy: closed-loop autonomy safety, advanced customization, sandboxed experiment execution, reproducibility ledger, real-time collaboration, mobile/tablet layouts, and a packaged macOS app with an updater.
 
-Phase 1 is desktop-only macOS first and source/dev-run first for rapid iteration. Phase 1 has no MCP support, no autonomous research loops, no code execution, no packaged app, no mobile/tablet support and no real-time collaboration.
+HydraLab remains desktop-first (macOS) and source/dev-run first. It is pre-release: the macOS packaging and updater are scaffolded but the app is not yet signed, notarized or distributed, and MCP runs over the HTTP transport only. Phase 4 (open-platform interoperability, a HydraLab MCP server, and Homebrew distribution) is future work tracked in `.agents/checklist.md`.
 
 ## Current Planning Sources
 
@@ -72,4 +72,4 @@ Run backend/frontend tests and builds according to the feature guide being imple
 
 ## License
 
-HydraLab is private while the product direction stabilizes. Public release timing and license are intentionally undecided. Keep attribution and third-party license tracking current before any future release decision.
+HydraLab is private while the product direction stabilizes. Public release timing and license are intentionally undecided, so no open-source license is granted and all rights are reserved (see `NOTICE`). Third-party dependency licenses are tracked in `ATTRIBUTION.md` and enforced by a bundle license gate (`scripts/license_gate.py`, exercised in `backend/tests/test_release_pipeline.py`): no strong-copyleft (AGPL/GPL) dependency may ship in a distributable build.
