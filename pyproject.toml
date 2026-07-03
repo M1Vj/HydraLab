@@ -62,6 +62,12 @@ Issues = "https://github.com/M1Vj/HydraLab/issues"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Include the bundled web UI (scripts/build_release.py drops it here) in both
+# the sdist and the wheel, even though backend/hydra/web is git-ignored build
+# output. Global so the wheel-built-from-sdist path keeps the assets.
+[tool.hatch.build]
+artifacts = ["backend/hydra/web/**/*"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["backend/hydra"]
 
