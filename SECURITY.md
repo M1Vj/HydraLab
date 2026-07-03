@@ -8,7 +8,7 @@ HydraLab is pre-release software. Only the latest code on `develop` and `main` i
 
 Please report vulnerabilities privately by email:
 
-**interns@ai4gov.net**
+**mabansagbj@gmail.com**
 
 Do **not** open a public GitHub issue for security problems — public disclosure before a fix is available puts users at risk.
 
