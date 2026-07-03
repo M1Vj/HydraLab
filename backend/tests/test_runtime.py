@@ -135,8 +135,11 @@ def test_hl_core_08_port_files_are_owner_only_and_removed(tmp_path):
     assert json.loads(app_file.read_text()) == payload
     assert json.loads(project_file.read_text()) == payload
     assert "token" not in app_file.read_text().lower()
-    assert stat.S_IMODE(app_file.stat().st_mode) == 0o600
-    assert stat.S_IMODE(project_file.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        # POSIX mode bits are meaningless on Windows (chmod is a no-op there);
+        # owner-only protection relies on the per-user profile ACL instead.
+        assert stat.S_IMODE(app_file.stat().st_mode) == 0o600
+        assert stat.S_IMODE(project_file.stat().st_mode) == 0o600
 
     runtime.release()
     assert not app_file.exists()
