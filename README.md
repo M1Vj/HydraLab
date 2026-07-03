@@ -1,7 +1,7 @@
 <h1 align="center">HydraLab</h1>
 
 <p align="center">
-  <strong>An offline-first research workbench for reading, citing, writing, and running research agents — entirely on your own machine.</strong>
+  <strong>An offline-first research workbench — read, annotate, cite, write, and run research agents, entirely on your own machine.</strong>
 </p>
 
 <p align="center">
@@ -17,77 +17,87 @@
   <img src="docs/hydralab-workbench.png" alt="The HydraLab workbench: dockable panels for sources, PDF reading, annotations, and tasks" width="100%">
 </p>
 
-HydraLab is a project-centered local app: you open a folder and work with papers, notes, citations, browser context, saved chats, claims, evidence links, tasks, drafts, exports, and orchestrated research agents — all backed by files and a per-project SQLite database on your disk.
+HydraLab is a local-first, co-scientist-grade research environment. You open a project folder and everything a research workflow needs lives inside it: papers, annotations, notes, citations, claims, evidence links, saved chats, tasks, drafts, and orchestrated agent runs — all backed by readable files and a per-project SQLite database on your disk. Your data never leaves your machine without an explicit action from you.
 
-It is **not** a VS Code, Theia, Obsidian, Zotero, or co-scientist fork. It uses proven open-source libraries and reference implementations, then adapts the useful ideas through HydraLab-owned architecture and contracts.
+It is not a fork of VS Code, Theia, Obsidian, Zotero, or any co-scientist project. HydraLab builds on proven open-source libraries and adapts their best ideas through its own architecture and contracts.
 
 ## Why HydraLab
 
-- **Local and private by default.** Your papers, notes, and data live on your machine. Nothing leaves it without an explicit action from you. API keys are stored in the OS keychain, never in the project.
-- **Honest by construction.** Retrieval returns extractive passages with source locators (page, section, offset) and never fabricates citations or references.
-- **A real workbench, not a demo.** A dockable, VS Code–style workspace where every panel is wired to a live backend — reading, annotating, citing, writing, chatting, searching, and organizing all in one place.
-- **Assistants and autonomy, gated.** Optional assistant recipes and closed-loop agents run behind consent, approvals, a Review Inbox, safety checkpoints, and an append-only audit ledger.
+Most research tools make you choose: a reference manager *or* an editor *or* a chat window *or* an agent framework — each with its own silo, and most of them phoning home. HydraLab is one workbench where those pieces share a single local data model, and where the trust boundary is drawn in your favor:
+
+- **Local and private by default.** Papers, notes, indexes, and chats live on your machine. An enforced offline-only mode hard-blocks network egress entirely. No telemetry, ever.
+- **Honest by construction.** Retrieval is extractive: it quotes indexed passages verbatim with exact locators (page, section, character offset) and will never fabricate a citation it cannot ground.
+- **Agents behind gates, not hype.** Assistant recipes and closed-loop autonomy exist — but every run is staged, traceable, risk-classified, and routed through approvals, a Review Inbox, and an append-only audit ledger.
+- **A real workbench, not a demo.** Every panel in the dockable workspace is wired to a live backend. Reading, annotating, citing, writing, chatting, searching, and organizing happen in one place, against one project.
 
 ## Features
 
-**Workbench & editing**
-- VS Code–style dockable panels (FlexLayout) with drag/close/rearrange and named, per-project persisted layouts
-- Command palette, keyboard navigation, and error-isolated panels
-- CodeMirror 6 Markdown editor with wikilinks, backlinks, callouts, and live preview
-- PDF.js reader with a research annotation layer (text-layer selection highlights stored in normalized page coordinates)
+### The workbench
 
-**Sources, citations & evidence**
-- Source discovery through scholarly APIs (OpenAlex, Crossref, arXiv, and more)
-- Document ingestion (Docling + a permissive light extractor) with an async ingestion queue and a local search index
-- Citations, claims, and evidence links with BibTeX / CSL-JSON / RIS import & export and APA/IEEE rendering (permissive CSL via `citeproc-py`)
-- Confidence-based duplicate detection and source merge with referential-integrity repair
+- **VS Code–style dockable workspace** (FlexLayout): drag, split, close, and rearrange panels; named layouts persist per project; a command palette drives keyboard-first navigation.
+- **Error-isolated panels** — a crash in one panel never takes down the workspace.
+- **CodeMirror 6 Markdown editor** with wikilinks, backlinks, callouts, and live preview.
+- **PDF.js reader with a research annotation layer**: text-layer selection highlights are stored in normalized page coordinates, so annotations survive re-render, zoom, and window resizes.
 
-**Assistant, agents & MCP**
-- Per-project named chats with bring-your-own-key providers (OpenAI, OpenRouter) and a token budget
-- MCP tool support, orchestrated recipes (literature review, paper critique, idea generation), and traceable staged agent runs with approvals
-- Skills registry and project-local assistant context (`HYDRA.md`), consent-gated and Review-Inbox routed
+### Research intelligence
 
-**Autonomy, reproducibility & collaboration**
-- Closed-loop autonomy with policy gates, risk classification, safety checkpoints, and an append-only audit ledger
-- Sandboxed experiment execution and a reproducibility/evaluation ledger
-- Real-time collaborative editing (Yjs) with a durable, replayable update log
-- Responsive mobile/tablet layouts and a Tauri desktop packaging shell (pre-release)
+- **Source discovery** across scholarly APIs — OpenAlex, Crossref, arXiv, and more.
+- **Document ingestion** via Docling plus a permissive light extractor, fed through an async ingestion queue into a local search index.
+- **Grounded, extractive retrieval** that returns passages with exact locators (page, section, char offset) and never invents a reference.
+- **A citations / claims / evidence graph**: BibTeX, CSL-JSON, and RIS import & export; APA and IEEE rendering; confidence-based duplicate detection; and source merging with referential-integrity repair.
+- **A knowledge graph** connecting notes, sources, claims, and tasks across the project.
+
+### Assistant & agents
+
+- **Per-project named chats** with bring-your-own-key providers (OpenAI, OpenRouter) and a token budget.
+- **MCP tool support** (HTTP transport) so the assistant can operate real project tooling.
+- **Orchestrated research recipes**: literature review, paper critique with related-work analysis, and idea generation with ranking.
+- **Every agent run is staged and traceable**, gated by approvals and a Review Inbox — nothing lands in your project without your sign-off.
+- **A skills registry** and a project-local assistant context file (`HYDRA.md`).
+
+### Autonomy, done responsibly
+
+- **Closed-loop autonomy layer** with policy gates, a risk classifier, human-in-the-loop safety checkpoints, and an append-only audit ledger.
+- **Sandboxed experiment execution** and a reproducibility & evaluation ledger.
+- **Real-time collaborative editing** (Yjs) with a durable, replayable update log.
+- **Responsive mobile/tablet layouts** and a Tauri desktop shell.
 
 ## Tech stack
 
-| Layer      | Stack |
-| ---------- | ----- |
-| Frontend   | React 19, TypeScript, Vite, FlexLayout, CodeMirror 6, PDF.js |
-| Backend    | Python 3.11+, FastAPI, SQLModel, async SQLite (aiosqlite), Alembic |
-| Storage    | Per-project SQLite + readable project files; secrets in the OS keychain |
-| Desktop    | Tauri v2 (packaging shell, pre-release) |
-| Extension  | Chrome MV3 browser bridge |
+| Layer     | Stack |
+| --------- | ----- |
+| Frontend  | React 19 · TypeScript · Vite · FlexLayout · CodeMirror 6 · PDF.js |
+| Backend   | Python 3.11+ · FastAPI · SQLModel · async SQLite (aiosqlite) · Alembic |
+| Storage   | Per-project SQLite + readable project files; secrets in the OS keychain |
+| Desktop   | Tauri v2 |
+| Extension | Chrome MV3 |
+| Tooling   | JS managed by [Bun](https://bun.sh), Python by [uv](https://docs.astral.sh/uv/) |
 
 ## Getting started
 
 ### Prerequisites
 
 - **macOS** (Apple Silicon or Intel)
-- **Python 3.11+** and [uv](https://docs.astral.sh/uv/)
-- **[Bun](https://bun.sh) 1.x** (JavaScript runtime + workspace manager)
-- *(optional)* A Rust toolchain if you want to build the Tauri desktop shell
+- **Python 3.11+** and [`uv`](https://docs.astral.sh/uv/)
+- **[Bun](https://bun.sh) 1.x**
+- *(optional)* A Rust toolchain, if you want to build the Tauri desktop shell
 
-### Installation
+### Install
 
 ```bash
 git clone https://github.com/M1Vj/HydraLab.git
 cd HydraLab
 
 uv sync        # backend (Python) environment
-bun install    # frontend workspace (apps/*)
+bun install    # frontend workspace
 ```
 
-### Running HydraLab
+### Run
 
-HydraLab runs as a local backend plus a web frontend. Start each in its own terminal.
+HydraLab runs as a local backend plus a web frontend — start each in its own terminal.
 
 ```bash
-# 1) Backend — binds 127.0.0.1 and auto-selects a port in 8765–8799
+# 1) Backend — binds 127.0.0.1, auto-selects a port in 8765–8799
 cd backend
 uv run python -m hydra.serve --project-root /path/to/your/research-project
 ```
@@ -97,9 +107,16 @@ uv run python -m hydra.serve --project-root /path/to/your/research-project
 bun run dev
 ```
 
-Then open <http://127.0.0.1:5173>. The dev server proxies API and WebSocket calls to the backend, so the frontend always talks to a same-origin `/api` path.
+Then open <http://127.0.0.1:5173>.
 
-## Development
+*(optional)* To enable the browser-automation feature:
+
+```bash
+uv sync --extra browser
+uv run playwright install chromium
+```
+
+### Development
 
 ```bash
 uv run --project backend pytest backend/tests -q   # backend test suite
@@ -108,39 +125,41 @@ bun run typecheck                                  # TypeScript type check
 bun run build                                      # production frontend build
 ```
 
-## Project structure
-
-```
-apps/web               React + TypeScript + Vite workbench (FlexLayout panels)
-apps/chrome-extension  Chrome MV3 browser bridge for capturing sources
-apps/desktop           Tauri v2 desktop packaging shell (pre-release)
-backend/hydra          FastAPI + SQLModel backend, per-project SQLite, Alembic
-scripts/               release + license-gate tooling
-```
+The repository runs a clean CI pipeline on macOS and carries a large test suite spanning the backend and the web app; the four commands above are the local gate for every change.
 
 ## Privacy & trust
 
-HydraLab is designed for researchers who need to keep control of their material:
+HydraLab treats privacy as an architectural property, not a settings page.
 
-- **Offline-first.** All indexing, reading, and storage happen locally. An enforced offline-only mode hard-blocks network egress.
-- **Explicit egress.** Provider calls, source downloads, and browser context sharing are consent-gated; untrusted content (page/PDF/Markdown) is treated as data, never as instructions, and can never silently trigger a fetch or write.
-- **No invented sources.** Extractive retrieval quotes indexed passages verbatim with locators; it will not synthesize a citation it cannot ground.
-- **Secrets stay in the keychain.** API keys are write-only from the UI and never exported or logged.
+- **Offline-first, with teeth.** All indexing, reading, and storage happen locally. The enforced offline-only mode hard-blocks network egress — it is not a soft toggle.
+- **Every byte of egress is consent-gated.** Provider API calls, source downloads, and browser-context sharing each require an explicit action. Nothing is sent in the background.
+- **Untrusted content is data, never instructions.** Page content, PDFs, and imported documents can never silently trigger a fetch or a write — a deliberate defense against prompt-injection through documents you merely read.
+- **Secrets live in the OS keychain only.** API keys are write-only from the UI; they are never exported, never logged, and never stored in the project.
+- **No fabricated sources.** Extractive retrieval quotes indexed passages verbatim with locators. If it cannot ground a claim, it does not cite one.
+- **No telemetry.** HydraLab sends nothing about you, your projects, or your usage anywhere.
 
 ## Roadmap
 
-HydraLab is built in three phase groups, all implemented on the `develop` branch:
+HydraLab was built in three phase groups, all implemented on the default branch:
 
-1. **Research Workbench** — local workspace for reading, saving, annotating, citing, writing, searching, chatting, and organizing.
-2. **Assistant / Co-Scientist** — orchestrated assistant workflows, MCP tools, recipes, approvals, and traceable agent runs.
-3. **Full Autonomy** — closed-loop autonomy safety, sandboxed experiments, reproducibility ledger, real-time collaboration, mobile/tablet layouts, and a packaged macOS app with an updater.
+1. **Research Workbench** — the local workspace: reading, annotating, citing, writing, searching, chatting, and organizing.
+2. **Assistant / Co-Scientist** — orchestrated assistant workflows, MCP tools, research recipes, approvals, and traceable agent runs.
+3. **Full Autonomy** — closed-loop autonomy safety, sandboxed experiments, the reproducibility ledger, real-time collaboration, mobile/tablet layouts, and the packaged macOS app scaffold.
 
-It is **pre-release**: the macOS packaging and updater are scaffolded but not yet signed, notarized, or distributed, and MCP currently runs over the HTTP transport only. Phase 4 (open-platform interoperability, a HydraLab MCP server, and Homebrew distribution) is planned but not yet implemented.
+**Current status — pre-release, macOS-first.** The packaged macOS app is scaffolded but not yet signed, notarized, or distributed, and MCP currently runs over the HTTP transport only.
 
-## Third-party licenses
+**Phase 4 (planned, not yet implemented):** open-platform interoperability, a HydraLab MCP server, and Homebrew distribution.
 
-HydraLab depends on and studies third-party open-source software. Every dependency, its SPDX license, bundling role, and distribution impact is tracked in [`ATTRIBUTION.md`](ATTRIBUTION.md). A bundle license gate (`scripts/license_gate.py`, exercised in `backend/tests/test_release_pipeline.py`) enforces the policy that **no strong-copyleft (AGPL/GPL) dependency ships in any distributable build**.
+## Contributing
+
+Contributions are welcome. Before you start:
+
+- Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for workflow, style, and the verification gate.
+- Report vulnerabilities privately per [`SECURITY.md`](SECURITY.md).
+- All participation is governed by the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 ## License
 
-HydraLab is released under the [MIT License](LICENSE). Third-party dependencies keep their own licenses — see [`ATTRIBUTION.md`](ATTRIBUTION.md) and the bundle policy above.
+HydraLab is released under the [MIT License](LICENSE).
+
+Third-party dependencies keep their own licenses — every dependency, its SPDX license, bundling role, and distribution impact is tracked in [`ATTRIBUTION.md`](ATTRIBUTION.md). A bundle license gate enforces that **no strong-copyleft (AGPL/GPL) dependency ships in any distributable build**.
