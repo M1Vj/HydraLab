@@ -11,7 +11,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import AsyncIterator, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, Depends, WebSocket, WebSocketDisconnect
@@ -157,8 +157,10 @@ from hydra.services.writing import (
 )
 from hydra.manuscripts import ManuscriptBuildError, ManuscriptPackageService, PackageRequest
 from hydra.services.ingestion import IngestionService
+from hydra.services.ingestion.queue import IngestionQueue
 from hydra.services.ingestion.safety import validate_source_file
 from hydra.services.ingestion.types import QuarantineError
+from hydra.services.ingestion.worker import run_ingestion_worker
 from hydra.services.tasks import TaskProposal, propose_task
 from hydra.services.git import GitError, GitService, suggest_grouped_commits
 from hydra.services.console import ConsoleService
@@ -448,9 +450,23 @@ def create_app() -> FastAPI:
             project_root = os.environ.get("HYDRALAB_PROJECT_ROOT")
             runtime.write_port_file(project_root=Path(project_root) if project_root else None)
         await init_db()
+
+        # Re-queue any jobs left "running" by a previous crash, then start the
+        # single background worker that drains the ingestion queue. The worker is
+        # cancelled on shutdown so a `with TestClient(...)` block and a real
+        # uvicorn process both tear it down cleanly.
+        project_root_path = Path(os.environ.get("HYDRALAB_PROJECT_ROOT") or hydra_project_root())
+        async with async_session_maker() as recovery_session:
+            await IngestionQueue(recovery_session).resume_after_restart()
+        worker_task = asyncio.create_task(
+            run_ingestion_worker(async_session_maker, project_root=project_root_path)
+        )
         try:
             yield
         finally:
+            worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker_task
             if runtime is not None:
                 runtime.release()
 
@@ -2514,6 +2530,7 @@ def create_app() -> FastAPI:
         url: str | None = Form(None),
         doi: str | None = Form(None),
         title: str | None = Form(None),
+        background: bool = Form(False),
         session: AsyncSession = Depends(get_session),
     ) -> dict[str, object]:
         repo = Repository(session)
@@ -2575,6 +2592,14 @@ def create_app() -> FastAPI:
                 "trust_origin": "user-curated",
             }
         )
+        if background:
+            # Defer the heavy conversion to the queue worker and return at once,
+            # so a large upload never blocks the request. The file passed
+            # quarantine validation above; the worker runs the full conversion.
+            job = await IngestionQueue(session).enqueue(source_id=source["id"], source_path=original_path)
+            await repo.add_event("source.ingest.queued", f"Queued ingestion for {source['title']}")
+            return {"source": source, "note": None, "ingestion": {"state": "queued", "job_id": job.id, "artifacts": []}}
+
         ingestion = await IngestionService().ingest(
             session,
             source_id=source["id"],
@@ -2587,6 +2612,58 @@ def create_app() -> FastAPI:
         note = await repo.add_note(f"Notes & Summary for {source['title']}", note_body, source["id"])
         await repo.add_event("source.ingested", f"Ingested {source['title']}")
         return {"source": source, "note": note, "ingestion": ingestion}
+
+    def _ingestion_job_dict(job: IngestionJob) -> dict[str, object]:
+        return {
+            "id": job.id,
+            "source_id": job.source_id,
+            "source_path": job.source_path,
+            "status": job.status,
+            "progress": job.progress,
+            "priority": job.priority,
+            "retry_count": job.retry_count,
+            "failure_reason": job.failure_reason,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        }
+
+    @app.get("/api/ingestion/jobs")
+    async def list_ingestion_jobs(session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        rows = (
+            await session.exec(
+                select(IngestionJob).order_by(IngestionJob.priority.desc(), IngestionJob.created_at.asc())
+            )
+        ).all()
+        return {"jobs": [_ingestion_job_dict(job) for job in rows]}
+
+    async def _ingestion_job_action(job_id: str, action, session: AsyncSession):
+        try:
+            job = await action(IngestionQueue(session), job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"job": _ingestion_job_dict(job)}
+
+    @app.post("/api/ingestion/jobs/{job_id}/pause")
+    async def pause_ingestion_job(job_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return await _ingestion_job_action(job_id, lambda q, jid: q.pause(jid), session)
+
+    @app.post("/api/ingestion/jobs/{job_id}/resume")
+    async def resume_ingestion_job(job_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return await _ingestion_job_action(job_id, lambda q, jid: q.resume(jid), session)
+
+    @app.post("/api/ingestion/jobs/{job_id}/retry")
+    async def retry_ingestion_job(job_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return await _ingestion_job_action(job_id, lambda q, jid: q.retry(jid), session)
+
+    @app.post("/api/ingestion/jobs/{job_id}/cancel")
+    async def cancel_ingestion_job(job_id: str, session: AsyncSession = Depends(get_session)) -> dict[str, object]:
+        return await _ingestion_job_action(job_id, lambda q, jid: q.cancel(jid), session)
+
+    @app.patch("/api/ingestion/jobs/{job_id}/priority")
+    async def set_ingestion_job_priority(
+        job_id: str, priority: int, session: AsyncSession = Depends(get_session)
+    ) -> dict[str, object]:
+        return await _ingestion_job_action(job_id, lambda q, jid: q.set_priority(jid, priority), session)
 
     @app.get("/api/sources/retrieve")
     async def retrieve_rag(
