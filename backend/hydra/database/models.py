@@ -498,6 +498,24 @@ class CollaboratorIdentity(SQLModel, table=True):
     revoked_at: Optional[datetime] = Field(default=None, nullable=True)
 
 
+class CollaborationUpdate(SQLModel, table=True):
+    """Append-only log of Yjs document updates for durable collaboration.
+
+    The server runs no CRDT engine; it stores each client update (base64) in
+    order and replays the log to late joiners, who rebuild identical state via
+    Yjs's commutative merge. This is what makes collaborative edits survive a
+    reconnect or a backend restart.
+    """
+
+    __tablename__ = "collaboration_updates"
+    id: str = Field(default_factory=uuid_text, primary_key=True)
+    project_id: str = Field(index=True)
+    document_id: str = Field(index=True)
+    seq: int = Field(index=True)
+    update_b64: str
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class ProjectCollaborationPermission(SQLModel, table=True):
     __tablename__ = "project_collaboration_permissions"
     id: str = Field(default_factory=uuid_text, primary_key=True)

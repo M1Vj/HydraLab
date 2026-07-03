@@ -435,6 +435,60 @@ def test_hl_core_87_websocket_drops_secret_frames_but_relays_clean_updates(tmp_p
         assert websocket.receive_text() == "clean follow-up\n"
 
 
+def test_document_updates_persist_and_replay_on_reconnect(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    client = TestClient(create_app())
+    token, _cid = _enable_and_authenticate(client, "transformer-survey")
+    url = f"/api/collaboration/ws/transformer-survey/notes%2Flit-review.md?token={token}"
+    update = json.dumps({"type": "document-update", "update": "AQID"})
+
+    with client.websocket_connect(url, headers=_WS_ORIGIN) as websocket:
+        assert websocket.receive_json()["type"] == "presence"
+        websocket.send_text(update)
+        assert websocket.receive_text() == update  # echo back to sender
+
+    # A fresh connection (reconnect / restart) replays the persisted update so
+    # the collaborative state is not lost.
+    with client.websocket_connect(url, headers=_WS_ORIGIN) as websocket:
+        assert websocket.receive_json()["type"] == "presence"
+        replayed = websocket.receive_json()
+        assert replayed["type"] == "document-update"
+        assert replayed["update"] == "AQID"
+
+
+@pytest.mark.asyncio
+async def test_collaboration_room_broadcasts_to_peers_not_sender():
+    # Cross-socket fan-out cannot be exercised through the synchronous TestClient
+    # websocket portal, so verify the room logic directly: an update reaches every
+    # other socket on the document but not the sender (Yjs already applied it).
+    from hydra.collaboration.documents import CollaborationRooms
+
+    class _FakeSocket:
+        def __init__(self) -> None:
+            self.received: list[str] = []
+
+        async def send_text(self, data: str) -> None:
+            self.received.append(data)
+
+    rooms = CollaborationRooms()
+    sender, peer_a, peer_b = _FakeSocket(), _FakeSocket(), _FakeSocket()
+    other_doc = _FakeSocket()
+    rooms.join("proj", "notes/a.md", sender)
+    rooms.join("proj", "notes/a.md", peer_a)
+    rooms.join("proj", "notes/a.md", peer_b)
+    rooms.join("proj", "notes/b.md", other_doc)
+
+    delivered = await rooms.broadcast("proj", "notes/a.md", "update", sender=sender)
+    assert delivered == 2
+    assert sender.received == []  # never echoed to the originator here
+    assert peer_a.received == ["update"] and peer_b.received == ["update"]
+    assert other_doc.received == []  # a different document is untouched
+
+    # Leaving prunes the socket; a later broadcast skips it.
+    rooms.leave("proj", "notes/a.md", peer_a)
+    assert await rooms.broadcast("proj", "notes/a.md", "again", sender=sender) == 1
+
+
 def test_hl_core_83_websocket_revoked_idle_socket_is_closed_by_server(tmp_path, monkeypatch):
     from starlette.websockets import WebSocketDisconnect
 

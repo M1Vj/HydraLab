@@ -235,6 +235,7 @@ from hydra.orchestrator.advanced import (
 )
 from hydra.collaboration.exclusion import DocumentCandidate, SyncExclusionFilter
 from hydra.collaboration.identity import CollaborationPermissionError, IdentityProvider
+from hydra.collaboration.documents import CollaborationDocumentStore, CollaborationRooms
 from hydra.collaboration.transport import InProcessSyncTransport, SelfHostedSyncTransport, SyncAuthenticationError
 from hydra.recipes.literature_review import (
     LiteratureReviewInput,
@@ -311,6 +312,9 @@ _MEMORY_SECRET_STORE = InMemorySecretStore()
 _PROVIDER_CACHE = ProviderCache()
 _COLLAB_SYNC_TRANSPORT = InProcessSyncTransport()
 _COLLAB_EXCLUSION_FILTER = SyncExclusionFilter()
+# In-process registry of live document sockets so an update from one collaborator
+# fans out to the others editing the same document.
+_COLLAB_ROOMS = CollaborationRooms()
 # Idle poll interval so a collaborator revoked mid-session is disconnected within
 # the window (well under the 5s bound) instead of blocking on receive forever.
 _COLLAB_REVOKE_POLL_SECONDS = 1.0
@@ -1495,6 +1499,23 @@ def create_app() -> FastAPI:
                     },
                 }
             )
+            # Replay the persisted Yjs update log so a joining (or reconnecting,
+            # or post-restart) client rebuilds the document's collaborative state
+            # before it starts editing.
+            doc_store = CollaborationDocumentStore(session)
+            # Read the replay log in a dedicated short-lived session: a bare SELECT
+            # on the long-lived handler session autobegins a transaction that never
+            # commits, and rolling it back during task cancellation (client
+            # disconnect while parked in receive) deadlocks the aiosqlite worker
+            # thread on loop shutdown. A committed/closed session leaves nothing to
+            # unwind, so the handler cancels cleanly.
+            async with async_session_maker() as replay_session:
+                replay_log = await CollaborationDocumentStore(replay_session).load_updates(
+                    project_id=project_id, document_id=document_id
+                )
+            for update_b64 in replay_log:
+                await websocket.send_json({"type": "document-update", "update": update_b64})
+            _COLLAB_ROOMS.join(project_id, document_id, websocket)
             try:
                 while connection.connected:
                     try:
@@ -1513,10 +1534,25 @@ def create_app() -> FastAPI:
                         DocumentCandidate(path=document_id, document_type=document_type, content=message)
                     ) is None:
                         continue
+                    # Persist real Yjs document updates so edits survive reconnect
+                    # and restart. Non-update frames (awareness, raw text) still
+                    # relay but are not part of the durable log.
+                    try:
+                        parsed = json.loads(message)
+                    except (TypeError, ValueError):
+                        parsed = None
+                    if isinstance(parsed, dict) and parsed.get("type") == "document-update" and parsed.get("update"):
+                        await doc_store.append_update(
+                            project_id=project_id, document_id=document_id, update_b64=str(parsed["update"])
+                        )
+                    # Echo (harmless idempotent apply for the sender) and fan out
+                    # to every other socket editing this document.
                     await websocket.send_text(message)
+                    await _COLLAB_ROOMS.broadcast(project_id, document_id, message, sender=websocket)
             except WebSocketDisconnect:
                 pass
             finally:
+                _COLLAB_ROOMS.leave(project_id, document_id, websocket)
                 connection.disconnect()
                 try:
                     await websocket.close(code=1000)
