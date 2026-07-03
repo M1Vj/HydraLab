@@ -65,3 +65,9 @@ apps/web/test-results/
 
 # Transient live-walkthrough screenshots (curated evidence committed separately)
 .agents/evidence/live-audit/
+
+# Internal planning / requirements docs (not part of the public repo)
+.agents/
+Hydra - User Requirements.md
+HydraLab - User Requirements.md
+OLD - Hydra - User Requirements.md
