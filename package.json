@@ -7,12 +7,12 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "bun run --filter @hydra/web dev",
-    "build": "bun run --filter @hydra/web build && bun run --filter @hydra/chrome-extension build",
-    "test": "bun test apps/web/src apps/chrome-extension/src",
-    "test:e2e": "bun run --filter @hydra/web test:e2e",
-    "typecheck": "bun run --filter @hydra/web typecheck && bun run --filter @hydra/chrome-extension typecheck",
-    "lint": "bun run typecheck"
+    "dev": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web dev; else npm run dev --workspace=@hydra/web; fi",
+    "build": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web build && bun run --filter @hydra/chrome-extension build; else npm run build --workspace=@hydra/web --workspace=@hydra/chrome-extension; fi",
+    "test": "if command -v bun >/dev/null 2>&1; then bun test apps/web/src apps/chrome-extension/src; else npm run test --workspace=@hydra/web; fi",
+    "test:e2e": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web test:e2e; else npm run test:e2e --workspace=@hydra/web; fi",
+    "typecheck": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web typecheck && bun run --filter @hydra/chrome-extension typecheck; else npm run typecheck --workspace=@hydra/web --workspace=@hydra/chrome-extension; fi",
+    "lint": "if command -v bun >/dev/null 2>&1; then bun run typecheck; else npm run typecheck; fi"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
