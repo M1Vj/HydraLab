@@ -7,12 +7,12 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "bun run --filter @hydra/web dev",
-    "build": "bun run --filter @hydra/web build && bun run --filter @hydra/chrome-extension build",
-    "test": "bun test apps/web/src apps/chrome-extension/src",
-    "test:e2e": "bun run --filter @hydra/web test:e2e",
-    "typecheck": "bun run --filter @hydra/web typecheck && bun run --filter @hydra/chrome-extension typecheck",
-    "lint": "bun run typecheck"
+    "dev": "node scripts/ensure-bun.mjs dev",
+    "build": "node scripts/ensure-bun.mjs build",
+    "test": "node scripts/ensure-bun.mjs test",
+    "test:e2e": "node scripts/ensure-bun.mjs test:e2e",
+    "typecheck": "node scripts/ensure-bun.mjs typecheck",
+    "lint": "node scripts/ensure-bun.mjs lint"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
