@@ -28,8 +28,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
+      - name: Verify lockfile is in sync (pypdf bump must stay isolated)
+        run: uv lock --check
+
       - name: Run backend tests
-        run: uv run --project backend pytest backend/tests -q
+        # Genuine backend verification for dependency bumps (e.g. pypdf
+        # PdfReader paths in app.py / light_adapter.py / docling_adapter.py).
+        run: uv run pytest backend/tests -q
 
   frontend:
     name: Frontend (typecheck, test, build) · ${{ matrix.os }}
@@ -41,17 +46,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Bun
+      - name: Install Bun (pinned, hermetic — no curl|bash bootstrap)
         uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+
+      - name: Assert no skip-to-pass gates set (fail-closed verification)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${HYDRA_SKIP_FRONTEND:-}${HYDRA_SKIP_UI_BUILD:-}${HYDRA_SKIP_UI_TEST:-}${HYDRA_SKIP_TYPECHECK:-}" ]; then
+            echo "::error::HYDRA_SKIP_* must be unset for required checks; refusing vacuous green build."
+            exit 1
+          fi
+          echo "skip-gate assertion passed: no HYDRA_SKIP_* set."
 
       - name: Install dependencies
         run: bun install
 
-      - name: Typecheck
-        run: bun run typecheck
+      - name: Verify Bun preflight (fail-fast, no downloads)
+        run: node scripts/ensure-bun.mjs --ensure
 
-      - name: Run web unit tests
-        run: bun test apps/web/src
+      - name: Dispatcher unit tests (no Bun toolchain stubbing — real arg arrays)
+        run: node --test scripts/ensure-bun.test.mjs
 
-      - name: Build
-        run: bun run build
+      - name: Typecheck (via hardened dispatcher, covers web + chrome-extension)
+        run: npm run typecheck
+
+      - name: Run unit tests (via hardened dispatcher, covers web + chrome-extension)
+        run: npm test
+
+      - name: Build (via hardened dispatcher, covers web + chrome-extension)
+        run: npm run build
