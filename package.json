@@ -1,18 +1,21 @@
 {
-  "name": "hydra",
+  "name": "hydralab",
   "private": true,
+  "version": "0.0.0",
   "type": "module",
-  "packageManager": "bun@1.3.11",
+  "packageManager": "bun@1.2.1",
   "workspaces": [
     "apps/*"
   ],
   "scripts": {
-    "dev": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web dev; else npm run dev --workspace=@hydra/web; fi",
-    "build": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web build && bun run --filter @hydra/chrome-extension build; else npm run build --workspace=@hydra/web --workspace=@hydra/chrome-extension; fi",
-    "test": "if command -v bun >/dev/null 2>&1; then bun test apps/web/src apps/chrome-extension/src; else npm run test --workspace=@hydra/web; fi",
-    "test:e2e": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web test:e2e; else npm run test:e2e --workspace=@hydra/web; fi",
-    "typecheck": "if command -v bun >/dev/null 2>&1; then bun run --filter @hydra/web typecheck && bun run --filter @hydra/chrome-extension typecheck; else npm run typecheck --workspace=@hydra/web --workspace=@hydra/chrome-extension; fi",
-    "lint": "if command -v bun >/dev/null 2>&1; then bun run typecheck; else npm run typecheck; fi"
+    "dev": "node scripts/dual-run.mjs dev",
+    "build": "node scripts/dual-run.mjs build",
+    "test": "node scripts/dual-run.mjs test",
+    "test:e2e": "node scripts/dual-run.mjs test:e2e",
+    "test:equivalence": "node scripts/dual-run.mjs test:equivalence",
+    "verify:lockfile": "node scripts/dual-run.mjs verify:lockfile",
+    "typecheck": "node scripts/dual-run.mjs typecheck",
+    "lint": "node scripts/dual-run.mjs lint"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
