@@ -202,7 +202,7 @@ export function runSteps({ bunBin, steps, label, spawn = spawnSync, env = proces
     log(`run (${label} ${index}/${steps.length}): bun ${step.args.join(" ")}`);
     const r = spawn(bunBin, [...step.args], {
       encoding: "utf8",
-      timeout: 600000,
+      timeout: step.timeout ?? (label === "dev" ? 0 : 600000),
       env,
       stdio: "inherit",
       shell: false,
@@ -235,7 +235,7 @@ export function parseCommand(argv = process.argv.slice(2)) {
  */
 export function dispatch(
   cmd,
-  { env = process.env, platform = process.platform, spawn = spawnSync, resolve = resolveBun } = {},
+  { rest = [], env = process.env, platform = process.platform, spawn = spawnSync, resolve = resolveBun } = {},
 ) {
   const { cmd: parsed } = parseCommand([cmd]);
   const bun = ensureBun({ env, resolve: () => resolve({ platform, spawn }) });
@@ -247,19 +247,42 @@ export function dispatch(
     err.code = 1;
     throw err;
   }
+  // Script runners append options to the end of the original `a && b`
+  // command. Preserve that routing: only the final workspace gets them.
+  // Never join/reparse arguments, so spaces and metacharacters stay literal.
+  const last = steps[steps.length - 1];
+  last.args.push(...rest);
+  // Leave explicitly long-running modes to the user; one-shot steps and
+  // the read-only version probe keep their existing bounded timeouts.
+  const separator = rest.indexOf("--");
+  const options = separator < 0 ? rest : rest.slice(0, separator);
+  const compilerCommand = ["build", "typecheck", "lint"].includes(parsed);
+  let watching = false;
+  for (let i = 0; i < options.length; i += 1) {
+    if (options[i] === "--watch" || (compilerCommand && options[i] === "-w")) {
+      watching = !compilerCommand || options[i + 1] !== "false";
+    }
+  }
+  if (
+    ((parsed === "test" || compilerCommand) && watching) ||
+    (parsed === "test:e2e" && options.some((arg) => arg === "--ui" || arg === "--debug"))
+  ) {
+    last.timeout = 0;
+  }
   runSteps({ bunBin: bun.bin, steps, label: parsed, spawn, env });
   return { ok: true, bun, steps };
 }
 
 function main() {
   let cmd = "build";
+  let rest = [];
   try {
-    ({ cmd } = parseCommand(process.argv.slice(2)));
+    ({ cmd, rest } = parseCommand(process.argv.slice(2)));
   } catch (err) {
     fail(err.message, typeof err.code === "number" && err.code !== 0 ? err.code : 1);
   }
   try {
-    dispatch(cmd, { env: process.env, platform: process.platform, spawn: spawnSync, resolve: resolveBun });
+    dispatch(cmd, { rest, env: process.env, platform: process.platform, spawn: spawnSync, resolve: resolveBun });
   } catch (err) {
     const code = typeof err?.code === "number" && err.code !== 0 ? err.code : 1;
     fail(err?.message ?? String(err), code);

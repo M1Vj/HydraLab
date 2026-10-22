@@ -15,8 +15,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
+import vm from "node:vm";
 
 import {
   PINNED_BUN_VERSION,
@@ -32,6 +33,43 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SOURCE = readFileSync(path.join(HERE, "ensure-bun.mjs"), "utf8");
+
+// Execute the CLI entry point with synthetic argv/process and a subprocess
+// recorder. Only ESM declarations are adapted for the VM; main() is unchanged.
+// This proves dispatch wiring, not real Bun/Vite/Playwright integration.
+function runCli(argv, { env = {}, platform = "linux", version = "1.3.11", results = [] } = {}) {
+  const calls = [];
+  const errors = [];
+  const entry = path.resolve("/virtual/ensure-bun.mjs");
+  const exit = {};
+  let code = 0;
+  let step = 0;
+  const source = SOURCE
+    .replace(/^import .*;$/gm, "")
+    .replace(/^export /gm, "")
+    .replaceAll("import.meta.url", JSON.stringify(pathToFileURL(entry).href));
+  try {
+    vm.runInNewContext(source, {
+      process: {
+        argv: ["node", entry, ...argv], env, platform,
+        cwd: () => "/virtual",
+        exit: (status) => { code = status; throw exit; },
+      },
+      path, os: { homedir: () => "/empty" }, fileURLToPath,
+      console: { log: () => {}, error: (message) => errors.push(message) },
+      spawnSync: (bin, args, options) => {
+        calls.push({ bin, args: Array.from(args), options: { ...options } });
+        if (args[0] === "--version") {
+          return version === null ? { status: 1 } : { status: 0, stdout: `${version}\n` };
+        }
+        return results[step++] ?? { status: 0 };
+      },
+    }, { timeout: 1000 });
+  } catch (error) {
+    if (error !== exit) throw error;
+  }
+  return { code, calls, errors, runs: calls.filter((call) => call.args[0] !== "--version") };
+}
 
 function mockSpawnFactory({ versions = { bun: "1.3.11" }, failures = new Set(), calls = [] } = {}) {
   const spawn = (bin, args, opts) => {
@@ -248,5 +286,137 @@ describe("Windows branch (arg arrays, no shell)", () => {
     assert.equal(out.ok, true);
     for (const c of calls) assert.equal(c.shell, false);
     assert.ok(calls.some((c) => c.args[0] === "test"));
+  });
+});
+
+
+describe("CLI argument and timeout regressions (mocked subprocesses)", () => {
+  it("forwards dev port options and leaves the server unbounded", () => {
+    const out = runCli(["dev", "--port", "5174"]);
+    assert.equal(out.code, 0);
+    assert.deepEqual(out.runs.map((call) => call.args), [["run", "--filter", "@hydra/web", "dev", "--port", "5174"]]);
+    assert.equal(out.runs[0].options.timeout, 0);
+    assert.equal(out.calls[0].options.timeout, 15000, "the version probe must remain bounded");
+  });
+
+  it("forwards test --watch and does not terminate the watcher after ten minutes", () => {
+    const out = runCli(["test", "--watch"]);
+    assert.equal(out.code, 0);
+    assert.deepEqual(out.runs[0].args, ["test", "apps/web/src", "apps/chrome-extension/src", "--watch"]);
+    assert.equal(out.runs[0].options.timeout, 0);
+  });
+
+  it("forwards test:e2e --list without turning it into a normal test run", () => {
+    const out = runCli(["test:e2e", "--list"]);
+    assert.equal(out.code, 0);
+    assert.deepEqual(out.runs[0].args, ["run", "--filter", "@hydra/web", "test:e2e", "--list"]);
+    assert.equal(out.runs[0].options.timeout, 600000);
+  });
+
+  for (const cmd of ["build", "typecheck", "lint"]) {
+    it(`appends ${cmd} options only to the final step, preserving chained-script semantics`, () => {
+      const args = ["--pretty", "false"];
+      const script = cmd === "build" ? "build" : "typecheck";
+      const out = runCli([cmd, ...args]);
+      assert.equal(out.code, 0);
+      assert.deepEqual(out.runs.map((call) => call.args), [
+        ["run", "--filter", "@hydra/web", script],
+        ["run", "--filter", "@hydra/chrome-extension", script, ...args],
+      ]);
+      assert.deepEqual(out.runs.map((call) => call.options.timeout), [600000, 600000]);
+    });
+
+    for (const flag of ["--watch", "-w"]) {
+      it(`leaves only the final ${cmd} ${flag} step unbounded`, () => {
+        const out = runCli([cmd, flag]);
+        assert.equal(out.code, 0);
+        assert.deepEqual(out.runs.map((call) => call.options.timeout), [600000, 0]);
+        assert.equal(out.runs[1].args.at(-1), flag);
+      });
+    }
+  }
+
+  for (const flag of ["--ui", "--debug"]) {
+    it(`leaves Playwright ${flag} interactive mode unbounded`, () => {
+      const out = runCli(["test:e2e", flag]);
+      assert.equal(out.code, 0);
+      assert.equal(out.runs[0].args.at(-1), flag);
+      assert.equal(out.runs[0].options.timeout, 0);
+    });
+  }
+
+  it("preserves empty arguments, whitespace, quotes, separators and metacharacters literally", () => {
+    const args = ["", "two words", "'single'", '"double"', "a;b", "$(never-run)", "`never-run`", "&&", "|", "*.test.ts", "a\nb", "--", "--watch"];
+    for (const platform of ["linux", "win32"]) {
+      const out = runCli(["test", ...args], { platform });
+      assert.equal(out.code, 0);
+      assert.deepEqual(out.runs[0].args, ["test", "apps/web/src", "apps/chrome-extension/src", ...args]);
+      assert.equal(out.runs[0].options.timeout, 600000, "--watch after -- is not an option");
+      for (const call of out.calls) assert.equal(call.options.shell, false);
+      assert.equal(out.runs[0].options.stdio, "inherit");
+    }
+  });
+
+  it("keeps one-shot commands bounded and defaults to the unchanged build sequence", () => {
+    for (const cmd of ["build", "test", "test:e2e", "typecheck", "lint"]) {
+      const out = runCli([cmd]);
+      assert.equal(out.code, 0);
+      assert.ok(out.runs.every((call) => call.options.timeout === 600000));
+      assert.deepEqual(out.runs.map((call) => call.args), getCommands("bun")[cmd].map((step) => step.args));
+    }
+    assert.deepEqual(runCli([]).runs.map((call) => call.args), getCommands("bun").build.map((step) => step.args));
+  });
+
+  it("does not disable the timeout for explicitly disabled compiler watch mode", () => {
+    for (const rest of [["--watch", "false"], ["-w", "false"], ["--watch", "--watch", "false"]]) {
+      const out = runCli(["typecheck", ...rest]);
+      assert.deepEqual(out.runs.map((call) => call.options.timeout), [600000, 600000]);
+      assert.deepEqual(out.runs[1].args.slice(4), rest);
+    }
+  });
+
+  it("rejects an unknown command before resolving or spawning Bun", () => {
+    const out = runCli(["unknown", "--watch"]);
+    assert.equal(out.code, 1);
+    assert.equal(out.calls.length, 0);
+    assert.match(out.errors.join("\n"), /unknown command/);
+  });
+
+  it("--ensure only probes, even if extra arguments are supplied", () => {
+    const out = runCli(["--ensure", "--watch"]);
+    assert.equal(out.code, 0);
+    assert.equal(out.calls.length, 1);
+    assert.equal(out.runs.length, 0);
+  });
+
+  it("preserves fail-fast exit codes and never reaches the second build step after failure", () => {
+    const out = runCli(["build", "--pretty", "false"], { results: [{ status: 7 }] });
+    assert.equal(out.code, 7);
+    assert.equal(out.runs.length, 1);
+    assert.deepEqual(out.runs[0].args, ["run", "--filter", "@hydra/web", "build"]);
+    assert.match(out.errors.join("\n"), /fail-fast, step 1\/2/);
+  });
+
+  it("surfaces a failing final step's exit code after forwarding its arguments", () => {
+    const out = runCli(["typecheck", "--pretty", "false"], { results: [{ status: 0 }, { status: 9 }] });
+    assert.equal(out.code, 9);
+    assert.equal(out.runs.length, 2);
+    assert.deepEqual(out.runs[1].args.slice(4), ["--pretty", "false"]);
+  });
+
+  it("fails closed on missing exit status, signal or spawn failure", () => {
+    for (const result of [{}, { status: null, signal: "SIGTERM" }, { status: null, error: { code: "ENOENT" } }]) {
+      const out = runCli(["build"], { results: [result] });
+      assert.equal(out.code, 1);
+      assert.equal(out.runs.length, 1);
+    }
+  });
+
+  it("keeps missing Bun and version mismatch fail-closed at the CLI boundary", () => {
+    for (const setup of [{ version: null }, { version: "9.9.9" }, { env: { BUN_VERSION: "latest" } }]) {
+      const out = runCli(["test", "--watch"], setup);
+      assert.equal(out.code, 1);
+      assert.equal(out.runs.length, 0);
+    }
   });
 });
