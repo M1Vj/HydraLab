@@ -1,6 +1,7 @@
 """Confidence boundaries and real SQLite cache restart regressions."""
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import sqlite3
 import tempfile
@@ -53,7 +54,7 @@ class DiscoveryConfidenceTests(unittest.TestCase):
             path = Path(directory) / "cache.db"
             writer = DiscoveryCache(db_path=path)
             writer.set_query("fixture", "synthetic query", [source])
-            with sqlite3.connect(path) as connection:
+            with closing(sqlite3.connect(path)) as connection:
                 payload = connection.execute(
                     "SELECT payload_json FROM discovery_cache_entries WHERE cache_key = ?",
                     (writer.query_key("fixture", "synthetic query"),),
