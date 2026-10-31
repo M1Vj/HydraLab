@@ -81,3 +81,53 @@ def test_release_channel_metadata_supports_three_channels():
         metadata = build_channel_metadata(channel=channel, version="1.4.0", artifact=f"HydraLab-{channel}.dmg")
         assert metadata.channel == channel
         assert channel_feed_path(channel) == f"releases/{channel}/latest.json"
+
+
+@pytest.mark.parametrize("spdx", ["", "   ", "()", "/", ",", "( / , )"])
+def test_license_gate_rejects_bundled_rows_without_license_identifiers(spdx):
+    findings = evaluate_license_rows(
+        [LicenseRow(name="missing-license", spdx=spdx, role="bundled-dependency")]
+    )
+    assert len(findings) == 1
+    assert findings[0].name == "missing-license"
+    assert findings[0].spdx == spdx
+    assert "missing SPDX" in findings[0].reason
+
+
+@pytest.mark.parametrize("role", ["reference-only", "dev-tool", "optional-non-bundled"])
+def test_license_gate_preserves_nonbundled_empty_license_exclusions(role):
+    assert evaluate_license_rows([LicenseRow(name="external", spdx="", role=role)]) == []
+
+
+def test_license_gate_blank_license_cli_fails_without_writing_evidence(tmp_path):
+    import subprocess
+
+    register = tmp_path / "ATTRIBUTION.md"
+    register.write_text(
+        "## Dependency Licensing Register\n\n"
+        "| Name | SPDX license | Provenance | Role |\n"
+        "| --- | --- | --- | --- |\n"
+        "| missing-license | | synthetic | bundled-dependency |\n",
+        encoding="utf-8",
+    )
+    evidence = tmp_path / "evidence.json"
+    result = subprocess.run(
+        [sys.executable, "scripts/license_gate.py", "--attribution", str(register),
+         "--evidence", str(evidence)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 1
+    assert "missing-license" in result.stderr
+    assert "missing SPDX" in result.stderr
+    assert "passed" not in result.stdout
+    assert not evidence.exists()
+
+
+@pytest.mark.parametrize("spdx", ["MIT", "Apache-2.0", "MIT OR Apache-2.0", "LGPLv3 or BSD (dual)"])
+def test_license_gate_preserves_known_license_acceptance(spdx):
+    assert evaluate_license_rows([LicenseRow(name="known", spdx=spdx, role="bundled-dependency")]) == []
+
+
+@pytest.mark.parametrize("spdx", ["UNKNOWN", "AGPL-3.0-only", " \t "])
+def test_license_gate_preserves_existing_rejections(spdx):
+    assert len(evaluate_license_rows([LicenseRow(name="unknown", spdx=spdx, role="bundled-dependency")])) == 1
