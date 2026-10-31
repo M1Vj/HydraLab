@@ -206,7 +206,7 @@ def result_from_dict(data: dict[str, Any]) -> DiscoveryResult:
         provider=str(data.get("provider") or "unknown"),
         retrieved_at=str(data.get("retrieved_at") or now_iso()),
         response_status=int(data.get("response_status") or 200),
-        confidence=float(data.get("confidence") or 0.5),
+        confidence=float(0.5 if data.get("confidence") in (None, "") else data["confidence"]),
         trust_level=str(data.get("trust_level") or TRUST_LEVEL_UNTRUSTED),
         query=str(data.get("query") or ""),
         duplicate_state=str(data.get("duplicate_state") or "unique"),
