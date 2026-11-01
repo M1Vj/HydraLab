@@ -11,6 +11,12 @@ BACKEND = Path(__file__).resolve().parents[1]
 GUARD = '''
 import sys
 
+# On Windows, Python 3.11 discovers OS metadata via the read-only `ver`
+# command. Populate this stdlib cache before guarding application imports.
+if sys.platform == "win32":
+    import platform
+    platform.uname()
+
 def reject_external_effects(event, args):
     if event in ("socket.connect", "socket.bind", "subprocess.Popen", "os.system"):
         raise AssertionError("Unexpected external effect: " + event)
@@ -59,6 +65,17 @@ class PackageImportBoundaryTests(unittest.TestCase):
             if no_state:
                 self.assertEqual(list(root.rglob("*")), [], "Import/help created persistent state")
             return result
+
+    def test_subprocess_guard_remains_active(self):
+        self.run_python('''
+            import subprocess
+            try:
+                subprocess.run([sys.executable, "-c", "raise SystemExit(99)"])
+            except AssertionError as error:
+                assert "subprocess.Popen" in str(error)
+            else:
+                raise AssertionError("Application subprocess guard was bypassed")
+        ''')
 
     def test_package_import_does_not_load_application(self):
         self.run_python('import hydra; assert "hydra.app" not in sys.modules')
