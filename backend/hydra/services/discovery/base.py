@@ -69,7 +69,7 @@ class DiscoveryResult:
             ("s2", self.s2_id),
             ("url", self.url),
         ):
-            normalized = normalize_identifier(value)
+            normalized = normalize_identifier(value, strip_arxiv_version=prefix == "arxiv")
             if normalized:
                 return f"{prefix}:{normalized}"
         return None
@@ -127,14 +127,16 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def normalize_identifier(value: str | None) -> str | None:
+def normalize_identifier(value: str | None, *, strip_arxiv_version: bool = False) -> str | None:
     if not value:
         return None
     normalized = value.strip()
     normalized = re.sub(r"^https?://(dx\.)?doi\.org/", "", normalized, flags=re.I)
     normalized = re.sub(r"^https?://openalex\.org/", "", normalized, flags=re.I)
     normalized = normalized.removeprefix("arXiv:")
-    normalized = re.sub(r"v\d+$", "", normalized)
+    # Version suffixes belong to arXiv IDs, not opaque DOI/provider IDs or URLs.
+    if strip_arxiv_version:
+        normalized = re.sub(r"v\d+$", "", normalized)
     normalized = normalized.strip().lower()
     return normalized or None
 
