@@ -50,13 +50,20 @@ class DiscoveryCache:
         self._query_entries[key] = entry
         self._store_entry(key, provider, query_hash(query), None, results, now)
         for result in results:
-            result_entry = CacheEntry(results=[result], created_at=now)
-            self._result_entries[result.id] = result_entry
-            self._store_entry(result.id, provider, query_hash(query), result.id, [result], now)
-            for exact in filter(None, [result.doi, result.arxiv_id, result.openalex_id, result.s2_id, result.url]):
-                exact_key = f"{provider}:id:{exact}".lower()
-                self._result_entries[exact_key] = result_entry
-                self._store_entry(exact_key, provider, query_hash(query), str(exact), [result], now)
+            self._set_result(provider, query, result, now)
+
+    def set_result(self, provider: str, query: str, result: DiscoveryResult) -> None:
+        """Cache identifier metadata without replacing a complete query result set."""
+        self._set_result(provider, query, result, time.time())
+
+    def _set_result(self, provider: str, query: str, result: DiscoveryResult, now: float) -> None:
+        result_entry = CacheEntry(results=[result], created_at=now)
+        self._result_entries[result.id] = result_entry
+        self._store_entry(result.id, provider, query_hash(query), result.id, [result], now)
+        for exact in filter(None, [result.doi, result.arxiv_id, result.openalex_id, result.s2_id, result.url]):
+            exact_key = f"{provider}:id:{exact}".lower()
+            self._result_entries[exact_key] = result_entry
+            self._store_entry(exact_key, provider, query_hash(query), str(exact), [result], now)
 
     def get_result(self, identifier: str) -> tuple[DiscoveryResult | None, int | None]:
         entry = self._result_entries.get(identifier) or self._result_entries.get(identifier.lower())
