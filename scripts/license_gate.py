@@ -85,6 +85,9 @@ def evaluate_license_rows(
         if row.spdx in allowed_spdx:
             continue
         tokens = _split_spdx_expression(row.spdx)
+        if not tokens:
+            findings.append(LicenseFinding(row.name, row.spdx, "missing SPDX license identifier"))
+            continue
         denied = [token for token in tokens if any(_matches_pattern(token, pattern) for pattern in denied_spdx_patterns)]
         if denied:
             findings.append(LicenseFinding(row.name, row.spdx, f"denied SPDX id(s): {', '.join(denied)}"))
