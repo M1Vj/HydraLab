@@ -97,6 +97,6 @@ class DiscoveryCoordinator:
             result = await self.limiter.call(provider.name, lambda provider=provider: provider.fetch_by_id(identifier, self.config))
             if result is not None:
                 result = result.with_query(query)
-                self.cache.set_query(provider.name, query, [result])
+                self.cache.set_result(provider.name, query, result)
                 return {"result": result.to_dict(), "cache_age_seconds": 0}
         return {"result": None, "cache_age_seconds": None}
