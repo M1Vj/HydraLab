@@ -28,6 +28,20 @@ def _norm(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
 
+def _norm_doi(value: Any) -> str:
+    """Compare DOI names with ASCII case folding, preserving their characters.
+
+    DOI Handbook (September 2025), section 4.3.4 restricts equivalence case folding to Basic Latin.
+    Punctuation and non-ASCII characters are part of the identifier, unlike
+    the lossy title normalization used for fuzzy matching.
+    """
+    if not _norm(value):
+        return ""
+    return str(value or "").translate(str.maketrans(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+    ))
+
+
 def _norm_arxiv(value: Any) -> str:
     raw = str(value or "").lower().strip()
     raw = re.sub(r"^arxiv[:_/]?", "", raw)
@@ -38,14 +52,14 @@ def _norm_arxiv(value: Any) -> str:
 def _identifiers(source: dict[str, Any]) -> dict[str, str]:
     ids: dict[str, str] = {}
     if source.get("doi"):
-        ids["doi"] = _norm(source["doi"])
+        ids["doi"] = _norm_doi(source["doi"])
     if source.get("arxiv_id"):
         ids["arxiv"] = _norm_arxiv(source["arxiv_id"])
     extra = source.get("identifiers")
     if isinstance(extra, dict):
         for key, value in extra.items():
             if value:
-                ids[str(key)] = _norm(value)
+                ids[str(key)] = _norm_doi(value) if str(key) == "doi" else _norm(value)
     for key in ("file_hash", "content_hash"):
         if source.get(key):
             ids[key] = _norm(source[key])
@@ -101,3 +115,4 @@ def find_duplicates(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     }
                 )
     return results
+
