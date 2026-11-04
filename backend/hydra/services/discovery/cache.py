@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import time
 import json
 import sqlite3
@@ -73,13 +74,13 @@ class DiscoveryCache:
         self._query_entries.clear()
         self._result_entries.clear()
         if self.persist:
-            with sqlite3.connect(self.db_path) as conn:
+            with closing(sqlite3.connect(self.db_path)) as conn:
                 conn.execute("delete from discovery_cache_entries")
                 conn.commit()
 
     def _ensure_table(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute(
                 """
                 create table if not exists discovery_cache_entries (
@@ -111,7 +112,7 @@ class DiscoveryCache:
             return
         expires_at = created_at + self.ttl_seconds
         payload = json.dumps([result.to_dict() for result in results], sort_keys=True)
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             conn.execute(
                 """
                 insert or replace into discovery_cache_entries
@@ -139,7 +140,7 @@ class DiscoveryCache:
     def _load_key(self, cache_key: str) -> CacheEntry | None:
         if not self.persist or not self.db_path.exists():
             return None
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             row = conn.execute(
                 "select payload_json, created_at, expires_at from discovery_cache_entries where cache_key = ?",
                 (cache_key,),

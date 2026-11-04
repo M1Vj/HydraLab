@@ -48,16 +48,16 @@ class DiscoveryCoordinator:
 
         async def run_provider(provider: SourceProvider) -> None:
             nonlocal any_cache_hit
-            cached, age = self.cache.get_query(provider.name, query)
-            if cached is not None:
-                any_cache_hit = True
-                results.extend(cached)
-                statuses.append({"provider": provider.name, "state": "cache-hit", "cache_age_seconds": age})
-                return
-            if offline_only or not scholarly_apis_enabled:
-                statuses.append({"provider": provider.name, "state": "offline"})
-                return
             try:
+                cached, age = self.cache.get_query(provider.name, query)
+                if cached is not None:
+                    any_cache_hit = True
+                    results.extend(cached)
+                    statuses.append({"provider": provider.name, "state": "cache-hit", "cache_age_seconds": age})
+                    return
+                if offline_only or not scholarly_apis_enabled:
+                    statuses.append({"provider": provider.name, "state": "offline"})
+                    return
                 provider_results = await self.limiter.call(provider.name, lambda: provider.search(query, self.config))
                 self.cache.set_query(provider.name, query, provider_results)
                 results.extend(provider_results)
