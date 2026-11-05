@@ -2732,7 +2732,7 @@ def create_app() -> FastAPI:
             session,
             query=query,
             source_scope=source_scope,
-            options=RetrievalOptions(offline_only=offline_only),
+            options=RetrievalOptions(offline_only=offline_only, query_filters=True),
         )
         hits = [hit.public_dict() for hit in result.hits]
         chunks = [hit["text"] for hit in hits]
