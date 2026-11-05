@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from hydra.database.models import LexicalIndexEntry, Source
 from hydra.database.repository import Repository
+from hydra.recipes.query import QuerySyntaxError, compile_local_query, compile_plain_query
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class RetrievalOptions:
     offline_only: bool = False
     g3_enabled: bool = False
     depth: str = "standard"
+    query_filters: bool = False
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,10 @@ async def retrieve_literature_hits(
     """Retrieve saved-source chunks without inventing source references."""
 
     options = options or RetrievalOptions()
+    try:
+        local_query = compile_local_query(query) if options.query_filters else compile_plain_query(query)
+    except QuerySyntaxError as exc:
+        return RetrievalResult(notices=[f"Invalid local search query: {exc}"])
     repo = Repository(session)
     citations = await repo.list_citations()
     citation_by_source: dict[str, str] = {}
@@ -85,7 +90,7 @@ async def retrieve_literature_hits(
             continue
         if allowed_source_ids is not None and row.source_id not in allowed_source_ids:
             continue
-        confidence = _lexical_confidence(query, row.text)
+        confidence = local_query.confidence(row.text)
         if confidence <= 0:
             continue
         lexical_hits.append(
@@ -169,14 +174,7 @@ def _json_value(raw: Any, fallback: Any) -> Any:
 
 
 def _lexical_confidence(query: str, text: str) -> float:
-    terms = {term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) > 2}
-    if not terms:
-        return 0.25 if text.strip() else 0.0
-    body = text.lower()
-    matched = sum(1 for term in terms if term in body)
-    if matched == 0:
-        return 0.0
-    return min(1.0, max(0.05, matched / len(terms)))
+    return compile_plain_query(query).confidence(text)
 
 
 def _depth_limit(depth: str) -> int:

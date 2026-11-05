@@ -44,7 +44,7 @@ Most research tools make you choose: a reference manager *or* an editor *or* a c
 
 - **Source discovery** across scholarly APIs — OpenAlex, Crossref, arXiv, and more.
 - **Document ingestion** via Docling plus a permissive light extractor, fed through an async ingestion queue into a local search index.
-- **Grounded, extractive retrieval** that returns passages with exact locators (page, section, char offset) and never invents a reference.
+- **Grounded, extractive retrieval** that returns passages with exact locators (page, section, char offset) and never invents a reference. [Offline query filters](docs/offline-search.md) narrow saved-source retrieval with required phrases and excluded words or phrases.
 - **A citations / claims / evidence graph**: BibTeX, CSL-JSON, and RIS import & export; APA and IEEE rendering; confidence-based duplicate detection; and source merging with referential-integrity repair.
 - **A knowledge graph** connecting notes, sources, claims, and tasks across the project.
 

@@ -202,6 +202,7 @@ async def execute_literature_review(
         offline_only=offline_only,
         g3_enabled=g3_enabled,
         depth=inputs.depth,
+        query_filters=True,
     )
     stages = {
         StageEnum.GENERATE: LiteratureGenerateStage(
