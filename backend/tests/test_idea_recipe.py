@@ -44,7 +44,7 @@ from hydra.recipes.idea_generation import (
     run_idea_recipe,
     unresolved_evidence_links,
 )
-from hydra.database.models import LexicalIndexEntry
+from hydra.database.models import Claim, EvidenceLink, LexicalIndexEntry, Source
 
 
 @pytest_asyncio.fixture
@@ -704,3 +704,93 @@ async def test_generate_grounds_in_retrieval_relevant_source(session):
         assert source_ids == {relevant}
         # And retrieval chunk provenance is carried on the link.
         assert all(link.get("chunk_id") == "chunk-rel" for link in json.loads(candidate.evidence_links))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_id", ["alpha", "default"])
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("has_local_sources", [False, True])
+async def test_idea_grounding_stays_in_project(session, project_id, indexed, has_local_sources):
+    """Retrieval and unindexed fallback share the same project boundary."""
+    sources = [
+        Source(id=f"a-foreign-{i:02}", project_id="beta", title="Foreign attention")
+        for i in range(12)
+    ]
+    expected = set()
+    if has_local_sources:
+        sources.append(Source(id="z-local", project_id=project_id, title="Local attention"))
+        expected.add("z-local")
+        if project_id == "default":
+            sources.append(Source(id="z-legacy", project_id=None, title="Legacy attention"))
+            expected.add("z-legacy")
+    if project_id != "default":
+        sources.extend([
+            Source(id="a-default", project_id="default", title="Default attention"),
+            Source(id="a-legacy", project_id=None, title="Legacy attention"),
+        ])
+    sources.append(Source(id="a-trashed", project_id=project_id, title="Deleted attention", trashed=True))
+    session.add_all(sources)
+    await session.commit()
+    if indexed:
+        session.add_all([
+            LexicalIndexEntry(source_id=source.id, chunk_id=f"chunk-{source.id}", text="attention")
+            for source in sources
+        ])
+        await session.commit()
+
+    result = await run_idea_recipe(
+        session,
+        project_id=project_id,
+        run_input=IdeaRunInput(topic="attention"),
+        stage_toggles={"generate": True, "review": False, "compare": False, "evolve": False},
+    )
+    candidates = (await session.exec(select(IdeaCandidate).where(IdeaCandidate.run_id == result.run_id))).all()
+    assert candidates
+    for candidate in candidates:
+        assert candidate.project_id == project_id
+        assert set(json.loads(candidate.required_sources)) == expected
+        links = json.loads(candidate.evidence_links)
+        assert {link["source_id"] for link in links} == expected
+        if indexed:
+            assert all(link.get("chunk_id") == f"chunk-{link['source_id']}" for link in links)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_id", ["alpha", "default"])
+async def test_idea_evidence_requires_local_claim_and_source(session, project_id):
+    """A cross-project evidence relation cannot enter local candidate grounding."""
+    session.add_all([
+        Source(id="local", project_id=project_id, title="Local attention"),
+        Source(id="foreign", project_id="beta", title="Foreign attention"),
+        Claim(id="local-claim", project_id=project_id, text="Local claim"),
+        Claim(id="foreign-claim", project_id="beta", text="Foreign claim"),
+        Claim(id="legacy-claim", project_id=None, text="Legacy claim"),
+    ])
+    await session.commit()
+    for evidence_id, claim_id, source_id in [
+        ("local-evidence", "local-claim", "local"),
+        ("foreign-claim-evidence", "foreign-claim", "local"),
+        ("foreign-source-evidence", "local-claim", "foreign"),
+        ("legacy-evidence", "legacy-claim", "local"),
+    ]:
+        session.add(EvidenceLink(
+            id=evidence_id, claim_id=claim_id, source_id=source_id,
+            passage="Synthetic attention evidence", support="supports", confidence=0.9,
+            review_status="accepted",
+        ))
+    await session.commit()
+
+    grounding = await _load_grounding(session, project_id)
+    expected_evidence = {"local-evidence"}
+    if project_id == "default":
+        expected_evidence.add("legacy-evidence")
+    assert set(grounding.source_ids) == {"local"}
+    assert {sid: set(ids) for sid, ids in grounding.evidence_by_source.items()} == {"local": expected_evidence}
+
+    result = await run_idea_recipe(session, project_id=project_id, run_input=IdeaRunInput(topic="attention"))
+    candidates = (await session.exec(select(IdeaCandidate).where(IdeaCandidate.run_id == result.run_id))).all()
+    assert candidates
+    for candidate in candidates:
+        links = json.loads(candidate.evidence_links)
+        assert links
+        assert all(link["source_id"] == "local" and link["evidence_id"] in expected_evidence for link in links)

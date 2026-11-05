@@ -217,17 +217,15 @@ class _Grounding:
 
 async def _load_grounding(session: AsyncSession, project_id: str) -> _Grounding:
     repo = Repository(session)
-    sources = await repo.list_sources()
-    source_ids = [
-        s["id"]
-        for s in sources
-        if not s.get("trashed") and s.get("project_id") in (None, project_id, "default")
-    ]
-    if not source_ids:  # fall back to any live source in the store
-        source_ids = [s["id"] for s in sources if not s.get("trashed")]
+    # Reuse the repository's project boundary, including legacy NULL rows only
+    # for the default project. An empty project must remain ungrounded.
+    sources = await repo.list_sources(project_id=project_id)
+    source_ids = [source["id"] for source in sources]
+    allowed_source_ids = set(source_ids)
     evidence_by_source: dict[str, list[str]] = {}
-    for ev in await repo.list_evidence():
-        evidence_by_source.setdefault(ev["source_id"], []).append(ev["id"])
+    for ev in await repo.list_evidence(project_id=project_id):
+        if ev["source_id"] in allowed_source_ids:
+            evidence_by_source.setdefault(ev["source_id"], []).append(ev["id"])
     return _Grounding(source_ids=source_ids, evidence_by_source=evidence_by_source)
 
 
@@ -735,7 +733,7 @@ class IdeaGenerateStage(_IdeaStageBase):
             result = await retrieve_literature_hits(
                 self.session,
                 query=topic,
-                source_scope={"kind": "all-project"},
+                source_scope={"kind": "source-ids", "source_ids": self.grounding.source_ids},
                 options=RetrievalOptions(),
             )
         except Exception:
