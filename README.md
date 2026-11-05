@@ -52,7 +52,7 @@ Most research tools make you choose: a reference manager *or* an editor *or* a c
 
 - **Per-project named chats** with bring-your-own-key providers (OpenAI, OpenRouter) and a token budget.
 - **MCP tool support** (HTTP transport) so the assistant can operate real project tooling.
-- **Orchestrated research recipes**: literature review, paper critique with related-work analysis, and idea generation with ranking.
+- **Orchestrated research recipes**: literature review, paper critique, [offline related-work excerpts](docs/offline-related-work.md) from saved quotation evidence, and idea generation with ranking.
 - **Every agent run is staged and traceable**, gated by approvals and a Review Inbox — nothing lands in your project without your sign-off.
 - **A skills registry** and a project-local assistant context file (`HYDRA.md`).
 
