@@ -135,9 +135,11 @@ def _coerce_field(key: str, value: Any) -> Any:
             raise FormatValidationError(key, f"line_spacing {value!r} out of range (0, 5]")
         return spacing
     if key == "columns":
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+            raise FormatValidationError(key, f"columns {value!r} must be 1 or 2")
         try:
             columns = int(value)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise FormatValidationError(key, f"invalid columns {value!r}") from exc
         if columns not in {1, 2}:
             raise FormatValidationError(key, f"columns {value!r} must be 1 or 2")
